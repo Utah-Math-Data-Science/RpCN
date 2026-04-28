@@ -1,0 +1,50 @@
+[project]
+name = "toy"
+version = "0.1.0"
+description = "RpCN toy example"
+readme = "README.rst"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Taos Transue", email = "taos.transue@utah.edu" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "seaborn>=0.13.2",
+    "spt-guidance>=0.1.0",
+    "torch>=2.11.0",
+    "tqdm>=4.67.1",
+]
+
+[project.scripts]
+toy = "toy:main"
+toy-train = "toy.train_toy.train:main"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+link-mode = "symlink"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch" },
+]
+hydra-orm = [
+    { git = "https://github.com/reepoi/hydra-orm" },
+]
+spt-guidance = [
+    { path = "../Mean_Flow_Steering", editable = true },
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.11.10",
+    "pytest>=8.0.0",
+]
