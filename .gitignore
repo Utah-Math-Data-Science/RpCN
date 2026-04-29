@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.sqlite
+generated/
+*/generated/
+*.png
+*.jpg
+*.jpeg
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+inverse/model/checkpoint/
