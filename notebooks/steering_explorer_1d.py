@@ -8,8 +8,10 @@ app = marimo.App(width="full")
 def _():
     import math
 
-    import matplotlib.pyplot as plt
     import marimo as mo
+    import polars as pl
+    import seaborn as sns
+    sns.set_theme(style="white", font_scale=1.7)
     import spt_guidance.torch.fk_steering as fk_steering
     import spt_guidance.torch.rpcn as rpcn
     import torch
@@ -22,8 +24,9 @@ def _():
         fk_steering,
         math,
         mo,
-        plt,
+        pl,
         rpcn,
+        sns,
         torch,
     )
 
@@ -40,20 +43,43 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(gmm_density, means, mo, plt, stds, torch, weights, x_grid):
-    gmm_fig, gmm_ax = plt.subplots(figsize=(10, 3.5))
-    gmm_ax.plot(x_grid.numpy(), gmm_density.numpy(), color="#0b7285", lw=2.0, label="GMM density")
-    marker_y = torch.zeros_like(means)
-    gmm_ax.scatter(means.numpy(), marker_y.numpy(), c="#1971c2", s=60, label="mode means")
-    for i in range(means.shape[0]):
-        gmm_ax.text(float(means[i]), 0.0, f"w={weights[i]:.2f}, s={stds[i]:.2f}", fontsize=8, ha="center", va="bottom")
+def _(gmm_density, means, mo, pl, sns, stds, weights, x_grid):
+    gmm_df = pl.DataFrame(
+        {
+            "x": x_grid.cpu().numpy().tolist(),
+            "density": gmm_density.cpu().numpy().tolist(),
+        }
+    )
+    modes_df = pl.DataFrame(
+        {
+            "mean": means.cpu().numpy().tolist(),
+            "std": stds.cpu().numpy().tolist(),
+            "weight": weights.cpu().numpy().tolist(),
+        }
+    ).with_row_index("mode")
+
+    _g = sns.relplot(
+        data=gmm_df.to_dict(as_series=False),
+        x="x",
+        y="density",
+        kind="line",
+        height=3.5,
+        aspect=2.8,
+        color="tab:red",
+        linewidth=2.0,
+    )
+    gmm_ax = _g.axes.flat[0]
+    zero_y = [0.0] * len(modes_df)
+    sns.scatterplot(x=modes_df["mean"].to_numpy(), y=zero_y, ax=gmm_ax, color="#1971c2", s=60, label="mode means")
+    for row in modes_df.iter_rows(named=True):
+        gmm_ax.text(float(row["mean"]), 0.0, f"w={row['weight']:.2f}, s={row['std']:.2f}", fontsize=8, ha="center", va="bottom")
     gmm_ax.set_title("GMM Preview")
     gmm_ax.set_xlabel("x")
     gmm_ax.set_ylabel("density")
     gmm_ax.grid(alpha=0.2)
     gmm_ax.legend(loc="upper right")
-    gmm_fig.tight_layout()
-    gmm_view = mo.vstack([mo.md("## GMM Preview"), mo.as_html(gmm_fig)])
+    _g.figure.tight_layout()
+    gmm_view = mo.vstack([mo.md("## GMM Preview"), mo.as_html(_g.figure)])
     gmm_view
     return
 
@@ -67,15 +93,22 @@ def _(mo):
 @app.cell
 def _(mo, n_modes):
     mode_count = int(n_modes.value)
+    default_std = 0.7
+    if mode_count % 2 == 0:
+        mean_inits_half = [i - .5 for i in range(1, (mode_count // 2) + 1)]
+    else:
+        mean_inits_half = [i for i in range((mode_count + 1) // 2)]
+    mean_inits = sorted(set([-i for i in mean_inits_half] + mean_inits_half))
+    print(mean_inits)
     mean_array = mo.ui.array(
         [
-            mo.ui.number(start=-20.0, stop=20.0, step=0.1, value=float(-6.0 + 4.0 * idx), label=f"mean_{idx}")
+            mo.ui.number(start=-20.0, stop=20.0, step=0.1, value=float(2 * 3 * default_std * mean_inits[idx]), label=f"mean_{idx}")
             for idx in range(mode_count)
         ]
     )
     std_array = mo.ui.array(
         [
-            mo.ui.number(start=0.05, stop=6.0, value=0.7, label=f"std_{idx}")
+            mo.ui.number(start=0.05, stop=6.0, step=0.05, value=0.7, label=f"std_{idx}")
             for idx in range(mode_count)
         ]
     )
@@ -100,23 +133,45 @@ def _(mo, n_modes):
 
 
 @app.cell(hide_code=True)
-def _(mo, plt, reward_values, x_grid):
-    reward_fig, reward_ax = plt.subplots(figsize=(10, 3.5))
-    reward_ax.plot(x_grid.numpy(), reward_values.numpy(), color="#c92a2a", lw=2.0)
+def _(mo, pl, reward_values, sns, x_grid):
+    reward_df = pl.DataFrame(
+        {
+            "x": x_grid.cpu().numpy().tolist(),
+            "reward": reward_values.cpu().numpy().tolist(),
+        }
+    )
+    _g = sns.relplot(
+        data=reward_df.to_dict(as_series=False),
+        x="x",
+        y="reward",
+        kind="line",
+        height=3.5,
+        aspect=10 / 3.5,
+        color="tab:red",
+        linewidth=2.0,
+    )
+    reward_ax = _g.axes.flat[0]
     reward_ax.set_title("Reward Preview")
     reward_ax.set_xlabel("x")
     reward_ax.set_ylabel("reward")
     reward_ax.grid(alpha=0.2)
-    reward_fig.tight_layout()
-    reward_view = mo.vstack([mo.md("## Reward Preview"), mo.as_html(reward_fig)])
+    _g.figure.tight_layout()
+    reward_view = mo.vstack([mo.md("## Reward Preview"), mo.as_html(_g.figure)])
     reward_view
     return
 
 
 @app.cell
 def _(torch):
+    def reward_gauss(x):
+        return torch.exp(
+            -(
+                (x - 3) / .5
+            ).square()
+        )
     def reward_fn(x: torch.Tensor) -> torch.Tensor:
-        r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
+        r = -reward_gauss(-x) + reward_gauss(x)
+        # r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
         # r = 1e6 * x**2
         # r = 1000 * r
         return r.squeeze()
@@ -124,71 +179,108 @@ def _(torch):
     return (reward_fn,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     fk_final,
     gmm_density,
     mo,
-    plt,
+    pl,
     reward_values,
     rpcn_final,
+    sns,
     unsteered_samples,
     x_grid,
 ):
-    import seaborn as sns
-    sns.set_theme(style='white', font_scale=1.8)
     has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
+    comp_fig = None
     if has_samples_plot:
-        sample_dicts = [
-            # dict(label="Base", samples=unsteered_samples, color="tab:grey"),
-            dict(label="FK Steering", samples=fk_final, color="tab:blue"),
-            dict(label="RpCN Steering", samples=rpcn_final, color="tab:orange"),
-        ]
-        comp_fig, comp_axes = plt.subplots(1, len(sample_dicts), figsize=(10, 5), sharey=True)
-        # labels = ["Base", "FK Steering", "RpCN Steering"]
-        # sample_sets = [unsteered_samples, fk_final, rpcn_final]
-        # colors = ["tab:grey", "tab:blue", "tab:orange"]
-        for comp_ax, d in zip(comp_axes, sample_dicts):
-            label = d['label']
-            samples = d['samples']
-            color = d['color']
-            if samples is not None:
-                comp_ax.hist(samples[:, 0].cpu().numpy(), bins=60, density=True, alpha=0.7, color=color,
-                             # label=f"{label} samples",
-                             histtype='stepfilled',
-                             linewidth=0)
-            else:
-                comp_ax.text(0.5, 0.5, "Not run", transform=comp_ax.transAxes, ha="center", va="center", fontsize=12)
-            comp_ax.plot(x_grid.numpy(), gmm_density.numpy(), color="black", lw=3.0, label="Base density")
-            reward_scaled = reward_values.numpy()
-            reward_scaled = (reward_scaled - reward_scaled.min()) / (reward_scaled.max() - reward_scaled.min() + 1e-8)
-            reward_scaled = reward_scaled * gmm_density.max().item()
-            comp_ax.plot(x_grid.numpy(), reward_scaled, color="tab:red", lw=3, linestyle="--", label="Reward (scaled)")
-            # comp_ax.set_title(label)
-            # comp_ax.set_xlabel("x")
-            comp_ax.grid()
-            # comp_ax.grid(alpha=0.2)
-            # comp_ax.set_ylim(0, gmm_density.max() + min(gmm_density.max() * .05, .05))
-            comp_ax.yaxis.set_tick_params(labelleft=True)
-            comp_ax.margins(0)
-        comp_axes[0].set_ylabel("Density")
-        handles, legend_labels = comp_axes[0].get_legend_handles_labels()
-        comp_fig.legend(handles, legend_labels, loc="upper center", ncol=3, frameon=True, fancybox=True)
-        comp_fig.tight_layout(rect=[0, 0, 1, 0.9])
-        comparison_view = mo.vstack([mo.md("## Sample Comparison"), mo.as_html(comp_fig)])
+        method_order = ["Unsteered", "FK Steering", "RpCN Steering"]
+        sample_frames = []
+        if unsteered_samples is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["Unsteered"] * unsteered_samples.shape[0], "x": unsteered_samples[:, 0].cpu().numpy().tolist()})
+            )
+        if fk_final is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["FK Steering"] * fk_final.shape[0], "x": fk_final[:, 0].cpu().numpy().tolist()})
+            )
+        if rpcn_final is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["RpCN Steering"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()})
+            )
+        samples_df = pl.concat(sample_frames) if sample_frames else pl.DataFrame({"method": [], "x": []})
+
+        reward_scaled = reward_values.cpu().numpy()
+        reward_scaled = (reward_scaled - reward_scaled.min()) / (reward_scaled.max() - reward_scaled.min() + 1e-8)
+        reward_scaled = reward_scaled * gmm_density.max().item()
+        overlay_df = pl.DataFrame(
+            {
+                "x": x_grid.cpu().numpy().tolist(),
+                "density": gmm_density.cpu().numpy().tolist(),
+                "reward_scaled": reward_scaled.tolist(),
+            }
+        )
+        _g = (
+            sns.displot(
+                kind='hist',
+                data=samples_df,
+                x='x',
+                hue='method',
+                col='method',
+                col_order=method_order,
+                bins=60,
+                stat='density',
+                element='step',
+                common_norm=False,
+                legend=False,
+            )
+            .set(
+                ylim=(0, gmm_density.max() * 1.25),
+                # yscale='log',
+            )
+        )
+        for (r, c, h), _ in _g.facet_data():
+            ax = _g.axes[r, c]
+            sns.lineplot(
+                data=overlay_df,
+                x='x',
+                y='density',
+                color='black',
+                ax=ax,
+                linewidth=3,
+                label='Base density',
+            )
+            sns.lineplot(
+                data=overlay_df,
+                x='x',
+                y='reward_scaled',
+                color='tab:red',
+                ax=ax,
+                linewidth=3,
+                linestyle='--',
+                label='Reward (scaled)',
+            )
+            ax.set_xlabel('')
+            ax.get_legend().remove()
+        _g.set_titles("{col_name}")
+        # _g.axes.flat[0].set_ylabel("Density")
+        handles, legend_labels = _g.axes.flat[0].get_legend_handles_labels()
+        _g.figure.legend(handles, legend_labels, loc="upper center", ncol=3, frameon=True, fancybox=True)
+        _g.figure.tight_layout(rect=[0, 0, 1, 0.90])
+        comparison_view = mo.vstack([mo.md("## Sample Comparison"), mo.as_html(_g)])
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
     comparison_view
-    return (comp_fig,)
-
-
-@app.cell
-def _(comp_fig):
-    comp_fig.savefig('Toy.pdf', format='pdf', bbox_inches='tight', pad_inches=0.06)
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
+def _():
+    # comp_fig.savefig('Toy.pdf', format='pdf', bbox_inches='tight', pad_inches=0.06)
+    return
+
+
+@app.cell
 def _(mo):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
@@ -212,14 +304,14 @@ def _(mo):
     n_grid = mo.ui.number(start=100, stop=4000, step=100, value=1200, label="plot_grid")
 
     fk_n_chains = mo.ui.number(start=1, stop=64, step=1, value=20, label="fk_n_chains")
-    fk_inverse_temperature = mo.ui.number(start=0.00, stop=20.0, step=0.05, value=1.0, label="fk_inverse_temperature")
+    fk_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=1.0, label="fk_inverse_temperature")
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
 
     rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=20, label="rpcn_n_chains")
     rpcn_update_count = mo.ui.number(start=1, stop=200, step=1, value=5, label="rpcn_update_count")
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
-    rpcn_inverse_temp_max = mo.ui.number(start=0.00, stop=20.0, step=0.05, value=1.0, label="rpcn_inverse_temp_max")
+    rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=1.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
 
     run_unsteered = mo.ui.run_button(label="Unsteered")
@@ -266,44 +358,36 @@ def _(mo):
 
 
 @app.cell
-def _(fk_final, mo, reward_fn, rpcn_final, torch, unsteered_samples):
+def _(fk_final, mo, pl, reward_fn, rpcn_final, torch, unsteered_samples):
     has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
     if has_samples_stats:
-        def reward_mean(samples):
-            vals = []
-            for i in range(samples.shape[0]):
-                vals.append(torch.as_tensor(reward_fn(samples[i, 0]), dtype=torch.float32))
-            return float(torch.stack(vals).mean().item())
-
-        def reward_max(samples):
-            vals = []
-            for i in range(samples.shape[0]):
-                vals.append(torch.as_tensor(reward_fn(samples[i, 0]), dtype=torch.float32))
-            return float(torch.stack(vals).max().item())
-
-        def stats_dict(name, samples):
-            x = samples[:, 0].cpu()
-            q = torch.quantile(x, torch.tensor([0.05, 0.5, 0.95]))
-            return {
-                "method": name,
-                "count": int(samples.shape[0]),
-                # "mean": float(x.mean().item()),
-                # "std": float(x.std(unbiased=False).item()),
-                "q05": float(q[0].item()),
-                "q50": float(q[1].item()),
-                "q95": float(q[2].item()),
-                "reward_mean": reward_mean(samples),
-                "reward_max": reward_max(samples),
-            }
-
-        stats_rows = []
+        method_frames = []
         if unsteered_samples is not None:
-            stats_rows.append(stats_dict("Unsteered", unsteered_samples))
+            method_frames.append(pl.DataFrame({"method": ["Unsteered"] * unsteered_samples.shape[0], "x": unsteered_samples[:, 0].cpu().numpy().tolist()}))
         if fk_final is not None:
-            stats_rows.append(stats_dict("FK", fk_final))
+            method_frames.append(pl.DataFrame({"method": ["FK"] * fk_final.shape[0], "x": fk_final[:, 0].cpu().numpy().tolist()}))
         if rpcn_final is not None:
-            stats_rows.append(stats_dict("RpCN", rpcn_final))
-        stats_view = mo.vstack([mo.md("## Summary Statistics"), mo.ui.table(stats_rows)])
+            method_frames.append(pl.DataFrame({"method": ["RpCN"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()}))
+        stats_df = pl.concat(method_frames)
+
+        reward_x = torch.tensor(stats_df["x"].to_numpy(), dtype=torch.float32)
+        reward_vals = torch.vmap(reward_fn)(reward_x).detach().cpu().numpy().tolist()
+        stats_df = stats_df.with_columns(pl.Series("reward", reward_vals))
+
+        summary = (
+            stats_df.group_by("method")
+            .agg(
+                pl.len().alias("count"),
+                pl.col("x").quantile(0.05).alias("q05"),
+                pl.col("x").quantile(0.50).alias("q50"),
+                pl.col("x").quantile(0.95).alias("q95"),
+                pl.col("reward").mean().alias("reward_mean"),
+                pl.col("reward").max().alias("reward_max"),
+                pl.col("reward").min().alias("reward_min"),
+            )
+            .sort("method", descending=True)
+        )
+        stats_view = mo.vstack([mo.md("## Summary Statistics"), mo.ui.table(summary.to_dicts())])
     else:
         stats_view = mo.md("Summary statistics will appear after running at least one sampler.")
     stats_view

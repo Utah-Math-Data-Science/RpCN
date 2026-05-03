@@ -1,30 +1,36 @@
 # AGENTS
 
-## Repo Reality (verify first)
-- This is a small Python project managed with `uv` (`pyproject.toml`, `uv.lock`), with source under `src/toy/`.
-- `README.rst` is empty; treat code + `pyproject.toml` as source of truth.
-- There are currently no test, lint, typecheck, CI, or pre-commit configs in this repo.
+## Current repo reality
+- Active code is Hydra + hydra-orm steering experiments under `src/toy/` and `src/conf/`.
+- `README.rst` is empty; trust code/config over docs.
+- `pyproject.toml` script entrypoints are stale: `toy = "toy:main"` and `toy-train = "toy.train_toy.train:main"` do not exist in this tree. Run file paths directly with `uv run python ...`.
 
-## Setup / Dependencies
-- Python requirement is `>=3.13`.
-- Install with `uv sync`.
-- `spt-guidance` is a local editable dependency at `../Mean_Flow_Steering`; many steering scripts depend on it. If that sibling repo is missing, steering code will not run.
-- `torch` is resolved from the custom `pytorch` index (`https://download.pytorch.org/whl/cu128`).
+## Setup and dependencies
+- Python `>=3.13`; install with `uv sync`.
+- `spt-guidance` is a local editable dependency at `../Mean_Flow_Steering`; steering runs fail if that sibling repo is missing.
+- `torch` is pinned to the custom `pytorch` index in `pyproject.toml`.
 
-## Entry Points That Matter
-- Training code lives in `src/toy/train_toy/`.
-- Steering/sampling code lives in `src/toy/steer_toy/`.
-- Do not rely on `uv run toy`: `pyproject.toml` points to `toy:main`, but no `main()` exists in `src/toy/`.
+## Real entrypoint and command shape
+- Main entrypoint: `src/toy/main.py`.
+- Canonical run pattern:
+  - `uv run python src/toy/main.py +experiment=GMM steering=RpCN steering.pcn_update_count=50`
+- `experiment` is a preset group (`conf/experiment/GMM.yaml`) that selects a `setting` schema (`conf/setting/GMMExperiment.yaml` -> `_GMMExperiment`).
+- The experiment preset file must stay `# @package _global_`; otherwise Hydra composition can fail with key errors.
+- Keep defaults in structured configs (`src/conf/*.py`), not duplicated in preset YAML wrappers.
+- `steering` is required (`Conf.defaults` sets it to `MISSING`), so always pass `steering=Unsteered|FK|RpCN` or provide it via a preset.
 
-## Import + Execution Gotchas
-- Use Python import grouping/order consistently: built-in imports first, then third-party imports, then local/package imports, with one blank line between groups.
-- **Important:** use absolute package imports in training code (e.g., `from toy.train_toy.distributions import ...`, `from toy.train_toy.model import ...`).
-- Running training as a file path (e.g., `python src/toy/train_toy/train.py`) requires the `toy` package to be importable in the active environment (typically via `uv sync`).
-- Use absolute package imports in steering code (e.g., `from toy.steer_toy.log_reward import ...`, `from toy.steer_toy.model.model import ...`).
-- Running steering as a file path (e.g., `python src/toy/steer_toy/RpCN_sample.py`) requires the `toy` package to be importable in the active environment (typically via `uv sync`).
-- `src/toy/train_toy/` and `src/toy/steer_toy/model/` each define a `DiffusionModel`; keep architectures in sync if either copy changes.
+## Hydra/hydra-orm wiring quirks
+- Structured config tables are in `src/conf/conf.py`, `src/conf/experiment.py`, `src/conf/steering.py`.
+- `Conf.setting` is persisted and typed as `GMMExperiment`; `Conf.score_model` is a separate persisted table.
+- `vmap_chunk_size` is intentionally non-persisted (`field(default=8192)`), not an ORM column.
+- `get_run_dir()` rejects Hydra multirun flags (`-m` / `--multirun`); use single-run invocations.
 
-## Artifact / Path Assumptions
-- Training saves `diffusion_gmm_model.pt` in the current working directory.
-- Steering scripts load checkpoint from `model/diffusion_gmm_model.pt` relative to their runtime working directory.
-- `plot_samples` in `src/toy/steer_toy/utils.py` writes to `generated/<name>` and does not create the directory.
+## Outputs and logging
+- Runs persist config rows via `orm.instantiate_and_insert_config(...)` and write to `generated/runs/<alt_id>/`.
+- Current artifact contract is a single file: `samples.csv` with columns `sample_id,x,reward`.
+- Logging style mirrors DAFM: command, pretty-printed resolved config, output directory, saved artifact path.
+
+## Verification commands that reflect current state
+- Syntax check: `uv run python -m compileall src`
+- Steering smoke test: `uv run python src/toy/main.py +experiment=GMM steering=RpCN steering.pcn_update_count=5 device=cpu`
+- `uv run pytest -q` currently has no active test modules after removing stale `train_toy`/`steer_toy` tests.
