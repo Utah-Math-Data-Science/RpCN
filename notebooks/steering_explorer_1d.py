@@ -64,18 +64,18 @@ def _(mo):
     return (n_modes,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(mo, n_modes):
     mode_count = int(n_modes.value)
     mean_array = mo.ui.array(
         [
-            mo.ui.slider(start=-20.0, stop=20.0, step=0.1, value=float(-6.0 + 4.0 * idx), label=f"mean_{idx}")
+            mo.ui.number(start=-20.0, stop=20.0, step=0.1, value=float(-6.0 + 4.0 * idx), label=f"mean_{idx}")
             for idx in range(mode_count)
         ]
     )
     std_array = mo.ui.array(
         [
-            mo.ui.slider(start=0.05, stop=6.0, step=0.05, value=0.7, label=f"std_{idx}")
+            mo.ui.number(start=0.05, stop=6.0, value=0.7, label=f"std_{idx}")
             for idx in range(mode_count)
         ]
     )
@@ -117,12 +117,14 @@ def _(mo, plt, reward_values, x_grid):
 def _(torch):
     def reward_fn(x: torch.Tensor) -> torch.Tensor:
         r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
+        # r = 1e6 * x**2
+        # r = 1000 * r
         return r.squeeze()
 
     return (reward_fn,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     fk_final,
     gmm_density,
@@ -133,42 +135,65 @@ def _(
     unsteered_samples,
     x_grid,
 ):
+    import seaborn as sns
+    sns.set_theme(style='white', font_scale=1.8)
     has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
     if has_samples_plot:
-        comp_fig, comp_axes = plt.subplots(1, 3, figsize=(18, 4), sharey=True)
-        labels = ["Unsteered", "FK", "RpCN"]
-        sample_sets = [unsteered_samples, fk_final, rpcn_final]
-        colors = ["#495057", "#d9480f", "#2b8a3e"]
-        for comp_ax, label, samples, color in zip(comp_axes, labels, sample_sets, colors):
+        sample_dicts = [
+            # dict(label="Base", samples=unsteered_samples, color="tab:grey"),
+            dict(label="FK Steering", samples=fk_final, color="tab:blue"),
+            dict(label="RpCN Steering", samples=rpcn_final, color="tab:orange"),
+        ]
+        comp_fig, comp_axes = plt.subplots(1, len(sample_dicts), figsize=(10, 5), sharey=True)
+        # labels = ["Base", "FK Steering", "RpCN Steering"]
+        # sample_sets = [unsteered_samples, fk_final, rpcn_final]
+        # colors = ["tab:grey", "tab:blue", "tab:orange"]
+        for comp_ax, d in zip(comp_axes, sample_dicts):
+            label = d['label']
+            samples = d['samples']
+            color = d['color']
             if samples is not None:
-                comp_ax.hist(samples[:, 0].cpu().numpy(), bins=60, density=True, alpha=0.45, color=color, label=f"{label} samples")
+                comp_ax.hist(samples[:, 0].cpu().numpy(), bins=60, density=True, alpha=0.7, color=color,
+                             # label=f"{label} samples",
+                             histtype='stepfilled',
+                             linewidth=0)
             else:
                 comp_ax.text(0.5, 0.5, "Not run", transform=comp_ax.transAxes, ha="center", va="center", fontsize=12)
-            comp_ax.plot(x_grid.numpy(), gmm_density.numpy(), color="#0b7285", lw=2.0, label="GMM density")
+            comp_ax.plot(x_grid.numpy(), gmm_density.numpy(), color="black", lw=3.0, label="Base density")
             reward_scaled = reward_values.numpy()
             reward_scaled = (reward_scaled - reward_scaled.min()) / (reward_scaled.max() - reward_scaled.min() + 1e-8)
             reward_scaled = reward_scaled * gmm_density.max().item()
-            comp_ax.plot(x_grid.numpy(), reward_scaled, color="#c92a2a", lw=1.6, linestyle="--", label="reward (scaled)")
-            comp_ax.set_title(label)
-            comp_ax.set_xlabel("x")
-            comp_ax.grid(alpha=0.2)
-        comp_axes[0].set_ylabel("density")
+            comp_ax.plot(x_grid.numpy(), reward_scaled, color="tab:red", lw=3, linestyle="--", label="Reward (scaled)")
+            # comp_ax.set_title(label)
+            # comp_ax.set_xlabel("x")
+            comp_ax.grid()
+            # comp_ax.grid(alpha=0.2)
+            # comp_ax.set_ylim(0, gmm_density.max() + min(gmm_density.max() * .05, .05))
+            comp_ax.yaxis.set_tick_params(labelleft=True)
+            comp_ax.margins(0)
+        comp_axes[0].set_ylabel("Density")
         handles, legend_labels = comp_axes[0].get_legend_handles_labels()
-        comp_fig.legend(handles, legend_labels, loc="upper center", ncol=3, frameon=False)
+        comp_fig.legend(handles, legend_labels, loc="upper center", ncol=3, frameon=True, fancybox=True)
         comp_fig.tight_layout(rect=[0, 0, 1, 0.9])
         comparison_view = mo.vstack([mo.md("## Sample Comparison"), mo.as_html(comp_fig)])
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
     comparison_view
-    return
+    return (comp_fig,)
 
 
 @app.cell
+def _(comp_fig):
+    comp_fig.savefig('Toy.pdf', format='pdf', bbox_inches='tight', pad_inches=0.06)
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
-    batch_size = mo.ui.number(start=32, stop=4096, step=32, value=1024, label="batch_size")
-    n_steps = mo.ui.number(start=20, stop=1000, step=10, value=200, label="n_steps")
+    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=1024, label="batch_size")
+    n_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="n_steps")
     n_reference = mo.ui.number(start=128, stop=32768, step=128, value=1024, label="n_reference")
 
     epsilon_alpha = mo.ui.number(start=1e-6, stop=0.2, step=1e-4, value=1e-3, label="epsilon_alpha")
@@ -240,7 +265,7 @@ def _(mo):
     )
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(fk_final, mo, reward_fn, rpcn_final, torch, unsteered_samples):
     has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
     if has_samples_stats:
@@ -250,18 +275,25 @@ def _(fk_final, mo, reward_fn, rpcn_final, torch, unsteered_samples):
                 vals.append(torch.as_tensor(reward_fn(samples[i, 0]), dtype=torch.float32))
             return float(torch.stack(vals).mean().item())
 
+        def reward_max(samples):
+            vals = []
+            for i in range(samples.shape[0]):
+                vals.append(torch.as_tensor(reward_fn(samples[i, 0]), dtype=torch.float32))
+            return float(torch.stack(vals).max().item())
+
         def stats_dict(name, samples):
             x = samples[:, 0].cpu()
             q = torch.quantile(x, torch.tensor([0.05, 0.5, 0.95]))
             return {
                 "method": name,
                 "count": int(samples.shape[0]),
-                "mean": float(x.mean().item()),
-                "std": float(x.std(unbiased=False).item()),
+                # "mean": float(x.mean().item()),
+                # "std": float(x.std(unbiased=False).item()),
                 "q05": float(q[0].item()),
                 "q50": float(q[1].item()),
                 "q95": float(q[2].item()),
                 "reward_mean": reward_mean(samples),
+                "reward_max": reward_max(samples),
             }
 
         stats_rows = []
@@ -283,6 +315,71 @@ def _(mo):
     mo.md(r"""
     Helpers
     """)
+    return
+
+
+@app.cell
+def _(
+    batch_size,
+    math,
+    reference_data,
+    reward_fn,
+    rpcn,
+    rpcn_angle_min,
+    rpcn_check_every,
+    rpcn_inverse_temp_max,
+    rpcn_n_chains,
+    rpcn_update_count,
+    run_rpcn,
+    score_model,
+    seed,
+    set_rpcn_samples,
+    timesteps,
+    torch,
+):
+    if run_rpcn.value:
+        torch.manual_seed(int(seed.value))
+        kernel = rpcn.KernelPreconditionedCrankNicolson(
+            1,
+            device=reference_data.device,
+            dtype=reference_data.dtype,
+        )
+        steering = rpcn.ResidualMCMCSteering(
+            kernel,
+            torch.linspace(
+                math.pi / 2 - 1e-3,
+                float(rpcn_angle_min.value),
+                int(rpcn_n_chains.value),
+                device=reference_data.device,
+                dtype=reference_data.dtype,
+            ).sin(),
+            reward_fn=reward_fn,
+            expected_next_fn=score_model.expected_next_fn,
+            std_fn=score_model.std_fn,
+            intermediate_reward=rpcn.IntermediateReward.EXPECTED_SAMPLE,
+            inverse_temperature=torch.linspace(
+                0.0,
+                float(rpcn_inverse_temp_max.value),
+                int(rpcn_n_chains.value),
+                device=reference_data.device,
+                dtype=reference_data.dtype,
+            ),
+            kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},
+        )
+
+        def rpcn_update_fn(step_idx, t0, t1, reward):
+            _ = (t0, t1, reward)
+            return step_idx % int(rpcn_check_every.value) == 0
+
+        with torch.no_grad():
+            set_rpcn_samples(
+                steering.run(
+                    timesteps,
+                    pcn_should_update_fn=rpcn_update_fn,
+                    pcn_update_count=int(rpcn_update_count.value),
+                    batch_size=int(batch_size.value),
+                )
+            )
     return
 
 
@@ -348,14 +445,6 @@ def _(mo):
 
 
 @app.cell
-def _(get_fk_samples, get_rpcn_samples, get_unsteered_samples):
-    fk_samples = get_fk_samples()
-    rpcn_samples = get_rpcn_samples()
-    unsteered_samples = get_unsteered_samples()
-    return fk_samples, rpcn_samples, unsteered_samples
-
-
-@app.cell
 def _(
     Bao2024EnsembleScoreMatching,
     EnsembleScoreModel,
@@ -396,6 +485,14 @@ def _(
 
 
 @app.cell
+def _(get_fk_samples, get_rpcn_samples, get_unsteered_samples):
+    fk_samples = get_fk_samples()
+    rpcn_samples = get_rpcn_samples()
+    unsteered_samples = get_unsteered_samples()
+    return fk_samples, rpcn_samples, unsteered_samples
+
+
+@app.cell
 def _(
     batch_size,
     fk_check_every,
@@ -407,11 +504,13 @@ def _(
     reward_fn,
     run_fk,
     score_model,
+    seed,
     set_fk_samples,
     timesteps,
     torch,
 ):
     if run_fk.value:
+        torch.manual_seed(int(seed.value))
         def propose_step(t0, t1, z):
             mean = score_model.expected_next_fn(t0, t1, z)
             if t1 > 0:
@@ -459,77 +558,16 @@ def _(
 
 @app.cell
 def _(
-    batch_size,
-    math,
-    reference_data,
-    reward_fn,
-    rpcn,
-    rpcn_angle_min,
-    rpcn_check_every,
-    rpcn_inverse_temp_max,
-    rpcn_n_chains,
-    rpcn_update_count,
-    run_rpcn,
-    score_model,
-    set_rpcn_samples,
-    timesteps,
-    torch,
-):
-    if run_rpcn.value:
-        kernel = rpcn.KernelPreconditionedCrankNicolson(
-            1,
-            device=reference_data.device,
-            dtype=reference_data.dtype,
-        )
-        steering = rpcn.ResidualMCMCSteering(
-            kernel,
-            torch.linspace(
-                math.pi / 2 - 1e-3,
-                float(rpcn_angle_min.value),
-                int(rpcn_n_chains.value),
-                device=reference_data.device,
-                dtype=reference_data.dtype,
-            ).sin(),
-            reward_fn=reward_fn,
-            expected_next_fn=score_model.expected_next_fn,
-            std_fn=score_model.std_fn,
-            intermediate_reward=rpcn.IntermediateReward.EXPECTED_SAMPLE,
-            inverse_temperature=torch.linspace(
-                0.0,
-                float(rpcn_inverse_temp_max.value),
-                int(rpcn_n_chains.value),
-                device=reference_data.device,
-                dtype=reference_data.dtype,
-            ),
-            kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},
-        )
-
-        def rpcn_update_fn(step_idx, t0, t1, reward):
-            _ = (t0, t1, reward)
-            return step_idx % int(rpcn_check_every.value) == 0
-
-        with torch.no_grad():
-            set_rpcn_samples(
-                steering.run(
-                    timesteps,
-                    pcn_should_update_fn=rpcn_update_fn,
-                    pcn_update_count=int(rpcn_update_count.value),
-                    batch_size=int(batch_size.value),
-                )
-            )
-    return
-
-
-@app.cell
-def _(
     n_steps,
     reference_data,
     run_unsteered,
     score_model,
+    seed,
     set_unsteered_samples,
     torch,
 ):
     if run_unsteered.value:
+        torch.manual_seed(int(seed.value))
         with torch.no_grad():
             set_unsteered_samples(score_model.sample(int(n_steps.value), reference_data))
     return
