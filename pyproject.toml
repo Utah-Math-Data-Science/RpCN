@@ -9,8 +9,10 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "duckdb>=1.5.2",
     "einops>=0.8.2",
     "hydra-orm>=0.1.0",
+    "marimo[sql]>=0.23.3",
     "polars[pyarrow]>=1.40.1",
     "seaborn>=0.13.2",
     "spt-guidance>=0.1.0",

@@ -11,7 +11,7 @@ def _():
     import marimo as mo
     import polars as pl
     import seaborn as sns
-    sns.set_theme(style="white", font_scale=1.7)
+    sns.set_theme(style="white", font_scale=2)
     import spt_guidance.torch.fk_steering as fk_steering
     import spt_guidance.torch.rpcn as rpcn
     import torch
@@ -21,6 +21,7 @@ def _():
         EnsembleScoreModel,
         metropolis_hastings_sample,
     )
+    import toy.plots
 
     return (
         Bao2024EnsembleScoreMatching,
@@ -33,6 +34,7 @@ def _():
         rpcn,
         sns,
         torch,
+        toy,
     )
 
 
@@ -190,7 +192,7 @@ def _(torch):
     return (reward_fn,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     fk_final,
     gmm_density,
@@ -204,13 +206,14 @@ def _(
     x_grid,
 ):
     has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
-    comp_fig = None
+    plot_histogram = None
     if has_samples_plot:
-        method_order = ["Unsteered", "FK Steering", "RpCN Steering", "MH (reference)"]
+        # method_order = ["Base", "MCMC Reference", "FK Steering", "RpCN Steering"]
+        method_order = ["MCMC Reference", "FK Steering", "RpCN Steering"]
         sample_frames = []
         if unsteered_samples is not None:
             sample_frames.append(
-                pl.DataFrame({"method": ["Unsteered"] * unsteered_samples.shape[0], "x": unsteered_samples[:, 0].cpu().numpy().tolist()})
+                pl.DataFrame({"method": ["Base"] * unsteered_samples.shape[0], "x": unsteered_samples[:, 0].cpu().numpy().tolist()})
             )
         if fk_final is not None:
             sample_frames.append(
@@ -222,7 +225,7 @@ def _(
             )
         if mh_final is not None:
             sample_frames.append(
-                pl.DataFrame({"method": ["MH (reference)"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
+                pl.DataFrame({"method": ["MCMC Reference"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
             )
         samples_df = pl.concat(sample_frames) if sample_frames else pl.DataFrame({"method": [], "x": []})
 
@@ -243,17 +246,26 @@ def _(
                 x='x',
                 hue='method',
                 col='method',
+                palette={
+                    'Base': 'tab:grey',
+                    'FK Steering': 'tab:blue',
+                    'RpCN Steering': 'tab:orange',
+                    'MCMC Reference': 'tab:grey',
+                },
+                alpha=.7,
                 col_order=method_order,
                 bins=60,
                 stat='density',
                 element='step',
                 common_norm=False,
+                # aspect=.6,
                 legend=False,
             )
             .set(
-                ylim=(0, gmm_density.max() * 1.25),
+                ylim=(0, gmm_density.max() * 1.504),
                 # yscale='log',
             )
+            .set_titles('')
         )
         for (r, c, h), _ in _g.facet_data():
             ax = _g.axes[r, c]
@@ -278,15 +290,24 @@ def _(
             )
             ax.set_xlabel('')
             ax.get_legend().remove()
-        _g.set_titles("{col_name}")
         # _g.axes.flat[0].set_ylabel("Density")
         handles, legend_labels = _g.axes.flat[0].get_legend_handles_labels()
-        _g.figure.legend(handles, legend_labels, loc="upper center", ncol=3, frameon=True, fancybox=True)
-        _g.figure.tight_layout(rect=[0, 0, 1, 0.90])
+        _g.add_legend(dict(zip(legend_labels, handles)), loc="upper center", ncol=3,
+                      bbox_to_anchor=(0.4, 1.04), 
+                      frameon=True, fancybox=True)
+        # _g.figure.tight_layout(rect=[0, 0, 1, 1])
         comparison_view = mo.vstack([mo.md("## Sample Comparison"), mo.as_html(_g)])
+        plot_histogram = _g
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
     comparison_view
+    return (plot_histogram,)
+
+
+@app.cell
+def _(plot_histogram, toy):
+    if plot_histogram is not None:
+        toy.plots.save_all_subfigures(plot_histogram, 'Histogram')
     return
 
 
@@ -315,27 +336,27 @@ def _(mo):
         label="sampling_max_score_norm",
     )
 
-    x_min = mo.ui.number(start=-30.0, stop=0.0, step=0.5, value=-12.0, label="x_min")
-    x_max = mo.ui.number(start=0.0, stop=30.0, step=0.5, value=12.0, label="x_max")
+    x_min = mo.ui.number(start=-30.0, stop=0.0, step=0.5, value=-10.0, label="x_min")
+    x_max = mo.ui.number(start=0.0, stop=30.0, step=0.5, value=10.0, label="x_max")
     n_grid = mo.ui.number(start=100, stop=4000, step=100, value=1200, label="plot_grid")
 
     fk_n_chains = mo.ui.number(start=1, stop=64, step=1, value=20, label="fk_n_chains")
-    fk_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=1.0, label="fk_inverse_temperature")
+    fk_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="fk_inverse_temperature")
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
 
-    rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=20, label="rpcn_n_chains")
+    rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=4, label="rpcn_n_chains")
     rpcn_update_count = mo.ui.number(start=1, stop=200, step=1, value=5, label="rpcn_update_count")
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
-    rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=1.0, label="rpcn_inverse_temp_max")
+    rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=25.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
 
     mh_num_chains = mo.ui.number(start=1, stop=256, step=1, value=64, label="mh_num_chains")
     mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
     mh_burn_in = mo.ui.number(start=0, stop=20000, step=50, value=2000, label="mh_burn_in")
     mh_thinning = mo.ui.number(start=1, stop=50, step=1, value=2, label="mh_thinning")
-    mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.8, label="mh_proposal_std")
-    mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=1.0, label="mh_inverse_temp")
+    mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.4, label="mh_proposal_std")
+    mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="mh_inverse_temp")
 
     run_unsteered = mo.ui.run_button(label="Unsteered")
     run_fk = mo.ui.run_button(label="FK")
