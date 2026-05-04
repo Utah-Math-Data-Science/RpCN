@@ -16,13 +16,18 @@ def _():
     import spt_guidance.torch.rpcn as rpcn
     import torch
 
-    from toy.model import Bao2024EnsembleScoreMatching, EnsembleScoreModel
+    from toy.model import (
+        Bao2024EnsembleScoreMatching,
+        EnsembleScoreModel,
+        metropolis_hastings_sample,
+    )
 
     return (
         Bao2024EnsembleScoreMatching,
         EnsembleScoreModel,
         fk_steering,
         math,
+        metropolis_hastings_sample,
         mo,
         pl,
         rpcn,
@@ -37,7 +42,7 @@ def _(mo):
     # 1D Steering Explorer
 
     Define a 1D Gaussian mixture and a reward function `reward_fn(x)`, then run
-    unsteered, FK, and RpCN samplers independently.
+    unsteered, FK, RpCN, and MH reference samplers independently.
     """)
     return
 
@@ -86,14 +91,14 @@ def _(gmm_density, means, mo, pl, sns, stds, weights, x_grid):
 
 @app.cell
 def _(mo):
-    n_modes = mo.ui.number(start=1, stop=8, step=1, value=4, label="n_modes")
+    n_modes = mo.ui.number(start=1, stop=8, step=1, value=1, label="n_modes")
     return (n_modes,)
 
 
 @app.cell
 def _(mo, n_modes):
     mode_count = int(n_modes.value)
-    default_std = 0.7
+    default_std = 3
     if mode_count % 2 == 0:
         mean_inits_half = [i - .5 for i in range(1, (mode_count // 2) + 1)]
     else:
@@ -108,7 +113,7 @@ def _(mo, n_modes):
     )
     std_array = mo.ui.array(
         [
-            mo.ui.number(start=0.05, stop=6.0, step=0.05, value=0.7, label=f"std_{idx}")
+            mo.ui.number(start=0.05, stop=6.0, step=0.05, value=default_std, label=f"std_{idx}")
             for idx in range(mode_count)
         ]
     )
@@ -189,6 +194,7 @@ def _(torch):
 def _(
     fk_final,
     gmm_density,
+    mh_final,
     mo,
     pl,
     reward_values,
@@ -197,10 +203,10 @@ def _(
     unsteered_samples,
     x_grid,
 ):
-    has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
+    has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
     comp_fig = None
     if has_samples_plot:
-        method_order = ["Unsteered", "FK Steering", "RpCN Steering"]
+        method_order = ["Unsteered", "FK Steering", "RpCN Steering", "MH (reference)"]
         sample_frames = []
         if unsteered_samples is not None:
             sample_frames.append(
@@ -213,6 +219,10 @@ def _(
         if rpcn_final is not None:
             sample_frames.append(
                 pl.DataFrame({"method": ["RpCN Steering"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()})
+            )
+        if mh_final is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["MH (reference)"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
             )
         samples_df = pl.concat(sample_frames) if sample_frames else pl.DataFrame({"method": [], "x": []})
 
@@ -320,9 +330,17 @@ def _(mo):
     rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=1.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
 
+    mh_num_chains = mo.ui.number(start=1, stop=256, step=1, value=64, label="mh_num_chains")
+    mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
+    mh_burn_in = mo.ui.number(start=0, stop=20000, step=50, value=2000, label="mh_burn_in")
+    mh_thinning = mo.ui.number(start=1, stop=50, step=1, value=2, label="mh_thinning")
+    mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.8, label="mh_proposal_std")
+    mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=1.0, label="mh_inverse_temp")
+
     run_unsteered = mo.ui.run_button(label="Unsteered")
     run_fk = mo.ui.run_button(label="FK")
     run_rpcn = mo.ui.run_button(label="RpCN")
+    run_mh = mo.ui.run_button(label="MH")
 
     controls = mo.vstack(
         [
@@ -331,6 +349,7 @@ def _(mo):
             mo.hstack([x_min, x_max, n_grid], justify="start"),
             mo.hstack([fk_n_chains, fk_inverse_temperature, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
+            mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
         ]
     )
     mo.md("## Experiment Controls")
@@ -344,6 +363,12 @@ def _(mo):
         fk_inverse_temperature,
         fk_n_chains,
         fk_resample_threshold,
+        mh_burn_in,
+        mh_inverse_temp,
+        mh_num_chains,
+        mh_num_samples,
+        mh_proposal_std,
+        mh_thinning,
         n_grid,
         n_reference,
         n_steps,
@@ -353,6 +378,7 @@ def _(mo):
         rpcn_n_chains,
         rpcn_update_count,
         run_fk,
+        run_mh,
         run_rpcn,
         run_unsteered,
         sampling_max_score_norm,
@@ -364,8 +390,17 @@ def _(mo):
 
 
 @app.cell
-def _(fk_final, mo, pl, reward_fn, rpcn_final, torch, unsteered_samples):
-    has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None)
+def _(
+    fk_final,
+    mh_final,
+    mo,
+    pl,
+    reward_fn,
+    rpcn_final,
+    torch,
+    unsteered_samples,
+):
+    has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
     if has_samples_stats:
         method_frames = []
         if unsteered_samples is not None:
@@ -374,6 +409,8 @@ def _(fk_final, mo, pl, reward_fn, rpcn_final, torch, unsteered_samples):
             method_frames.append(pl.DataFrame({"method": ["FK"] * fk_final.shape[0], "x": fk_final[:, 0].cpu().numpy().tolist()}))
         if rpcn_final is not None:
             method_frames.append(pl.DataFrame({"method": ["RpCN"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()}))
+        if mh_final is not None:
+            method_frames.append(pl.DataFrame({"method": ["MH"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()}))
         stats_df = pl.concat(method_frames)
 
         reward_x = torch.tensor(stats_df["x"].to_numpy(), dtype=torch.float32)
@@ -397,6 +434,45 @@ def _(fk_final, mo, pl, reward_fn, rpcn_final, torch, unsteered_samples):
     else:
         stats_view = mo.md("Summary statistics will appear after running at least one sampler.")
     stats_view
+    return
+
+
+@app.cell(hide_code=True)
+def _(mh_diagnostics, mo):
+    if mh_diagnostics is None:
+        mh_diag_view = mo.vstack([mo.md("## MH Diagnostics"), mo.md("Run MH to populate diagnostics.")])
+    else:
+        acceptance_rate = float(mh_diagnostics["acceptance_rate"])
+        if acceptance_rate < 0.15:
+            status_label = "Too low"
+            hint = "Acceptance is low; try decreasing mh_proposal_std."
+        elif acceptance_rate > 0.60:
+            status_label = "Too high"
+            hint = "Acceptance is high; try increasing mh_proposal_std."
+        else:
+            status_label = "Good"
+            hint = "Acceptance is in a healthy range."
+
+        mh_diag_table = [
+            {"metric": "acceptance_rate", "value": f"{acceptance_rate:.4f}"},
+            {"metric": "accepted", "value": int(mh_diagnostics["accepted"])},
+            {"metric": "proposed", "value": int(mh_diagnostics["proposed"])},
+            {"metric": "num_chains", "value": int(mh_diagnostics["num_chains"])},
+            {"metric": "num_samples_per_chain", "value": int(mh_diagnostics["num_samples"])},
+            {"metric": "burn_in", "value": int(mh_diagnostics["burn_in"])},
+            {"metric": "thinning", "value": int(mh_diagnostics["thinning"])},
+            {"metric": "proposal_std", "value": float(mh_diagnostics["proposal_std"])},
+            {"metric": "init_source", "value": mh_diagnostics["init_source"]},
+        ]
+        mh_diag_view = mo.vstack(
+            [
+                mo.md("## MH Diagnostics"),
+                mo.md(f"**Status:** {status_label}"),
+                mo.ui.table(mh_diag_table),
+                mo.md(hint),
+            ]
+        )
+    mh_diag_view
     return
 
 
@@ -474,6 +550,63 @@ def _(
 
 
 @app.cell
+def _(
+    device,
+    gmm_log_prob,
+    gmm_sample,
+    metropolis_hastings_sample,
+    mh_burn_in,
+    mh_inverse_temp,
+    mh_num_chains,
+    mh_num_samples,
+    mh_proposal_std,
+    mh_thinning,
+    reward_fn,
+    run_mh,
+    seed,
+    set_mh_diagnostics,
+    set_mh_samples,
+    torch,
+):
+    if run_mh.value:
+        torch.manual_seed(int(seed.value))
+        selected_device_mh = device.value
+        if selected_device_mh == "cuda" and not torch.cuda.is_available():
+            selected_device_mh = "cpu"
+        selected_device_obj = torch.device(selected_device_mh)
+
+        def log_target_fn(x: torch.Tensor) -> torch.Tensor:
+            x_flat = x[:, 0]
+            return gmm_log_prob(x_flat) + float(mh_inverse_temp.value) * reward_fn(x_flat)
+
+        mh_chain_samples, mh_diag = metropolis_hastings_sample(
+            log_target_fn=log_target_fn,
+            num_chains=int(mh_num_chains.value),
+            num_samples=int(mh_num_samples.value),
+            dim=1,
+            burn_in=int(mh_burn_in.value),
+            proposal_std=float(mh_proposal_std.value),
+            thinning=int(mh_thinning.value),
+            initial_x=gmm_sample(int(mh_num_chains.value), selected_device_mh),
+            device=selected_device_obj,
+            dtype=torch.float32,
+        )
+        mh_diag.update(
+            {
+                "num_chains": int(mh_num_chains.value),
+                "num_samples": int(mh_num_samples.value),
+                "burn_in": int(mh_burn_in.value),
+                "thinning": int(mh_thinning.value),
+                "proposal_std": float(mh_proposal_std.value),
+                "init_source": "gmm_sample",
+            }
+        )
+        set_mh_samples(mh_chain_samples)
+        set_mh_diagnostics(mh_diag)
+    return
+
+
+@app.cell
 def _(mean_array, std_array, torch, weight_array):
     means = torch.tensor(mean_array.value, dtype=torch.float32)
     stds = torch.tensor(std_array.value, dtype=torch.float32)
@@ -488,9 +621,9 @@ def _(means, n_grid, stds, torch, weights, x_max, x_min):
 
     def gmm_log_prob(x_values: torch.Tensor) -> torch.Tensor:
         x_col = x_values.unsqueeze(-1)
-        mean_row = means.unsqueeze(0)
-        std_row = stds.unsqueeze(0)
-        weight_row = weights.unsqueeze(0)
+        mean_row = means.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
+        std_row = stds.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
+        weight_row = weights.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
         log_norm = -0.5 * torch.log(2.0 * torch.pi * std_row.square())
         log_comp = log_norm - 0.5 * ((x_col - mean_row) / std_row).square() + torch.log(weight_row)
         return torch.logsumexp(log_comp, dim=1)
@@ -506,7 +639,7 @@ def _(means, n_grid, stds, torch, weights, x_max, x_min):
         return samples.unsqueeze(1)
 
     gmm_density = torch.exp(gmm_log_prob(x_grid))
-    return gmm_density, gmm_sample, x_grid
+    return gmm_density, gmm_log_prob, gmm_sample, x_grid
 
 
 @app.cell
@@ -524,11 +657,17 @@ def _(mo):
     get_unsteered_samples, set_unsteered_samples = mo.state(None)
     get_fk_samples, set_fk_samples = mo.state(None)
     get_rpcn_samples, set_rpcn_samples = mo.state(None)
+    get_mh_samples, set_mh_samples = mo.state(None)
+    get_mh_diagnostics, set_mh_diagnostics = mo.state(None)
     return (
         get_fk_samples,
+        get_mh_diagnostics,
+        get_mh_samples,
         get_rpcn_samples,
         get_unsteered_samples,
         set_fk_samples,
+        set_mh_diagnostics,
+        set_mh_samples,
         set_rpcn_samples,
         set_unsteered_samples,
     )
@@ -576,11 +715,25 @@ def _(
 
 
 @app.cell
-def _(get_fk_samples, get_rpcn_samples, get_unsteered_samples):
+def _(
+    get_fk_samples,
+    get_mh_diagnostics,
+    get_mh_samples,
+    get_rpcn_samples,
+    get_unsteered_samples,
+):
     fk_samples = get_fk_samples()
+    mh_diagnostics = get_mh_diagnostics()
+    mh_samples = get_mh_samples()
     rpcn_samples = get_rpcn_samples()
     unsteered_samples = get_unsteered_samples()
-    return fk_samples, rpcn_samples, unsteered_samples
+    return (
+        fk_samples,
+        mh_diagnostics,
+        mh_samples,
+        rpcn_samples,
+        unsteered_samples,
+    )
 
 
 @app.cell
@@ -695,18 +848,32 @@ def _(rpcn_samples):
 
 
 @app.cell
-def _(fk_final, mo, rpcn_final, unsteered_samples):
+def _(mh_samples):
+    mh_final = None
+    if mh_samples is not None:
+        if mh_samples.ndim != 3 or mh_samples.shape[-1] != 1:
+            raise ValueError(f"Unexpected MH sample shape: {mh_samples.shape}")
+        mh_final = mh_samples.reshape(-1, 1)
+    mh_final = mh_final.detach().cpu() if mh_final is not None else None
+    return (mh_final,)
+
+
+@app.cell
+def _(fk_final, mh_diagnostics, mh_final, mo, rpcn_final, unsteered_samples):
     statuses = []
     statuses.append("Unsteered: ready" if unsteered_samples is not None else "Unsteered: not run")
     statuses.append("FK: ready" if fk_final is not None else "FK: not run")
     statuses.append("RpCN: ready" if rpcn_final is not None else "RpCN: not run")
+    statuses.append("MH: ready" if mh_final is not None else "MH: not run")
+    if mh_diagnostics is not None:
+        statuses.append(f"MH accept={mh_diagnostics['acceptance_rate']:.3f}")
     status_view = mo.vstack([mo.md("## Sampler Status"), mo.md(" | ".join(statuses))])
     status_view
     return
 
 
 @app.cell
-def _(fk_final, mo, rpcn_final, unsteered_samples):
+def _(fk_final, mh_final, mo, rpcn_final, unsteered_samples):
     debug_rows = []
     if unsteered_samples is not None:
         debug_rows.append({"sampler": "Unsteered", "shape": str(tuple(unsteered_samples.shape))})
@@ -714,6 +881,8 @@ def _(fk_final, mo, rpcn_final, unsteered_samples):
         debug_rows.append({"sampler": "FK", "shape": str(tuple(fk_final.shape))})
     if rpcn_final is not None:
         debug_rows.append({"sampler": "RpCN", "shape": str(tuple(rpcn_final.shape))})
+    if mh_final is not None:
+        debug_rows.append({"sampler": "MH", "shape": str(tuple(mh_final.shape))})
     if debug_rows:
         shape_view = mo.vstack([mo.md("## Output Shapes"), mo.ui.table(debug_rows)])
     else:

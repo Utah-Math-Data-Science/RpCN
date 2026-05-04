@@ -8,7 +8,11 @@ import torch
 
 import conf.setting
 import conf.steering
-from toy.model import Bao2024EnsembleScoreMatching, EnsembleScoreModel
+import toy.utils
+from toy.model import Bao2024EnsembleScoreMatching, EnsembleScoreModel, metropolis_hastings_sample
+
+
+log = toy.utils.get_logger_by_filename(__file__)
 
 
 def _build_reward_fn(cfg_exp: conf.setting.GMMExperiment) -> Callable[[torch.Tensor], torch.Tensor]:
@@ -42,8 +46,17 @@ def _build_gmm(cfg_exp: conf.setting.GMMExperiment):
         samples = centers[indices] + scales[indices] * eps
         return samples.unsqueeze(1)
 
+    def gmm_log_prob(x_values: torch.Tensor) -> torch.Tensor:
+        x_col = x_values.unsqueeze(-1)
+        mean_row = means.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
+        std_row = stds.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
+        weight_row = weights.to(device=x_values.device, dtype=x_values.dtype).unsqueeze(0)
+        log_norm = -0.5 * torch.log(2.0 * torch.pi * std_row.square())
+        log_comp = log_norm - 0.5 * ((x_col - mean_row) / std_row).square() + torch.log(weight_row)
+        return torch.logsumexp(log_comp, dim=1)
+
     reward_fn = _build_reward_fn(cfg_exp)
-    return gmm_sample, reward_fn
+    return gmm_sample, gmm_log_prob, reward_fn
 
 
 def _build_score_model(cfg):
@@ -161,8 +174,48 @@ def _run_rpcn(cfg, score_model, reference_data, reward_fn, timesteps):
     raise ValueError(f'Unexpected RpCN sample shape: {rpcn_samples.shape}')
 
 
+def _run_mh(cfg, selected_device, gmm_sample, gmm_log_prob, reward_fn):
+    cfg_mh: conf.steering.MH = cfg.steering
+    torch.manual_seed(cfg.seed)
+
+    def log_target_fn(x: torch.Tensor) -> torch.Tensor:
+        x_flat = x[:, 0]
+        return gmm_log_prob(x_flat) + cfg_mh.inverse_temperature * reward_fn(x_flat)
+
+    mh_samples, mh_diag = metropolis_hastings_sample(
+        log_target_fn=log_target_fn,
+        num_chains=cfg_mh.n_chains,
+        num_samples=cfg_mh.num_samples,
+        dim=1,
+        burn_in=cfg_mh.burn_in,
+        proposal_std=cfg_mh.proposal_std,
+        thinning=cfg_mh.thinning,
+        initial_x=gmm_sample(cfg_mh.n_chains, selected_device),
+        device=torch.device(selected_device),
+        dtype=torch.float32,
+    )
+    retained_total = cfg_mh.n_chains * cfg_mh.num_samples
+    log.info(
+        'MH diagnostics: acceptance_rate=%.4f accepted=%d proposed=%d retained_samples=%d',
+        mh_diag['acceptance_rate'],
+        mh_diag['accepted'],
+        mh_diag['proposed'],
+        retained_total,
+    )
+    log.info(
+        'MH parameters: n_chains=%d num_samples=%d burn_in=%d thinning=%d proposal_std=%.4f inverse_temperature=%.4f',
+        cfg_mh.n_chains,
+        cfg_mh.num_samples,
+        cfg_mh.burn_in,
+        cfg_mh.thinning,
+        cfg_mh.proposal_std,
+        cfg_mh.inverse_temperature,
+    )
+    return mh_samples.reshape(-1, 1)
+
+
 def run_and_make_samples_df(cfg) -> pl.DataFrame:
-    gmm_sample, reward_fn = _build_gmm(cfg.setting)
+    gmm_sample, gmm_log_prob, reward_fn = _build_gmm(cfg.setting)
     selected_device, score_model = _build_score_model(cfg)
     reference_data = gmm_sample(cfg.score_model.n_reference, selected_device)
     score_model.set_training_data(reference_data)
@@ -175,6 +228,8 @@ def run_and_make_samples_df(cfg) -> pl.DataFrame:
         final_samples = _run_fk(cfg, score_model, reference_data, reward_fn, timesteps)
     elif isinstance(cfg.steering, conf.steering.RpCN):
         final_samples = _run_rpcn(cfg, score_model, reference_data, reward_fn, timesteps)
+    elif isinstance(cfg.steering, conf.steering.MH):
+        final_samples = _run_mh(cfg, selected_device, gmm_sample, gmm_log_prob, reward_fn)
     else:
         raise ValueError(f'Unsupported steering config type: {type(cfg.steering).__name__}')
 

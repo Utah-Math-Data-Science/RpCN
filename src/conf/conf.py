@@ -95,3 +95,4 @@ orm.store_config(conf.setting.GMMExperiment, group=Conf.setting.key, name='_GMME
 orm.store_config(conf.steering.Unsteered, group=Conf.steering.key, name='_Unsteered')
 orm.store_config(conf.steering.FK, group=Conf.steering.key, name='_FK')
 orm.store_config(conf.steering.RpCN, group=Conf.steering.key, name='_RpCN')
+orm.store_config(conf.steering.MH, group=Conf.steering.key, name='_MH')

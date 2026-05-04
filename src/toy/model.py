@@ -4,6 +4,86 @@ import torch.distributions
 from torch.distributions.utils import _sum_rightmost
 
 
+@torch.no_grad()
+def metropolis_hastings_sample(
+    log_target_fn,
+    num_chains,
+    num_samples,
+    dim,
+    burn_in=0,
+    proposal_std=1.0,
+    thinning=1,
+    initial_x=None,
+    device=None,
+    dtype=torch.float32,
+):
+    if num_chains <= 0:
+        raise ValueError("num_chains must be positive")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive")
+    if dim <= 0:
+        raise ValueError("dim must be positive")
+    if burn_in < 0:
+        raise ValueError("burn_in must be non-negative")
+    if proposal_std <= 0:
+        raise ValueError("proposal_std must be positive")
+    if thinning <= 0:
+        raise ValueError("thinning must be positive")
+
+    if initial_x is not None:
+        if initial_x.shape != (num_chains, dim):
+            raise ValueError("initial_x must have shape [num_chains, dim]")
+        x = initial_x
+        if device is None:
+            device = x.device
+        if dtype is None:
+            dtype = x.dtype
+        x = x.to(device=device, dtype=dtype)
+    else:
+        if device is None:
+            device = torch.device("cpu")
+        x = torch.zeros((num_chains, dim), device=device, dtype=dtype)
+
+    logp = log_target_fn(x)
+    if logp.shape != (num_chains,):
+        raise ValueError("log_target_fn must return shape [num_chains]")
+
+    total_steps = burn_in + num_samples * thinning
+    samples = []
+    accepted = 0
+    proposed = 0
+
+    for step_idx in range(total_steps):
+        proposal = x + proposal_std * torch.randn_like(x)
+        logp_proposal = log_target_fn(proposal)
+        if logp_proposal.shape != (num_chains,):
+            raise ValueError("log_target_fn must return shape [num_chains]")
+
+        log_alpha = torch.clamp(logp_proposal - logp, max=0.0)
+        log_u = torch.log(torch.rand((num_chains,), device=x.device, dtype=x.dtype))
+        accept = log_u < log_alpha
+
+        x = torch.where(accept[:, None], proposal, x)
+        logp = torch.where(accept, logp_proposal, logp)
+
+        accepted += int(accept.sum().item())
+        proposed += num_chains
+
+        if step_idx >= burn_in and ((step_idx - burn_in) % thinning == 0):
+            samples.append(x.clone())
+
+    if len(samples) != num_samples:
+        raise RuntimeError("Internal sampling error: collected unexpected number of samples")
+
+    stacked_samples = torch.stack(samples, dim=0).permute(1, 0, 2)
+    diagnostics = {
+        "acceptance_rate": accepted / proposed,
+        "accepted": accepted,
+        "proposed": proposed,
+    }
+    return stacked_samples, diagnostics
+
+
 class Independent(torch.distributions.Independent):
     def log_prob_unnormalized(self, value):
         log_prob_unnormalized = self.base_dist.log_prob_unnormalized(value)
