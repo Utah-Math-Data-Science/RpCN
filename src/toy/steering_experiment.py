@@ -113,7 +113,7 @@ def _run_fk(cfg, score_model, reference_data, reward_fn, timesteps):
         reward_fn=reward_fn,
         propose_fn=propose_step,
         resample_fn=adaptive_resample_safe,
-        potential=fk_steering.Potential.MAX,
+        potential=cfg_fk.potential,
         intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,
         inverse_temperature=cfg_fk.inverse_temperature,
         kwargs_intermediate_reward={'expected_sample_fn': score_model.get_tweedie},

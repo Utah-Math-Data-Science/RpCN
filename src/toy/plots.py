@@ -1,4 +1,8 @@
 import copy
+from pathlib import Path
+
+import duckdb
+import polars as pl
 
 
 def save_legend(plot, plot_name, format='pdf'):
@@ -35,3 +39,34 @@ def save_all_subfigures(plot, plot_name, format='pdf', renaming=None, metadata_d
         else:
             save_name = f'{plot_name}.{format}'
         pp.savefig(save_name, format=format, bbox_inches='tight', pad_inches=.06)
+
+
+def get_logged_metrics_file_paths(conf_rows, file_path_format='~/out/rpcn_toy/runs/{}/samples.csv'):
+    paths = duckdb.sql(f"""
+        select format({file_path_format!r}, alt_id) as path from conf_rows
+    """).pl()
+    exists = []
+    for f in paths['path']:
+        f = Path(f).expanduser()
+        exists.append(f.exists())
+    paths = pl.DataFrame(dict(
+        path=paths['path'], exists=exists,
+    ))
+    return duckdb.sql('select * from paths')
+
+
+def get_logged_metrics(alt_ids, file_paths=None):
+    if file_paths is None:
+        file_paths = get_logged_metrics_file_paths(alt_ids)
+    duckdb.sql("""
+    set variable dataset_metrics_filepaths = (
+        select list(path) from file_paths where exists
+    )
+    """)
+    logged_metrics = duckdb.sql("""
+    select
+        split(filename, '/')[-2] as alt_id,
+        * exclude(filename),
+    from read_csv(getvariable(dataset_metrics_filepaths), filename=true, union_by_name=true)
+    """)
+    return logged_metrics

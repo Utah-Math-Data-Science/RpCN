@@ -1,5 +1,6 @@
 import sqlalchemy as sa
 from hydra_orm import orm
+import spt_guidance.torch.fk_steering as fk_steering
 
 
 class SteeringBase(orm.InheritableTable):
@@ -15,6 +16,10 @@ class FK(SteeringBase):
     inverse_temperature: float = orm.make_field(orm.ColumnRequired(sa.Double), default=25.0)
     resample_threshold: float = orm.make_field(orm.ColumnRequired(sa.Double), default=0.5)
     check_every: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=1)
+    potential: fk_steering.Potential = orm.make_field(
+        orm.ColumnRequired(sa.Enum(fk_steering.Potential)),
+        default=fk_steering.Potential.MAX,
+    )
 
     def __post_init__(self):
         if self.n_chains < 1:
