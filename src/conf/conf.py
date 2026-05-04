@@ -69,7 +69,7 @@ class Conf(orm.Table):
     ])
 
     root_dir: str = field(default=str(toy.utils.DIR_ROOT.resolve()))
-    out_dir: str = field(default=str((toy.utils.DIR_ROOT/'../..').resolve()))
+    out_dir: str = field(default=str((toy.utils.DIR_ROOT/'../../out/rpcn_toy').resolve()))
     run_subdir: str = field(default='runs')
     device: str = field(default='cuda')
     seed: int = field(default=31)

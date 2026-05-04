@@ -166,11 +166,17 @@ def _(torch):
     def reward_gauss(x):
         return torch.exp(
             -(
-                (x - 3) / .5
+                x / .5
             ).square()
         )
     def reward_fn(x: torch.Tensor) -> torch.Tensor:
-        r = -reward_gauss(-x) + reward_gauss(x)
+        q = 0
+        # for i, m in enumerate((3, 6, 9)):
+        for i, m in enumerate((3,)):
+            q = q + (-reward_gauss(x + m) * 2 + reward_gauss(x - m)) * (i + 1)
+            q = q + reward_gauss(x + 4) * 1
+            # q = q + reward_gauss(-x, 6)
+        r = q
         # r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
         # r = 1e6 * x**2
         # r = 1000 * r
@@ -378,9 +384,9 @@ def _(fk_final, mo, pl, reward_fn, rpcn_final, torch, unsteered_samples):
             stats_df.group_by("method")
             .agg(
                 pl.len().alias("count"),
-                pl.col("x").quantile(0.05).alias("q05"),
-                pl.col("x").quantile(0.50).alias("q50"),
-                pl.col("x").quantile(0.95).alias("q95"),
+                pl.col("reward").quantile(0.05).alias("q05"),
+                pl.col("reward").quantile(0.50).alias("q50"),
+                pl.col("reward").quantile(0.95).alias("q95"),
                 pl.col("reward").mean().alias("reward_mean"),
                 pl.col("reward").max().alias("reward_max"),
                 pl.col("reward").min().alias("reward_min"),
@@ -564,7 +570,8 @@ def _(
     reference_data = gmm_sample(int(n_reference.value), selected_device)
     score_model.set_training_data(reference_data)
 
-    timesteps = torch.linspace(1.0, 0.0, int(n_steps.value), device=reference_data.device, dtype=reference_data.dtype)
+    # timesteps = torch.linspace(1.0, 0.0, int(n_steps.value), device=reference_data.device, dtype=reference_data.dtype)
+    timesteps = score_model.prob_path.linspace_time(cfg.sampling_time_step_count, device=reference_data.device)
     return reference_data, score_model, timesteps
 
 

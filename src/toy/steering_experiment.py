@@ -16,10 +16,12 @@ def _build_reward_fn(cfg_exp: conf.setting.GMMExperiment) -> Callable[[torch.Ten
         raise ValueError(f'Unsupported reward kind: {cfg_exp.reward_kind}')
 
     def reward_gauss(x: torch.Tensor) -> torch.Tensor:
-        return torch.exp(-(((x - cfg_exp.reward_mu) / cfg_exp.reward_sigma).square()))
+        return torch.exp(-((x / cfg_exp.reward_sigma).square()))
 
     def reward_fn(x: torch.Tensor) -> torch.Tensor:
-        return (-reward_gauss(-x) + reward_gauss(x)).squeeze()
+        return (
+            reward_gauss(x + 4) - 2 * reward_gauss(x + 3) + reward_gauss(x - 3)
+        ).squeeze()
 
     return reward_fn
 
@@ -52,8 +54,8 @@ def _build_score_model(cfg):
     model_cfg = type('_score_model_cfg', (), {})()
     model_cfg.epsilon_alpha = cfg.score_model.epsilon_alpha
     model_cfg.epsilon_beta = cfg.score_model.epsilon_beta
-    model_cfg.sampling_time_step_count = cfg.n_steps
-    model_cfg.vmap_chunk_size = cfg.vmap_chunk_size
+    model_cfg.sampling_time_step_count = cfg.score_model.n_steps
+    model_cfg.vmap_chunk_size = cfg.score_model.vmap_chunk_size
     model_cfg.sampling_max_score_norm = cfg.score_model.sampling_max_score_norm
     model_cfg.renormalize_sampled_noise = False
     model_cfg.sample_noise_scale_std = True
@@ -67,7 +69,7 @@ def _build_score_model(cfg):
 def _run_unsteered(cfg, score_model, reference_data):
     torch.manual_seed(cfg.seed)
     with torch.no_grad():
-        return score_model.sample(cfg.n_steps, reference_data)
+        return score_model.sample(cfg.score_model.n_steps, reference_data)
 
 
 def _run_fk(cfg, score_model, reference_data, reward_fn, timesteps):
@@ -164,7 +166,8 @@ def run_and_make_samples_df(cfg) -> pl.DataFrame:
     selected_device, score_model = _build_score_model(cfg)
     reference_data = gmm_sample(cfg.score_model.n_reference, selected_device)
     score_model.set_training_data(reference_data)
-    timesteps = torch.linspace(1.0, 0.0, cfg.n_steps, device=reference_data.device, dtype=reference_data.dtype)
+    # timesteps = torch.linspace(1.0, 0.0, cfg.score_model.n_steps, device=reference_data.device, dtype=reference_data.dtype)
+    timesteps = score_model.prob_path.linspace_time(cfg.score_model.n_steps, device=reference_data.device)
 
     if isinstance(cfg.steering, conf.steering.Unsteered):
         final_samples = _run_unsteered(cfg, score_model, reference_data)
