@@ -34,3 +34,15 @@
 - Syntax check: `uv run python -m compileall src`
 - Steering smoke test: `uv run python src/toy/main.py +experiment=GMM steering=RpCN steering.pcn_update_count=5 device=cpu`
 - `uv run pytest -q` currently has no active test modules after removing stale `train_toy`/`steer_toy` tests.
+
+## Marimo notebook editing guardrails
+- Use `@app.cell` function cells only (`def _(...): ... return ...`); avoid raw top-level code blocks.
+- Do not introduce shared variable names across cells; use unique per-cell locals.
+- Prefer a single final `return`; avoid early `return` branches where practical.
+- Make every used symbol an explicit dependency in the cell signature.
+- Keep shared artifacts (for example histogram bins/edges) in one dedicated cell and pass them downstream.
+- After notebook edits, run a quick audit:
+  - no `app._unparsable_cell(...)`
+  - no duplicate names introduced across edited cells
+  - no unresolved symbol dependencies between edited cells
+- If Marimo runtime still errors after file fixes, reload notebook from disk and run all cells to clear stale DAG state.
