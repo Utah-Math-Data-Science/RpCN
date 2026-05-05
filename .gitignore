@@ -10,4 +10,5 @@ generated/
 *.pth
 *.ckpt
 *.safetensors
+*.pt
 inverse/model/checkpoint/

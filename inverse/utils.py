@@ -8,6 +8,7 @@ import torchvision.transforms as T
 import numpy as np
 from math import pi
 from torch import nn
+import matplotlib.pyplot as plt
 
 
 def load_model_and_sampler():
@@ -231,10 +232,9 @@ def normalize_tensor(x):
     return img
 
 
-def load_image_by_id(id=60000, device = "cuda"): 
+def load_image_by_id(path, id=60000, device = "cuda"): 
     transform = T.Compose([T.ToTensor(), T.Normalize(mean=[0.5] * 3, std=[0.5] * 3)])
 
-    path = '~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples'
     dataset_path = Path(path).expanduser()
     
     # Construct the file path (e.g., .../samples/60000.png)
@@ -246,3 +246,16 @@ def load_image_by_id(id=60000, device = "cuda"):
         raise FileNotFoundError(f"No image found for ID: {id} at {image_file}")
     
     return transform(img).unsqueeze(0).to(device)
+
+
+
+def plot_samples(img, id, operator, seed=None):
+    
+    plt.imshow(img)
+    plt.axis("off")
+    if seed is not None: 
+        plt.savefig(f'generated/figures/{id}_{operator}_{seed}.pdf', bbox_inches='tight', pad_inches=0.0)
+    else: 
+        plt.savefig(f'generated/figures/{id}_{operator}.pdf', bbox_inches='tight', pad_inches=0.0)
+    plt.close() 
+

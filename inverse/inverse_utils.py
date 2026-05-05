@@ -4,7 +4,7 @@ from utils import load_image_by_id
 import numpy as np 
 from torch.func import grad
 
-def guidance_schedule(t, num_timesteps, kind="late", start_frac=0.5):
+def guidance_schedule(t, num_timesteps, guidance_strength = 1.25, start_frac=0.5):
     """
     Returns a scalar coeff in [0, 1] for guidance strength at timestep t.
     Reverse loop convention: t goes from (T-1) ... 0.
@@ -16,21 +16,10 @@ def guidance_schedule(t, num_timesteps, kind="late", start_frac=0.5):
     # u: 0 at start (t=T-1), 1 at end (t=0)
     u = 1.0 - (float(t) / float(T - 1))
     u = max(0.0, min(1.0, u))
-    if kind == "linear":
-        return u
-    if kind == "quad":
-        return u * u
-    if kind == "late":
+
         # hard turn-on after start_frac of the trajectory
-        return 1.0 if u >= float(start_frac) else 0.0
-    if kind == "late_quad":
-        # smooth late-only ramp; 0 until start_frac, then quadratic to 1
-        sf = float(start_frac)
-        if u <= sf:
-            return 0.0
-        v = (u - sf) / (1.0 - sf)
-        return v * v
-    raise ValueError(f"Unknown kind: {kind}")
+    return 1.0 if u >= float(start_frac) else 0.0
+
 
 
 class inverse_utils:
@@ -38,6 +27,7 @@ class inverse_utils:
         self,
         model,
         sampler,
+        path_to_validation_imgs,
         batch_size = 1,
         resampling=10,
         guidance_strength=1,
@@ -53,7 +43,7 @@ class inverse_utils:
         self.sampler = sampler
         self.dtype =   torch.float32
 
-        self.ref_image = load_image_by_id(image_id, device=device).detach().to(self.device, self.dtype)
+        self.ref_image = load_image_by_id(path_to_validation_imgs, image_id, device=device).detach().to(self.device, self.dtype)
 
         self.operator = get_operator(operator)
         self.y = self.operator(self.ref_image).detach().to(self.device, self.dtype)
@@ -106,7 +96,6 @@ class inverse_utils:
     
 
     def expected_next_fn(self, t, t_prev, x):
-        print(f'getting new mean!') 
         x = x.to(device=self.device, dtype=self.dtype)
 
         alpha_bar_t, alpha_bar_t_prev, alpha_t, beta_t = self.get_coeffecients_by_t(t, t_prev)
@@ -124,7 +113,7 @@ class inverse_utils:
 
         grad = self.get_reward_gradient(x, t_batch)
 
-        return mu + self.guidance_strength * guidance_schedule(
+        return mu +  guidance_schedule(
             t, self.sampler.num_timesteps, self.guidance_schedule
         ) * grad
 
