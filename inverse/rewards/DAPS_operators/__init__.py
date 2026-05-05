@@ -224,7 +224,7 @@ class Inpainting(Operator):
 
 
 class Blurkernel(nn.Module):
-    def __init__(self, blur_type='gaussian', kernel_size=31, std=3.0, device=None):
+    def __init__(self, blur_type='gaussian', kernel_size=61, std=3.0, device=None):
         super().__init__()
         self.blur_type = blur_type
         self.kernel_size = kernel_size
