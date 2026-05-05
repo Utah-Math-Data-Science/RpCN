@@ -142,13 +142,13 @@ def _run_rpcn(cfg, score_model, reference_data, reward_fn, timesteps):
     kernel = rpcn.KernelPreconditionedCrankNicolson(1, device=reference_data.device, dtype=reference_data.dtype)
     steering = rpcn.ResidualMCMCSteering(
         kernel,
-        torch.linspace(
+        torch.sin(torch.linspace(
             math.pi / 2 - 1e-3,
             0.05,
             cfg_rpcn.n_chains,
             device=reference_data.device,
             dtype=reference_data.dtype,
-        ).sin(),
+        ) if cfg_rpcn.n_chains > 1 else torch.tensor([0.05]).to(reference_data)),
         reward_fn=reward_fn,
         expected_next_fn=score_model.expected_next_fn,
         std_fn=score_model.std_fn,
@@ -159,7 +159,7 @@ def _run_rpcn(cfg, score_model, reference_data, reward_fn, timesteps):
             cfg_rpcn.n_chains,
             device=reference_data.device,
             dtype=reference_data.dtype,
-        ),
+        ) if cfg_rpcn.n_chains > 1 else torch.tensor([cfg_rpcn.inverse_temperature]).to(reference_data),
         kwargs_intermediate_reward={'expected_sample_fn': score_model.get_tweedie},
     )
 
