@@ -7,6 +7,7 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import math
+    import numpy as np
 
     import marimo as mo
     import polars as pl
@@ -30,6 +31,7 @@ def _():
         math,
         metropolis_hastings_sample,
         mo,
+        np,
         pl,
         rpcn,
         sns,
@@ -170,32 +172,48 @@ def _(mo, pl, reward_values, sns, x_grid):
 
 @app.cell
 def _(torch):
-    def reward_gauss(x):
+    def reward_gauss(x, s=.5):
         return torch.exp(
             -(
-                x / .5
+                x / s
             ).square()
         )
-    def reward_fn(x: torch.Tensor) -> torch.Tensor:
-        q = 0
-        # for i, m in enumerate((3, 6, 9)):
-        for i, m in enumerate((3,)):
-            q = q + (-reward_gauss(x + m) * 2 + reward_gauss(x - m)) * (i + 1)
-            q = q + reward_gauss(x + 4) * 1
-            # q = q + reward_gauss(-x, 6)
-        r = q
-        # r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
-        # r = 1e6 * x**2
-        # r = 1000 * r
+    def gauss_low_high(x, m):
+        return 1.6615 * reward_gauss(x - m) - 2 * reward_gauss(x - m + 1, s=1)
+    def reward_fn(x):
+        r = gauss_low_high(x, 3) + gauss_low_high(-x, 3)
         return r.squeeze()
-
+    
+    # def reward_fn(x: torch.Tensor) -> torch.Tensor:
+    #     q = 0
+    #     # for i, m in enumerate((3, 6, 9)):
+    #     for i, m in enumerate((3,)):
+    #         q = q + (-reward_gauss(x + m, s=1) * 2 + reward_gauss(x - m) * 1.6615) * (i + 1)
+    #         q = q + reward_gauss(x + 4) * 1.6615
+    #         q = q - 2 * reward_gauss(x - 2, s=1)
+    #         # q = q + reward_gauss(-x, 6)
+    #     r = q
+    #     # r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
+    #     # r = 1e6 * x**2
+    #     # r = 1000 * r
+    #     return r.squeeze()
     return (reward_fn,)
 
 
 @app.cell
+def _(np, x_max, x_min):
+    hist_bin_count = 60
+    hist_range = (float(x_min.value), float(x_max.value))
+    hist_bin_edges = np.linspace(hist_range[0], hist_range[1], hist_bin_count + 1)
+    return hist_bin_edges, hist_range
+
+
+@app.cell(hide_code=True)
 def _(
     fk_final,
     gmm_density,
+    hist_bin_edges,
+    hist_range,
     mh_final,
     mo,
     pl,
@@ -207,6 +225,7 @@ def _(
 ):
     has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
     plot_histogram = None
+    plot_bin_count = len(hist_bin_edges) - 1
     if has_samples_plot:
         # method_order = ["Base", "MCMC Reference", "FK Steering", "RpCN Steering"]
         method_order = ["MCMC Reference", "FK Steering", "RpCN Steering"]
@@ -254,7 +273,7 @@ def _(
                 },
                 alpha=.7,
                 col_order=method_order,
-                bins=60,
+                bins=hist_bin_edges,
                 stat='density',
                 element='step',
                 common_norm=False,
@@ -296,7 +315,13 @@ def _(
                       bbox_to_anchor=(0.4, 1.04), 
                       frameon=True, fancybox=True)
         # _g.figure.tight_layout(rect=[0, 0, 1, 1])
-        comparison_view = mo.vstack([mo.md("## Sample Comparison"), mo.as_html(_g)])
+        comparison_view = mo.vstack(
+            [
+                mo.md("## Sample Comparison"),
+                mo.md(f"Histogram spec (shared with KL): bins={plot_bin_count}, range=[{hist_range[0]:.2f}, {hist_range[1]:.2f}]"),
+                mo.as_html(_g),
+            ]
+        )
         plot_histogram = _g
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
@@ -413,8 +438,11 @@ def _(mo):
 @app.cell
 def _(
     fk_final,
+    hist_bin_edges,
+    hist_range,
     mh_final,
     mo,
+    np,
     pl,
     reward_fn,
     rpcn_final,
@@ -422,6 +450,7 @@ def _(
     unsteered_samples,
 ):
     has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
+    stats_bin_count = len(hist_bin_edges) - 1
     if has_samples_stats:
         method_frames = []
         if unsteered_samples is not None:
@@ -451,7 +480,39 @@ def _(
             )
             .sort("method", descending=True)
         )
-        stats_view = mo.vstack([mo.md("## Summary Statistics"), mo.ui.table(summary.to_dicts())])
+
+        kl_by_method = {}
+        if mh_final is not None:
+            eps = 1e-8
+            mh_x = mh_final[:, 0].cpu().numpy()
+            mh_counts, _ = np.histogram(mh_x, bins=hist_bin_edges)
+            p_mh = (mh_counts.astype(np.float64) + eps)
+            p_mh = p_mh / p_mh.sum()
+
+            for method_name in summary["method"].to_list():
+                if method_name == "MH":
+                    kl_by_method[method_name] = 0.0
+                    continue
+                method_x = stats_df.filter(pl.col("method") == method_name)["x"].to_numpy()
+                method_counts, _ = np.histogram(method_x, bins=hist_bin_edges)
+                p_method = (method_counts.astype(np.float64) + eps)
+                p_method = p_method / p_method.sum()
+                kl_by_method[method_name] = float(np.sum(p_mh * (np.log(p_mh) - np.log(p_method))))
+        else:
+            for method_name in summary["method"].to_list():
+                kl_by_method[method_name] = None
+
+        summary = summary.with_columns(
+            pl.Series("kl_to_mh", [kl_by_method[m] for m in summary["method"].to_list()])
+        )
+
+        stats_view = mo.vstack(
+            [
+                mo.md("## Summary Statistics"),
+                mo.md(f"Histogram spec (shared with plot): bins={stats_bin_count}, range=[{hist_range[0]:.2f}, {hist_range[1]:.2f}]"),
+                mo.ui.table(summary.to_dicts()),
+            ]
+        )
     else:
         stats_view = mo.md("Summary statistics will appear after running at least one sampler.")
     stats_view
@@ -804,7 +865,7 @@ def _(
             reward_fn=reward_fn,
             propose_fn=propose_step,
             resample_fn=adaptive_resample_safe,
-            potential=fk_steering.Potential.MAX,
+            potential=fk_steering.Potential.DIFFERENCE,
             intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,
             inverse_temperature=float(fk_inverse_temperature.value),
             kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},

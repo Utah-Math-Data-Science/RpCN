@@ -39,8 +39,8 @@ def _(conf, mo, rpcn):
         join RpCN on Conf.SteeringBase = RpCN.id
         where true
         and RpCN.inverse_temperature = 25
-        and 1 <= RpCN.n_chains and RpCN.n_chains <= 25
-        and 1 <= RpCN.pcn_update_count and RpCN.pcn_update_count <= 64
+        and 1 <= RpCN.n_chains and RpCN.n_chains <= 8
+        and 1 <= RpCN.pcn_update_count and RpCN.pcn_update_count <= 32
         """
     )
     return (rpcn_rows,)
