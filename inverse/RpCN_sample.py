@@ -12,9 +12,9 @@ import os
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--img_id', type=int, default=60040, help="Which validation image do you want to sample?")
+    parser.add_argument('--img_id', type=int, default=60083, help="Which validation image do you want to sample?")
     parser.add_argument('--seed', type=int, default=31, help="Which validation image do you want to sample?")
-    parser.add_argument('--operator', type=str, default="inpainting_random", help="What forward operator are you using?")
+    parser.add_argument('--operator', type=str, default="motion_blur", help="What forward operator are you using?")
     
     parser.add_argument(
         "--plot",
@@ -32,7 +32,6 @@ if __name__ == "__main__":
     batch_size = 1
     n_chains = 3 
     resampling_frequency = 10 
-    guidance_strength = 1.25
 
     guidance_schedule = "late"
 
@@ -47,7 +46,7 @@ if __name__ == "__main__":
 
     model, ddpm = load_model_and_sampler()
     
-    inverse_class = inverse_utils(model, ddpm, path_to_validation, batch_size, resampling_frequency, guidance_strength, guidance_schedule, True, args.img_id, args.operator, "cuda")
+    inverse_class = inverse_utils(model, ddpm, path_to_validation, batch_size, resampling_frequency, guidance_schedule, True, args.img_id, args.operator, "cuda")
 
 
     kernel = rpcn.KernelPreconditionedCrankNicolson(
@@ -74,7 +73,7 @@ if __name__ == "__main__":
         return timestep % inverse_class.check_every == 0
 
     with torch.no_grad():
-        print(f'Generating ...')
+        print(f'Generating Reconstructed sample for FFHQ Validation Image: {args.img_id} under Operator: {args.operator}')
         final_samples = rpcn.run(
             # key,  # PRNG key if using Jax
             inverse_class.timesteps.to(inverse_class.device),  # sampling time interval discretization

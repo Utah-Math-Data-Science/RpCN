@@ -4,7 +4,7 @@ from utils import load_image_by_id
 import numpy as np 
 from torch.func import grad
 
-def guidance_schedule(t, num_timesteps, guidance_strength = 1.25, start_frac=0.5):
+def guidance_schedule(t, num_timesteps, start_frac=0.5):
     """
     Returns a scalar coeff in [0, 1] for guidance strength at timestep t.
     Reverse loop convention: t goes from (T-1) ... 0.
@@ -30,7 +30,6 @@ class inverse_utils:
         path_to_validation_imgs,
         batch_size = 1,
         resampling=10,
-        guidance_strength=1,
         guidance_schedule="late",
         grad_norm=True,
         image_id=60000,
@@ -43,7 +42,7 @@ class inverse_utils:
         self.sampler = sampler
         self.dtype =   torch.float32
 
-        self.ref_image = load_image_by_id(path_to_validation_imgs, image_id, device=device).detach().to(self.device, self.dtype)
+        self.ref_image = load_image_by_id(path_to_validation_imgs, image_id, device=device, save=True).detach().to(self.device, self.dtype)
 
         self.operator = get_operator(operator)
         self.y = self.operator(self.ref_image).detach().to(self.device, self.dtype)
@@ -52,7 +51,6 @@ class inverse_utils:
         self.data_dim = (3, 256, 256)
         self.resampling = resampling
 
-        self.guidance_strength = guidance_strength
         self.guidance_schedule = guidance_schedule
         self.grad_norm = grad_norm
         self.alphas_cumprod = torch.from_numpy(self.sampler.alphas_cumprod).to(self.device, self.dtype)        
@@ -114,7 +112,7 @@ class inverse_utils:
         grad = self.get_reward_gradient(x, t_batch)
 
         return mu +  guidance_schedule(
-            t, self.sampler.num_timesteps, self.guidance_schedule
+            t, self.sampler.num_timesteps
         ) * grad
 
 

@@ -38,7 +38,7 @@ Supported operators include:
 
 ```text
 super_resolution
-gaussian_deblur
-motion_deblur
+gaussian_blur
+motion_blur
 random_inpainting
 ```

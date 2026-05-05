@@ -232,7 +232,7 @@ def normalize_tensor(x):
     return img
 
 
-def load_image_by_id(path, id=60000, device = "cuda"): 
+def load_image_by_id(path, id=60000, device = "cuda", save=False): 
     transform = T.Compose([T.ToTensor(), T.Normalize(mean=[0.5] * 3, std=[0.5] * 3)])
 
     dataset_path = Path(path).expanduser()
@@ -245,6 +245,9 @@ def load_image_by_id(path, id=60000, device = "cuda"):
     else:
         raise FileNotFoundError(f"No image found for ID: {id} at {image_file}")
     
+    if save==True: 
+        img.save(f'generated/figures/{id}_ground_truth.pdf', "PDF")
+
     return transform(img).unsqueeze(0).to(device)
 
 
