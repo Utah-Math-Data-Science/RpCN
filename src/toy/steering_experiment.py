@@ -19,13 +19,20 @@ def _build_reward_fn(cfg_exp: conf.setting.GMMExperiment) -> Callable[[torch.Ten
     if cfg_exp.reward_kind != conf.setting.RewardKind.SIGNED_GAUSSIAN_PAIR:
         raise ValueError(f'Unsupported reward kind: {cfg_exp.reward_kind}')
 
-    def reward_gauss(x: torch.Tensor) -> torch.Tensor:
-        return torch.exp(-((x / cfg_exp.reward_sigma).square()))
+    def reward_gauss(x: torch.Tensor, s=.5) -> torch.Tensor:
+        return torch.exp(-((x / s).square()))
 
-    def reward_fn(x: torch.Tensor) -> torch.Tensor:
-        return (
-            reward_gauss(x + 4) - 2 * reward_gauss(x + 3) + reward_gauss(x - 3)
-        ).squeeze()
+    # def reward_fn(x: torch.Tensor) -> torch.Tensor:
+    #     return (
+    #         reward_gauss(x + 4) - 2 * reward_gauss(x + 3) + reward_gauss(x - 3)
+    #     ).squeeze()
+
+    def gauss_low_high(x, m):
+        return 1.6615 * reward_gauss(x - m) - 2 * reward_gauss(x - m + 1, s=1)
+
+    def reward_fn(x):
+        r = gauss_low_high(x, 3) + gauss_low_high(-x, 3)
+        return r.squeeze()
 
     return reward_fn
 
