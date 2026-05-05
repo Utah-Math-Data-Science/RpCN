@@ -7,7 +7,7 @@ csv_dir = f"{model}/csv"
 files = os.listdir(csv_dir)
 
 
-newdf = pd.read_csv('prompt_ids.csv')
+newdf = pd.read_csv('.../prompts/prompt_ids.csv')
 total_ids = newdf['id'].tolist()
 
 

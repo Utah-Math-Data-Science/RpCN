@@ -1,5 +1,7 @@
 import spt_guidance.torch.rpcn as rpcn
-from sd_utils import RpCN_helpers, tensors_to_pil, get_prompt_by_id 
+from DDIM_utils import DDIM_helpers, tensors_to_pil, get_prompt_by_id 
+from DDPM_utils import DDPM_helpers, tensors_to_pil, get_prompt_by_id 
+
 import torch 
 import json 
 import argparse
@@ -34,18 +36,21 @@ if __name__ == "__main__":
     batch_size = 4
 
     parser = argparse.ArgumentParser(description="Retrieve a prompt from a JSON file by ID.")
-    parser.add_argument("--img_id", type=str, help="The ID of the image to look up (e.g., 005784-0093)")
-    parser.add_argument("--model", type=str, help="The stable diffusion model you want to use (e.g., v1.4, v1.5, vXL)")
-    parser.add_argument("--resample_freq", type=int, help="How often do you want to resample?")
-    parser.add_argument("--pCN_ct", type=int, help="How many pCN steps do you want to take?")
+    parser.add_argument("--img_id", default = '004971-0071', type=str, help="The prompt ID of the image to create (e.g., 004971-0071, 000562-0011)")
+    parser.add_argument("--model", default='v1.5', type=str, help="The stable diffusion model you want to use (e.g., v1.4, v1.5, vXL)")
+    parser.add_argument("--resample_freq", default = 20, type=int, help="How often do you want to resample?")
+    parser.add_argument("--pCN_ct", default = 10, type=int, help="How many pCN steps do you want to take?")
     args = parser.parse_args()
 
     prompt = get_prompt_by_id(json_path = "prompts/prompts.json", img_id = args.img_id)
 
-    torch.manual_seed(compute_seed(args.img_id))
+    torch.manual_seed(compute_seed(args.img_id, 31))
     
+    if args.model == 'v1.4':
+        image_class = DDPM_helpers(prompt=prompt, batch_size=batch_size, num_inference_steps=100, check_every=args.resample_freq, model=args.model) 
 
-    image_class = RpCN_helpers(prompt=prompt, batch_size=batch_size, num_inference_steps=100, check_every=args.resample_freq, model=args.model) 
+    else: 
+        image_class = DDIM_helpers(prompt=prompt, batch_size=batch_size, num_inference_steps=100, check_every=args.resample_freq, model=args.model) 
 
     kernel = rpcn.KernelPreconditionedCrankNicolson(
         image_class.data_dim,  # shape of one data sample, not a batch
@@ -72,6 +77,7 @@ if __name__ == "__main__":
 
 
     with torch.no_grad():
+        print(f'Generating reward aligned samples for prompt: {args.img_id}')
         final_samples = rpcn.run(
             # key,  # PRNG key if using Jax
             image_class.scheduler.timesteps.to(image_class.device),  # sampling time interval discretization
@@ -85,15 +91,20 @@ if __name__ == "__main__":
         img_array = image_class.pipe.decode_latents(final_samples[-1].detach())
         decoded_images = tensors_to_pil(img_array)
         rewards = image_class.reward_fn(img_array)
+
+
         img_dir = f"generated/{args.model}/images"
         csv_dir = f"generated/{args.model}/csv"
 
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(csv_dir, exist_ok=True)
+
         csv_name = f"{csv_dir}/{args.img_id}_rewards.csv"
+        print(f'Saving IR results to: {csv_dir}')
         save_rewards_to_csv(csv_name, rewards)
 
         # save coldest images     
+        print(f'Saving images to: {img_dir}')
         for i, img in enumerate(decoded_images):
             img.save(f"{img_dir}/{args.img_id}_{i}.png")
 

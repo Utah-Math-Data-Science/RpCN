@@ -1,7 +1,7 @@
 import torch 
 from diffusers import StableDiffusionPipeline, DDPMScheduler, StableDiffusionXLPipeline
 from PIL import Image
-from reward import rm_load
+from IR_reward import rm_load
 import numpy as np 
 import json 
 
@@ -42,7 +42,7 @@ def get_prompt_by_id(json_path, img_id):
 
 
 
-class RpCN_helpers():
+class DDPM_helpers():
     def __init__(
         self,
         model="v1.5",
@@ -83,23 +83,6 @@ class RpCN_helpers():
             
         rewards = self.ir_model.score_batched([prompt]*self.batch_size, [images[i].to(dtype=torch.float32) for i in range(images.shape[0])])
         return rewards
-    # def reward_fn(self, images):
-    #     # 1. Convert to tensor and move to device in one go
-    #     if isinstance(images, np.ndarray):
-    #         images = torch.from_numpy(images).to(device=self.device, dtype=torch.float32)
-    #         # Ensure NHWC -> NCHW format
-    #         images = images.permute(0, 3, 1, 2)
-        
-    #     # 2. Avoid list comprehension if the model supports batching
-    #     # We broadcast the prompt to match the image batch size
-    #     prompts = [self.prompt] * images.shape[0]
-        
-    #     # 3. Pass the batch directly
-    #     # Removing the [images[i]...] list comprehension prevents 
-    #     # N separate GPU kernel launches/memory slices.
-    #     rewards = self.ir_model.score_batched(prompts, list(torch.chunk(images.to(dtype=torch.float32), images.shape[0], dim=0)))
-        
-    #     return rewards
 
     def load_pipeline(self, model):
         model = model.lower()
@@ -114,9 +97,9 @@ class RpCN_helpers():
                 "runwayml/stable-diffusion-v1-5",
                 torch_dtype=self.dtype,
             ).to(self.device)
-        elif model == "xl":
-            pipe = StableDiffusionXLPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-xl-base-1.0",
+        elif model == "v2.1":
+            pipe = StableDiffusionPipeline.from_pretrained(
+                "sd2-community/stable-diffusion-2-1",
                 torch_dtype=torch.float16,
             ).to(self.device)
         else:
@@ -188,6 +171,8 @@ class RpCN_helpers():
     def std_fn(self, t, t1=None):
         if t1 is None:
             return t * 0 + 1 
+        if t1 < 0:
+            return torch.tensor(0.0)
         else: 
             alpha_bar_t, alpha_bar_t_prev, alpha_t, beta_t = self.get_coeffecients_by_t(t, t1)
             sigma_t = (((1 - alpha_bar_t_prev) / (1 - alpha_bar_t)) * beta_t).sqrt()
