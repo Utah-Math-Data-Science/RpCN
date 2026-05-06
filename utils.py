@@ -9,7 +9,7 @@ import numpy as np
 from math import pi
 from torch import nn
 import matplotlib.pyplot as plt
-
+import os 
 
 def load_model_and_sampler():
     with open("model/checkpoint/ffhq_config.yaml", "r") as f:
@@ -246,19 +246,22 @@ def load_image_by_id(path, id=60000, device = "cuda", save=False):
         raise FileNotFoundError(f"No image found for ID: {id} at {image_file}")
     
     if save==True: 
-        img.save(f'generated/figures/{id}_ground_truth.pdf', "PDF")
+        save_directory = 'generated/figures'
+        os.makedirs(save_directory, exist_ok=True)
+        img.save(f'{save_directory}/{id}_ground_truth.pdf', "PDF")
 
     return transform(img).unsqueeze(0).to(device)
 
 
 
 def plot_samples(img, id, operator, seed=None):
-    
+    save_directory = 'generated/figures'
+    os.makedirs(save_directory, exist_ok=True)
     plt.imshow(img)
     plt.axis("off")
     if seed is not None: 
-        plt.savefig(f'generated/figures/{id}_{operator}_{seed}.pdf', bbox_inches='tight', pad_inches=0.0)
+        plt.savefig(f'{save_directory}/{id}_{operator}_{seed}.pdf', bbox_inches='tight', pad_inches=0.0)
     else: 
-        plt.savefig(f'generated/figures/{id}_{operator}.pdf', bbox_inches='tight', pad_inches=0.0)
+        plt.savefig(f'{save_directory}/{id}_{operator}.pdf', bbox_inches='tight', pad_inches=0.0)
     plt.close() 
 

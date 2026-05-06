@@ -7,14 +7,16 @@ from utils import normalize_tensor
 from utils import plot_samples
 import argparse
 import os 
+import time
 
 
 
 if __name__ == "__main__":
+    start = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument('--img_id', type=int, default=60083, help="Which validation image do you want to sample?")
     parser.add_argument('--seed', type=int, default=31, help="Which validation image do you want to sample?")
-    parser.add_argument('--operator', type=str, default="motion_blur", help="What forward operator are you using?")
+    parser.add_argument('--operator', type=str, default="down_sampling", help="What forward operator are you using?")
     
     parser.add_argument(
         "--plot",
@@ -31,7 +33,7 @@ if __name__ == "__main__":
     ### kwargs
     batch_size = 1
     n_chains = 3 
-    resampling_frequency = 10 
+    resampling_frequency = 25 
 
     guidance_schedule = "late"
 
@@ -73,16 +75,18 @@ if __name__ == "__main__":
         return timestep % inverse_class.check_every == 0
 
     with torch.no_grad():
+
         print(f'Generating Reconstructed sample for FFHQ Validation Image: {args.img_id} under Operator: {args.operator}')
         final_samples = rpcn.run(
             # key,  # PRNG key if using Jax
             inverse_class.timesteps.to(inverse_class.device),  # sampling time interval discretization
             pcn_should_update_fn=pCN_update_fn,  # function to indicate whether the pCN updates should run
             # pcn_should_replica_exchange_fn=lambda t0, t1, reward: t0 % image_class.check_every == 0,  # function to indicate whether to do replica exchange
-            pcn_update_count=50,  # number of pcn steps to take per update
+            pcn_update_count=10,  # number of pcn steps to take per update
             batch_size=inverse_class.batch_size,  # number of target samples to generate at once
         )
-
+        end= time.time()
+        print(f'total time: {end - start}')
         if args.save:
 
             save_dir = "generated/tensors"

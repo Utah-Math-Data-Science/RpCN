@@ -17,7 +17,7 @@ def guidance_schedule(t, num_timesteps, start_frac=0.5):
     u = 1.0 - (float(t) / float(T - 1))
     u = max(0.0, min(1.0, u))
 
-        # hard turn-on after start_frac of the trajectory
+    # hard turn-on after halfway point 
     return 1.0 if u >= float(start_frac) else 0.0
 
 
@@ -49,12 +49,11 @@ class inverse_utils:
 
         self.batch_size = batch_size
         self.data_dim = (3, 256, 256)
-        self.resampling = resampling
 
         self.guidance_schedule = guidance_schedule
         self.grad_norm = grad_norm
         self.alphas_cumprod = torch.from_numpy(self.sampler.alphas_cumprod).to(self.device, self.dtype)        
-        self.check_every = 10 
+        self.check_every = resampling
         self.timesteps = torch.arange(self.sampler.num_timesteps - 1, -1, -1)
 
 
