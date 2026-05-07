@@ -17,33 +17,6 @@ Usage
 
 We provide implementations of the guidance algorithms in PyTorch and Jax.
 
-Source Parallel Tempering
--------------------------
-
-Example usage of Source Parallel Tempering.
-Note that this implementation assumes that the source distribution is at ``time = 0`` and the target distribution is at ``time = 1``.
-
-.. code:: python
-
-   import spt_guidance.torch.spt as spt
-   # import spt_guidance.jax.spt as spt   # for Jax
-
-   kernel = spt.KernelPreconditionedCrankNicolson(
-      data_dims  # shape of one data sample, not a batch
-   )
-   ptmcmc = spt.PTMCMC(
-       kernel,
-       potential_fn,  # function to be minimized (negative reward function)
-       torch.linspace(0., 5., num_chains, device=device),  # inverse temperatures
-       torch.linspace(torch.pi / 2 - 1e-3, 0.05, num_chains, device=device).sin(),  # pCN kernel step size
-   )
-   last_chain = ptmcmc.run(
-      # key,  # PRNG key if using Jax
-      100,  # number of iterations (tmax) to run SPT for
-      batch_size=batch_size,  # number of source samples to generate at once
-   )[-1]  # take the last (coldest) chain
-   final_samples = transport(last_chain)  # map source samples to the target distribution
-
 Feynmann-Kac Steering
 ---------------------
 
@@ -121,12 +94,6 @@ To train a mean flow model on the ``Circle`` toy dataset, run
    .. code:: bash
 
       python examples/guide_mean_flow/training_mean_flow/train_mean_flow_model.py --distribution Circle
-
-Next, to apply source parallel tempering to the model, run
-
-   .. code:: bash
-
-      python examples/guide_mean_flow/steering_mean_flow/steer_model.py --guidance SPT --distribution Circle --save 0 --plot 1
 
 and then view the results in ``examples/guide_mean_flow/steering_mean_flow/results/imgs``.
 
