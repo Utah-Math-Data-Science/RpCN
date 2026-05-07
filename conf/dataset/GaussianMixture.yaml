@@ -1,0 +1,5 @@
+defaults:
+  - _GaussianMixture
+  - _self_
+
+time_step_count: 60

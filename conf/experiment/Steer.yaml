@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - override /model: Trained
+
+fit: false
+predict: true
+
+dataset:
+  batch_count_train: 0
+  batch_count_val: 0
+  batch_count_test: 0
+  batch_size: 500
+
+steering:
+  batch_count: 64
+  sampling_step_count: 100
+  penalization_power: 0

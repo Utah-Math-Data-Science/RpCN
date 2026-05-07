@@ -1,0 +1,8 @@
+defaults:
+  - _FitzHughNagumo
+  - _self_
+
+time_step: 6.
+time_step_count: 310
+time_step_count_drop_first: 250
+odeint_rtol: 1e-6

@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - override /model: FlowMatching
+  - override /model/probability_path: VarianceExploding
+  - override /steering: NoSteering
+
+dataset:
+  batch_count_train: 8
+  batch_count_val: 1
+  batch_count_test: 1
+  batch_size: 500
+
+model:
+  epoch_count: 2000
+  lr: 1e-4
+  lr_decay: .995
+  ema_folding_count: 5
+  base_channel_count: 32
+  use_attention: False
+
+steering:
+  batch_count: 1
+  sampling_step_count: 10
+  penalization_power: 0
