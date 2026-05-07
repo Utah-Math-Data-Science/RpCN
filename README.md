@@ -2,6 +2,10 @@
 
 This branch provides an implementation of **RpCN** for **text-to-image generation with Stable Diffusion**.
 
+## Installation
+
+Install the RpCN package by running ``pip install ../main/.``
+
 ## Usage
 
 To run the sampling procedure with the hyperparameters used in the paper, specify:
