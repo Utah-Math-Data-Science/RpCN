@@ -1,0 +1,57 @@
+[project]
+name = "spt-guidance"
+version = "0.1.0"
+description = "Official source parallel tempering implementation library. Also, includes other an unofficial Feynmann-Kac (FK) steering and other test-time guidance methods."
+readme = "README.rst"
+licence = { file = "LICENCE" }
+authors = [
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=2.0.0",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev_torch = [
+    "seaborn>=0.13.2",
+    # "numpy>=2.4.0",
+    "torch>=2.0.0",
+    # "torch>=2.9.1",
+    # "jupyterlab>=4.5.1",
+    # "matplotlib>=3.10.8",
+    # "tqdm>=4.67.1",
+    "tqdm>=4.67.3",
+]
+dev_jax = [
+    "jax>=0.4.0 ; sys_platform != 'linux'",
+    "jax[cuda12]>=0.4.0 ; sys_platform == 'linux'",
+    # "numpy>=2.4.0",
+    # "jax>=0.8.2 ; sys_platform != 'linux'",
+    # "jax[cuda12]>=0.8.2 ; sys_platform == 'linux'",
+    # "jupyterlab>=4.5.1",
+    # "matplotlib>=3.10.8",
+    # "tqdm>=4.67.1",
+]
+docs = [
+    # "sphinx>=9.1.0",
+]
