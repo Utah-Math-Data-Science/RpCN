@@ -2,15 +2,19 @@
 
 This branch provides an implementation of **RpCN** for solving image inverse problems on the **FFHQ dataset**.
 
+## Installation
+
+Install the RpCN package by running ``pip install ../main/.``
+
 ## Before Running
 
 Before running the code, download the pretrained FFHQ DDPM checkpoint and the FFHQ 1K validation set.
 
 ### Pretrained FFHQ DDPM Checkpoint
 
-We use the FFHQ DDPM checkpoint released with **DPS** so that differences in inverse problem performance are attributable to the sampling/guidance method rather than to differences in the pretrained generative model. 
+We use the FFHQ DDPM checkpoint released with **DPS** so that differences in inverse problem performance are attributable to the sampling/guidance method rather than to differences in the pretrained generative model.
 
-To download it, download `ffhq_10.pt` from the following Google Drive folder 
+To download it, download `ffhq_10.pt` from the following Google Drive folder
 ```text
 https://drive.google.com/drive/folders/1jElnRoFv7b31fG0v6pTSQkelbSX3xGZh
 ```
