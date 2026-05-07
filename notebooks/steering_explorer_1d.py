@@ -208,7 +208,7 @@ def _(np, x_max, x_min):
     return hist_bin_edges, hist_range
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     fk_final,
     gmm_density,
@@ -243,9 +243,8 @@ def _(
                 pl.DataFrame({"method": ["RpCN Steering"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()})
             )
         if mh_final is not None:
-            sample_frames.append(
-                pl.DataFrame({"method": ["MCMC Reference"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
-            )
+            mh_df = pl.DataFrame({"method": ["MCMC Reference"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
+            sample_frames.append(mh_df)
         samples_df = pl.concat(sample_frames) if sample_frames else pl.DataFrame({"method": [], "x": []})
 
         reward_scaled = reward_values.cpu().numpy()
@@ -271,7 +270,7 @@ def _(
                     'RpCN Steering': 'tab:orange',
                     'MCMC Reference': 'tab:grey',
                 },
-                alpha=.7,
+                alpha=.6,
                 col_order=method_order,
                 bins=hist_bin_edges,
                 stat='density',
@@ -288,6 +287,7 @@ def _(
         )
         for (r, c, h), _ in _g.facet_data():
             ax = _g.axes[r, c]
+            _method_name = _g.col_names[c]
             sns.lineplot(
                 data=overlay_df,
                 x='x',
@@ -307,12 +307,24 @@ def _(
                 linestyle='--',
                 label='Reward (scaled)',
             )
+            if mh_final is not None and _method_name != "MCMC Reference":
+                sns.histplot(
+                    data=mh_df,
+                    x='x',
+                    ax=ax,
+                    zorder=-1,
+                    stat='density',
+                    bins=hist_bin_edges,
+                    color='tab:grey',
+                    element='step',
+                    label='Reference tilted target',
+                )
             ax.set_xlabel('')
             ax.get_legend().remove()
         # _g.axes.flat[0].set_ylabel("Density")
-        handles, legend_labels = _g.axes.flat[0].get_legend_handles_labels()
+        handles, legend_labels = _g.axes.flat[1].get_legend_handles_labels()
         _g.add_legend(dict(zip(legend_labels, handles)), loc="upper center", ncol=3,
-                      bbox_to_anchor=(0.4, 1.04), 
+                      bbox_to_anchor=(0.3, 1.04), 
                       frameon=True, fancybox=True)
         # _g.figure.tight_layout(rect=[0, 0, 1, 1])
         comparison_view = mo.vstack(

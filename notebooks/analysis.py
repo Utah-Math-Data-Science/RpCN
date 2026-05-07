@@ -95,8 +95,8 @@ def _(mo, to_plot):
 @app.cell
 def _(pivoted):
     pivoted_pd = pivoted.to_pandas().set_index('n_chains')
-    pivoted_pd.index = pivoted_pd.index.rename('$K+1$, replicas')
-    pivoted_pd.columns = pivoted_pd.columns.astype(int).rename('$M$, pCN steps with replica exchanges')
+    pivoted_pd.index = pivoted_pd.index.rename('$K+1$')#.rename('$K+1$, replicas')
+    pivoted_pd.columns = pivoted_pd.columns.astype(int).rename('$M$')#.rename('$M$, pCN steps with replica exchanges')
     pivoted_pd = pivoted_pd.sort_index().sort_index(axis=1)
     pivoted_pd
     return (pivoted_pd,)
@@ -116,7 +116,9 @@ def _(pivoted_pd, plt, sns):
             cmap='viridis'
         )
     )
-    ax.invert_yaxis()
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position('top')
+    # ax.invert_yaxis()
     ax
     return (ax,)
 
