@@ -21,7 +21,7 @@ dependencies = [
     "orbax-checkpoint>=0.11.31",
     "polars[pyarrow]>=1.37.1",
     "seaborn>=0.13.2",
-    "spt-guidance>=0.1.0",
+    "spt-guidance",
     "torch>=2.9.1",
 ]
 
@@ -39,9 +39,7 @@ torch = [
 hydra-orm = [
     { git = "https://github.com/reepoi/hydra-orm", tag = "v0.2.0" },
 ]
-spt-guidance = [
-    { path = "../Mean_Flow_Steering" ,editable = true },
-]
+spt-guidance = { git = "ssh://git@github.com/Utah-Math-Data-Science/RpCN.git" }
 
 [[tool.uv.index]]
 name = "pytorch"
