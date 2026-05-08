@@ -171,10 +171,11 @@ class JaxLightning(pl.LightningModule):
                             (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim),
                         ),
                         jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, self.cfg.steering.chain_count)),
+                        inverse_temperature=jnp.linspace(0, self.cfg.steering.tilt, self.cfg.steering.chain_count),
                         reward_fn=partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
                         expected_next_fn=expected_next_fn,
+                        std_fn=lambda t0, t1=None: jnp.sqrt(self.diffusion.sigma(1 - t0)**2 - self.diffusion.sigma(1 - t1)**2) if t1 is not None else self.diffusion.sigma(1 - t0),
                         intermediate_reward=intermediate_reward,
-                        inverse_temperature=jnp.linspace(0, self.cfg.steering.tilt, self.cfg.steering.chain_count),
                         kwargs_intermediate_reward=kwargs_intermediate_reward,
                     )
         else:
@@ -272,7 +273,7 @@ class JaxLightning(pl.LightningModule):
             batch = self.rpcn.run(
                 key,
                 self.times,
-                stds=self.diffusion.sigma(1 - self.times),
+                pcn_should_update_fn=lambda time_step, *_: time_step >= len(self.times) // 3.5 ,
                 pcn_update_count=self.cfg.steering.pcn_update_count,
                 batch_size=self.cfg.dataset.batch_size,
             )[-1]
