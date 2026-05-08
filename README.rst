@@ -1,5 +1,18 @@
-Installation
-============
+Test-Time Sequential Steering of Diffusion Models via Preconditioned Crank-Nicolson
+===================================================================================
+
+Code repository for `Test-Time Sequential Steering of Diffusion Models via Preconditioned Crank-Nicolson <https://openreview.net/forum?id=N7zXHlKXnl>`_.
+Implementations for Residual preconditioned Crank-Nicolson (RpCN) and other test-time guidance methods are provided as an installable Python package (see `Usage`_).
+
+The code for replicating the paper's experiments are on different branches of this Git repository:
+
+   * `toy <https://github.com/Utah-Math-Data-Science/RpCN/tree/toy>`_: Code for **Section 5.1: Synthetic Expermiment**.
+   * `image_gen <https://github.com/Utah-Math-Data-Science/RpCN/tree/image_gen>`_: Code for **Section 5.2: Conditional Image Generation**.
+   * `dynamical-systems <https://github.com/Utah-Math-Data-Science/RpCN/tree/dynamical-systems>`_: Code for **Section 5.3: Dynamical Systems**.
+   * `inverse_problems <https://github.com/Utah-Math-Data-Science/RpCN/tree/inverse_problems>`_: Code for **Section 5.4: Inverse Problems**.
+
+Library Installation
+====================
 
 Clone the repository and install using ``pip`` or ``uv``:
 
@@ -9,7 +22,7 @@ Clone the repository and install using ``pip`` or ``uv``:
 
 .. warning::
 
-   The dependency versions for package have been lowered to maximize compatibility potential without verification of compatibility.
+   The dependency versions for PyTorch and Jax have not been specified to maximize compatibility potential without verification of compatibility.
    We hope it is compatible with the versions of PyTorch or Jax that your project is using.
 
 Usage
@@ -17,41 +30,10 @@ Usage
 
 We provide implementations of the guidance algorithms in PyTorch and Jax.
 
-Feynmann-Kac Steering
----------------------
-
-Example usage of Feynmann-Kac Steering.
-Note that this implementation assumes that the source distribution is at ``time = 0`` and the target distribution is at ``time = 1``.
-
-.. code:: python
-
-   import spt_guidance.torch.fk_steering as fk_steering
-   # import spt_guidance.jax.fk_steering as fk_steering   # for Jax
-
-   fk = fk_steering.FeynmannKac(
-       init_param_fn=partial(torch.randn, data_dims, device=device),  # data_dims is shape of one data sample, not a batch
-       reward_fn=reward_fn,  # function be be maximized (reward function)
-       propose_fn=propose_fn,  # function that updates the current particles to the next time step
-       resample_fn=fk_steering.ResampleFn.adaptive_resample,  # function to resample the particles based on their potential
-       potential=fk_steering.Potential.MAX,  # how the potential of each particle is computed
-       intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,  # how the intermediate reward of each particle is computed
-       inverse_temperature=5.,  # the tilt of the target distribution
-       kwargs_intermediate_reward=dict(
-           expected_sample_fn=lambda t0, z: propose_fn(t0, 1., z),  # function to return the expected final samples (at time=1) of the current particles
-       ),
-   )
-   final_samples = fk.run(
-      # key,  # PRNG key if using Jax
-      times,  # sampling time interval discretization
-      4,  # number of FK Steering chains to use
-      batch_size=batch_size,  # number of target samples to generate at once
-   )
-
 Residual preconditioned Crank-Nicolson Steering
 -----------------------------------------------
 
 Example usage of Residual preconditioned Crank-Nicolson Steering (RpCN-Steering).
-Note that this implementation assumes that the source distribution is at ``time = 0`` and the target distribution is at ``time = 1``.
 
 .. code:: python
 
@@ -70,7 +52,7 @@ Note that this implementation assumes that the source distribution is at ``time 
        intermediate_reward=rpcn.IntermediateReward.EXPECTED_SAMPLE,  # how the intermediate reward of each particle is computed
        inverse_temperature=torch.linspace(0., 5., num_chains, device=device),  # inverse temperatures
        kwargs_intermediate_reward=dict(
-           expected_sample_fn=expected_sample_fn,  # function to return the expected final samples (at time=1) of the current particles
+           expected_sample_fn=expected_sample_fn,  # function to return the expected final samples of the current particles
        ),
    )
    final_samples = rpcn.run(
@@ -82,39 +64,57 @@ Note that this implementation assumes that the source distribution is at ``time 
       batch_size=batch_size,  # number of target samples to generate at once
    )
 
-Examples
-========
-We provide some examples of using the library in the ``examples`` directory.
+Source Parallel Tempering
+-------------------------
 
-Mean flow steering
-------------------
-This example contains code to train a mean flow model on 2D toy datasets and then guide it.
-To train a mean flow model on the ``Circle`` toy dataset, run
+Example usage of Source Parallel Tempering.
 
-   .. code:: bash
+.. code:: python
 
-      python examples/guide_mean_flow/training_mean_flow/train_mean_flow_model.py --distribution Circle
+   import spt_guidance.torch.spt as spt
+   # import spt_guidance.jax.spt as spt   # for Jax
 
-and then view the results in ``examples/guide_mean_flow/steering_mean_flow/results/imgs``.
+   kernel = spt.KernelPreconditionedCrankNicolson(
+      data_dims  # shape of one data sample, not a batch
+   )
+   ptmcmc = spt.PTMCMC(
+       kernel,
+       potential_fn,  # function to be minimized (negative reward function)
+       torch.linspace(0., 5., num_chains, device=device),  # inverse temperatures
+       torch.linspace(torch.pi / 2 - 1e-3, 0.05, num_chains, device=device).sin(),  # pCN kernel step size
+   )
+   last_chain = ptmcmc.run(
+      # key,  # PRNG key if using Jax
+      100,  # number of iterations (tmax) to run SPT for
+      batch_size=batch_size,  # number of source samples to generate at once
+   )[-1]  # take the last (coldest) chain
+   final_samples = transport(last_chain)  # map source samples to the target distribution
 
-Installation for library development
-====================================
+Feynmann-Kac Steering
+---------------------
 
-#. Install ``uv``:
+Example usage of Feynmann-Kac Steering.
 
-   .. code:: bash
+.. code:: python
 
-      curl -LsSf https://astral.sh/uv/install.sh | sh
+   import spt_guidance.torch.fk_steering as fk_steering
+   # import spt_guidance.jax.fk_steering as fk_steering   # for Jax
 
-#. Install the dependencies in ``pyproject.toml`` dependency-groups.
-   For example,
-
-   .. code:: bash
-
-      uv pip install torch==2.9.1
-
-#. Activate the Python virtual environment:
-
-   .. code:: bash
-
-      source .venv/bin/activate
+   fk = fk_steering.FeynmannKac(
+       init_param_fn=partial(torch.randn, data_dims, device=device),  # data_dims is shape of one data sample, not a batch
+       reward_fn=reward_fn,  # function be be maximized (reward function)
+       propose_fn=propose_fn,  # function that updates the current particles to the next time step
+       resample_fn=fk_steering.ResampleFn.adaptive_resample,  # function to resample the particles based on their potential
+       potential=fk_steering.Potential.MAX,  # how the potential of each particle is computed
+       intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,  # how the intermediate reward of each particle is computed
+       inverse_temperature=5.,  # the tilt of the target distribution
+       kwargs_intermediate_reward=dict(
+           expected_sample_fn=lambda t0, z: propose_fn(t0, 1., z),  # function to return the expected final samples of the current particles
+       ),
+   )
+   final_samples = fk.run(
+      # key,  # PRNG key if using Jax
+      times,  # sampling time interval discretization
+      4,  # number of FK Steering chains to use
+      batch_size=batch_size,  # number of target samples to generate at once
+   )
