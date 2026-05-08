@@ -70,7 +70,7 @@ Residual preconditioned Crank-Nicolson
 
 .. code:: bash
 
-   python src/userfm/main.py +experiment=SteerLorenz63 steering=RpCN steering.chain_count=8 steering.pcn_update_count=8 steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=8.29  model.conf=o53qnpz8
+   python src/userfm/main.py +experiment=SteerLorenz63 steering=RpCN steering.chain_count=8 steering.pcn_update_count=8 steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=8.29 model.conf=o53qnpz8
    python src/userfm/main.py +experiment=SteerFitzHughNagumo steering=RpCN steering.chain_count=8 steering.pcn_update_count=8 steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=10.27 model.conf=aezlb9vb
 
 Feynmann-Kac
@@ -79,4 +79,4 @@ Feynmann-Kac
 .. code:: bash
 
    python src/userfm/main.py +experiment=SteerLorenz63 steering=FeynmannKac steering.ensemble_size=8 steering.potential=DIFFERENCE steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=8.29 model.conf=o53qnpz8
-   python src/userfm/main.py +experiment=SteerFitzHughNagumo steering=FeynmannKac steering.ensemble_size=2 steering.potential=DIFFERENCE steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=10.27 model.conf=aezlb9vb
+   python src/userfm/main.py +experiment=SteerFitzHughNagumo steering=FeynmannKac steering.ensemble_size=8 steering.potential=DIFFERENCE steering/intermediate_reward=FeynmannKacIntermediateRewardExpectedSample steering.tilt=10.27 model.conf=aezlb9vb
