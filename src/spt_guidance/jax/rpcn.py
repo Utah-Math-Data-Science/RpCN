@@ -13,56 +13,6 @@ class IntermediateReward(str, enum.Enum):
     SUB_ENSEMBLE_PUSHFORWARD = 'pushforward'
 
 
-class ResampleFn:
-    """
-    Collection of resampling functions. Note that ``do_resample`` is intended
-    to be used by other resampling functions to actually perform the resampling.
-    Some of these functions also may take more arguments than will be passed by
-    the ``FeynmannKac`` class, so use ``functools.partial``.
-    """
-    @staticmethod
-    def do_resample(key, ensemble, probabilities):
-        """
-        Utility function to perform the resampling of the ensemble.
-
-        Args
-        ----
-        key : jax.random.PRNGKey
-            Pseudo-random number generator key.
-        ensemble : jnp.Array[batch_size, ...]
-            The ensemble.
-        probabilities : jnp.Array[batch_size, 1]
-            The probability of sampling each ensemble member.
-
-        Returns
-        -------
-        jnp.Array[batch_size, ...]
-            The new ensemble members after resampling.
-        """
-        return jax.random.choice(key, ensemble, shape=ensemble.shape[:1], p=probabilities)
-
-    @staticmethod
-    def adaptive_resample(key, time_step, ensemble, potentials):
-        r"""
-        Adaptive resampling of the ensemble. Resamples when the effective
-        sample size (ESS) is less than one half of the ensemble size :math:`K`.
-
-        .. math::
-
-            \mathrm{ESS} = 1 / \sum_{k = 1}^K \hat{G}_k^2
-
-        where :math:`\hat{G}_k` = G_k / \sum_{k = 1}^K G_k` and :math:`G_k`
-        is the potential of ensemble member :math:`k`.
-        """
-        probabilities = potentials / potentials.sum()
-        effective_sample_size = 1 / jnp.square(probabilities).sum()
-        return jnp.where(
-            effective_sample_size < ensemble.shape[0] // 2,
-            ResampleFn.do_resample(key, ensemble, probabilities),
-            ensemble,
-        )
-
-
 class KernelPreconditionedCrankNicolson(spt.Kernel):
     r"""
     Preconditioned Crank-Nicolson kernel.
@@ -146,15 +96,18 @@ class ResidualMCMCSteering:
 
     Keyword Args
     ------------
-    reward_fn : Callable[param: jnp.Array[batch_size, ...]]
-        Computes the reward of a param at the end time, which is to be maximized.
     inverse_temperature : jnp.Array
         One-dimensional array of inverse temperatures :math:`\beta_k = 1/T_k`.
+    reward_fn : Callable[param: jnp.Array[batch_size, ...]]
+        Computes the reward of a param at the end time, which is to be maximized.
+    expected_next_fn : Callable[t0: scalar, t1: scalar, param: jnp.Array[batch_size, ...]]
+        Returns the expected param at time ``t1`` given the param at ``t0``.
+    std_fn : Callable[t0: scalar, t1: scalar = None]
+        If ``t1`` is ``None``, returns the standard deviation of all dimensions of the param at time ``t0``.
+        Otherwise, returns the standard deviation of all dimensions of the param at time ``t1`` given the param at ``t0``.
     intermediate_reward : IntermediateReward
         One of ``IntermediateReward`` or its string value. Specificies the
         intermediate reward calculation to use.
-    expected_next_fn : Callable[t0: scalar, t1: scalar, param: jnp.Array[batch_size, ...]]
-        Returns the expected param at time ``t1`` given the param at ``t0``.
     kwargs_intermediate_reward : dict
         Additional keyword arguments for building the intermediate reward function.
 
@@ -171,10 +124,11 @@ class ResidualMCMCSteering:
         self,
         kernel,
         *args_kernel_propose,
+        inverse_temperature,
         reward_fn,
         expected_next_fn,
+        std_fn,
         intermediate_reward,
-        inverse_temperature,
         kwargs_intermediate_reward=None,
     ):
         try:
@@ -203,6 +157,7 @@ class ResidualMCMCSteering:
             ),
         ))
         self.expected_next_fn = jax.jit(jax.vmap(expected_next_fn, in_axes=(None, None, 0)))
+        self.std_fn = std_fn
         self.inverse_temperature = inverse_temperature
         self.chain_count = jnp.size(inverse_temperature)
         self.update_chain_jit = jax.vmap(
@@ -214,8 +169,9 @@ class ResidualMCMCSteering:
         self,
         key,
         times,
-        stds,
         *,
+        pcn_should_update_fn=lambda *_: True,
+        pcn_should_replica_exchange_fn=lambda *_: True,
         pcn_update_count=1,
         batch_size=1,
     ):
@@ -233,6 +189,12 @@ class ResidualMCMCSteering:
 
         Keyword Args
         ------------
+        pcn_should_update_fn : Callable[time_step: int, t0: scalar, t1: scalar, reward: torch.Tensor[chain_count, batch_size]]
+            Returns boolean indicating whether the pCN update routine should run.
+        pcn_should_replica_exchange_fn : Callable[time_step: int, t0: scalar, t1: scalar, pcn_step: int, reward: torch.Tensor[chain_count, batch_size]]
+            Returns boolean indicating whether to do replica exchange.
+        pcn_update_count : int
+            Number of sample updates and chain swaps (replica exchanges).
         batch_size : int, default 1
             The batch size of params to sample.
 
@@ -248,31 +210,28 @@ class ResidualMCMCSteering:
         ) = jax.random.split(key, 3)
         batch = self.init_param(
             jax.random.split(key_initial_sample, (self.chain_count, batch_size)),
-            stds[0],
+            self.std_fn(times[0]),
         )
         del key_initial_sample
         reward_with_unit_temperature = self.intermediate_reward_fn_vmap(jax.random.split(key_reward, self.chain_count), times[0], batch)
         del key_reward
-        for time_step, (t0, t1, std0, std1) in enumerate(zip(times, times[1:], stds, stds[1:])):
+        for time_step, (t0, t1) in enumerate(zip(times, times[1:])):
+            std = self.std_fn(t0, t1=t1)
             (
                 key_sample_noise,
                 key_reward,
                 key_pcn,
                 key_loop,
             ) = jax.random.split(key_loop, 4)
-            std_dev = jnp.sqrt(std0**2 - std1**2)
             sample_noise = self.init_param(
                 jax.random.split(key_sample_noise, (self.chain_count, batch_size)),
-                std_dev,
+                std,
             )
             expected_next = self.expected_next_fn(t0, t1, batch)
             reward_with_unit_temperature = self.intermediate_reward_fn_vmap(
                 jax.random.split(key_reward, self.chain_count), t1, expected_next + sample_noise
             )
-            did_pcn = False
-            if time_step >= len(times) // 3.5:
-                did_pcn = True
-            # if True:
+            if pcn_should_update_fn(time_step, t0, t1, reward_with_unit_temperature):
                 for pcn_update in range(pcn_update_count):
                     (
                         key_update_chains,
@@ -290,40 +249,22 @@ class ResidualMCMCSteering:
                         ),
                         reward_with_unit_temperature,
                         self.inverse_temperature,
-                        std_dev,
+                        std,
                         *self.args_kernel_propose,
                     )
-                    # print('IN PCN LOOP: Time step', time_step, 'PCN Step', pcn_update)
-                    # print('IN PCN LOOP: Mean reward with unit temperature (coldest chain)', (reward_with_unit_temperature[-1] > 0).astype(jnp.float32).mean())
-                    # print('IN PCN LOOP: Mean intermediate reward', (self.intermediate_reward_fn_vmap(
-                    #        jax.random.split(key_update_chains, self.chain_count), t1, expected_next + sample_noise  # key does not matter for tweedies
-                    #     )[-1] > 0).astype(jnp.float32).mean())
-                    for k in range(self.chain_count - 1):
-                        (
-                            key_swap,
-                            key_swap_chains,
-                        ) = jax.random.split(key_swap_chains)
-                        reward_with_unit_temperature_before_swap = reward_with_unit_temperature
-                        sample_noise, reward_with_unit_temperature = self.swap_chain(key_swap, sample_noise, reward_with_unit_temperature_before_swap, k)
-                        # use same key to ensure same swap
-                        expected_next, reward_with_unit_temperature2 = self.swap_chain(key_swap, expected_next, reward_with_unit_temperature_before_swap, k)
-                        assert jnp.all(reward_with_unit_temperature == reward_with_unit_temperature2)
-                    # print('IN PCN LOOP (after swap): Time step', time_step, 'PCN Step', pcn_update)
-                    # print('IN PCN LOOP (after swap): Mean reward with unit temperature (coldest chain)', (reward_with_unit_temperature[-1] > 0).astype(jnp.float32).mean())
-                    # print('IN PCN LOOP (after swap): Mean intermediate reward', (self.intermediate_reward_fn_vmap(
-                    #        jax.random.split(key_update_chains, self.chain_count), t1, expected_next + sample_noise  # key does not matter for tweedies
-                    #     )[-1] > 0).astype(jnp.float32).mean())
+                    if pcn_should_replica_exchange_fn(time_step, t0, t1, pcn_update, reward_with_unit_temperature):
+                        for k in range(self.chain_count - 1):
+                            (
+                                key_swap,
+                                key_swap_chains,
+                            ) = jax.random.split(key_swap_chains)
+                            reward_with_unit_temperature_before_swap = reward_with_unit_temperature
+                            sample_noise, reward_with_unit_temperature = self.swap_chain(key_swap, sample_noise, reward_with_unit_temperature_before_swap, k)
+                            # use same key to ensure same swap
+                            expected_next, reward_with_unit_temperature2 = self.swap_chain(key_swap, expected_next, reward_with_unit_temperature_before_swap, k)
+                            # assert jnp.all(reward_with_unit_temperature == reward_with_unit_temperature2)
             batch = expected_next + sample_noise
-            # if did_pcn:
-            #     print('IN LOOP: Time step', time_step)
-            #     print('IN LOOP: Mean reward with unit temperature (coldest chain)', (reward_with_unit_temperature[-1] > 0).astype(jnp.float32).mean())
-            #     print('IN LOOP: Mean intermediate reward', (self.intermediate_reward_fn_vmap(
-            #            jax.random.split(key_update_chains, self.chain_count), t1, batch  # key does not matter for tweedies
-            #         )[-1] > 0).astype(jnp.float32).mean())
-        print('Mean reward with unit temperature (coldest chain)', (reward_with_unit_temperature[-1] > 0).astype(jnp.float32).mean())
         key_reward, _ = jax.random.split(key_pcn)
-        print('Mean intermediate reward', (self.intermediate_reward_fn(key_reward, t1, batch[-1]) > 0).astype(jnp.float32).mean())
-        print('Mean reward', (self.reward_fn(batch[-1]) > 0).astype(jnp.float32).mean())
         return batch
 
     def update_chain(self, key, expected_next, param, reward_fn, reward_with_unit_temperature, inverse_temperature, std, *args_kernel_propose):
