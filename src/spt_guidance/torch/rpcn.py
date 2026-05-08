@@ -92,10 +92,10 @@ class ResidualMCMCSteering:
 
     Keyword Args
     ------------
-    reward_fn : Callable[param: torch.Tensor[batch_size, ...]]
-        Computes the reward of a param at the end time, which is to be maximized.
     inverse_temperature : torch.Tensor
         One-dimensional array of inverse temperatures :math:`\beta_k = 1/T_k`.
+    reward_fn : Callable[param: torch.Tensor[batch_size, ...]]
+        Computes the reward of a param at the end time, which is to be maximized.
     expected_next_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
         Returns the expected param at time ``t1`` given the param at ``t0``.
     std_fn : Callable[t0: scalar, t1: scalar = None]
