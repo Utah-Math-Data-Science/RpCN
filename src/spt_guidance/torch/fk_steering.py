@@ -30,7 +30,7 @@ class ResampleFn:
         ----
         ensemble : torch.Tensor[batch_size, ...]
             The ensemble.
-        probabilities : torch.Tensor[batch_size, 1]
+        probabilities : torch.Tensor[batch_size]
             The probability of sampling each ensemble member.
 
         Returns
@@ -75,7 +75,7 @@ class FeynmannKac:
         Computes the reward of a param at the end time, which is to be maximized.
     propose_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
         Returns a proposal param for ``t1`` given the current param at ``t0``.
-    resample_fn : Callable[time_step: int, param: torch.Tensor[batch_size, ...], potential: torch.Tensor[batch_size, 1]]
+    resample_fn : Callable[time_step: int, param: torch.Tensor[batch_size, ...], potential: torch.Tensor[batch_size]]
         Returns a new param ensemble given the ``param`` ensemble at ``time_step`` and each ensemble member ``potential``.
     potential : Potential
         One of ``Potential`` or its string value. Specificies the particle

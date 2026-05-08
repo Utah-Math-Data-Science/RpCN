@@ -34,7 +34,7 @@ class ResampleFn:
             Pseudo-random number generator key.
         ensemble : jnp.Array[batch_size, ...]
             The ensemble.
-        probabilities : jnp.Array[batch_size, 1]
+        probabilities : jnp.Array[batch_size]
             The probability of sampling each ensemble member.
 
         Returns
@@ -78,7 +78,7 @@ class FeynmannKac:
         Computes the reward of a param at the end time, which is to be maximized.
     propose_fn : Callable[key: jax.random.PRNGKey, t0: scalar, t1: scalar, param: jnp.Array[batch_size, ...]]
         Returns a proposal param for ``t1`` given the current param at ``t0``.
-    resample_fn : Callable[key: jax.random.PRNGKey, time_step: int, param: jnp.Array[batch_size, ...], potential: jnp.Array[batch_size, 1]]
+    resample_fn : Callable[key: jax.random.PRNGKey, time_step: int, param: jnp.Array[batch_size, ...], potential: jnp.Array[batch_size]]
         Returns a new param ensemble given the ``param`` ensemble at ``time_step`` and each ensemble member ``potential``.
     potential : Potential
         One of ``Potential`` or its string value. Specificies the particle
