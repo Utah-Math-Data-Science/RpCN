@@ -5,11 +5,9 @@ build/
 dist/
 wheels/
 *.egg-info
-**/.ipynb_checkpoints
+
+# Sphinx
+docs/_build
 
 # Virtual environments
 .venv
-
-# User-generated files
-*.pdf
-*.csv
