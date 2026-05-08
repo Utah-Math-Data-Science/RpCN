@@ -30,10 +30,10 @@ Usage
 
 We provide implementations of the guidance algorithms in PyTorch and Jax.
 
-Residual preconditioned Crank-Nicolson Steering
------------------------------------------------
+Residual preconditioned Crank-Nicolson
+--------------------------------------
 
-Example usage of Residual preconditioned Crank-Nicolson Steering (RpCN-Steering).
+Example usage of Residual preconditioned Crank-Nicolson (RpCN).
 
 .. code:: python
 
