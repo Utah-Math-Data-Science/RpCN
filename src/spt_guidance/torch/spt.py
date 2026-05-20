@@ -54,8 +54,8 @@ class KernelPreconditionedCrankNicolson(Kernel):
     std : scalar
         The diagonal element of the covariance.
     """
-    def __init__(self, shape, std=1):
-        super().__init__(shape)
+    def __init__(self, shape, dtype=None, device=None, std=1):
+        super().__init__(shape, dtype=dtype, device=device)
         self.std = std
 
     def propose(self, param, step_size, drift=None):
