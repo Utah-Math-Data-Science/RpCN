@@ -67,7 +67,7 @@ def _(gmm_density, means, mo, pl, sns, stds, weights, x_grid):
         }
     ).with_row_index("mode")
 
-    _g = sns.relplot(
+    gmm_plot = sns.relplot(
         data=gmm_df.to_dict(as_series=False),
         x="x",
         y="density",
@@ -77,7 +77,7 @@ def _(gmm_density, means, mo, pl, sns, stds, weights, x_grid):
         color="tab:red",
         linewidth=2.0,
     )
-    gmm_ax = _g.axes.flat[0]
+    gmm_ax = gmm_plot.axes.flat[0]
     zero_y = [0.0] * len(modes_df)
     sns.scatterplot(x=modes_df["mean"].to_numpy(), y=zero_y, ax=gmm_ax, color="#1971c2", s=60, label="mode means")
     for row in modes_df.iter_rows(named=True):
@@ -87,8 +87,8 @@ def _(gmm_density, means, mo, pl, sns, stds, weights, x_grid):
     gmm_ax.set_ylabel("density")
     gmm_ax.grid(alpha=0.2)
     gmm_ax.legend(loc="upper right")
-    _g.figure.tight_layout()
-    gmm_view = mo.vstack([mo.md("## GMM Preview"), mo.as_html(_g.figure)])
+    gmm_plot.figure.tight_layout()
+    gmm_view = mo.vstack([mo.md("## GMM Preview"), mo.as_html(gmm_plot.figure)])
     gmm_view
     return
 
@@ -108,7 +108,6 @@ def _(mo, n_modes):
     else:
         mean_inits_half = [i for i in range((mode_count + 1) // 2)]
     mean_inits = sorted(set([-i for i in mean_inits_half] + mean_inits_half))
-    print(mean_inits)
     mean_array = mo.ui.array(
         [
             mo.ui.number(start=-20.0, stop=20.0, step=0.1, value=float(2 * 3 * default_std * mean_inits[idx]), label=f"mean_{idx}")
@@ -149,7 +148,7 @@ def _(mo, pl, reward_values, sns, x_grid):
             "reward": reward_values.cpu().numpy().tolist(),
         }
     )
-    _g = sns.relplot(
+    reward_plot = sns.relplot(
         data=reward_df.to_dict(as_series=False),
         x="x",
         y="reward",
@@ -159,13 +158,13 @@ def _(mo, pl, reward_values, sns, x_grid):
         color="tab:red",
         linewidth=2.0,
     )
-    reward_ax = _g.axes.flat[0]
+    reward_ax = reward_plot.axes.flat[0]
     reward_ax.set_title("Reward Preview")
     reward_ax.set_xlabel("x")
     reward_ax.set_ylabel("reward")
     reward_ax.grid(alpha=0.2)
-    _g.figure.tight_layout()
-    reward_view = mo.vstack([mo.md("## Reward Preview"), mo.as_html(_g.figure)])
+    reward_plot.figure.tight_layout()
+    reward_view = mo.vstack([mo.md("## Reward Preview"), mo.as_html(reward_plot.figure)])
     reward_view
     return
 
@@ -183,20 +182,7 @@ def _(torch):
     def reward_fn(x):
         r = gauss_low_high(x, 3) + gauss_low_high(-x, 3)
         return r.squeeze()
-    
-    # def reward_fn(x: torch.Tensor) -> torch.Tensor:
-    #     q = 0
-    #     # for i, m in enumerate((3, 6, 9)):
-    #     for i, m in enumerate((3,)):
-    #         q = q + (-reward_gauss(x + m, s=1) * 2 + reward_gauss(x - m) * 1.6615) * (i + 1)
-    #         q = q + reward_gauss(x + 4) * 1.6615
-    #         q = q - 2 * reward_gauss(x - 2, s=1)
-    #         # q = q + reward_gauss(-x, 6)
-    #     r = q
-    #     # r = torch.exp(-0.5 * ((x - 3.0) / 0.8) ** 2) - 0.35 * torch.exp(-0.5 * ((x + 2.0) / 0.7) ** 2)
-    #     # r = 1e6 * x**2
-    #     # r = 1000 * r
-    #     return r.squeeze()
+
     return (reward_fn,)
 
 
@@ -208,7 +194,7 @@ def _(np, x_max, x_min):
     return hist_bin_edges, hist_range
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     fk_final,
     gmm_density,
@@ -227,8 +213,7 @@ def _(
     plot_histogram = None
     plot_bin_count = len(hist_bin_edges) - 1
     if has_samples_plot:
-        # method_order = ["Base", "MCMC Reference", "FK Steering", "RpCN Steering"]
-        method_order = ["MCMC Reference", "FK Steering", "RpCN Steering"]
+        method_order = ["Base", "MCMC Reference", "FK Steering", "RpCN Steering"]
         sample_frames = []
         if unsteered_samples is not None:
             sample_frames.append(
@@ -245,7 +230,7 @@ def _(
         if mh_final is not None:
             mh_df = pl.DataFrame({"method": ["MCMC Reference"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
             sample_frames.append(mh_df)
-        samples_df = pl.concat(sample_frames) if sample_frames else pl.DataFrame({"method": [], "x": []})
+        samples_df = pl.concat(sample_frames)
 
         reward_scaled = reward_values.cpu().numpy()
         reward_scaled = (reward_scaled - reward_scaled.min()) / (reward_scaled.max() - reward_scaled.min() + 1e-8)
@@ -257,7 +242,7 @@ def _(
                 "reward_scaled": reward_scaled.tolist(),
             }
         )
-        _g = (
+        comparison_plot = (
             sns.displot(
                 kind='hist',
                 data=samples_df,
@@ -276,18 +261,16 @@ def _(
                 stat='density',
                 element='step',
                 common_norm=False,
-                # aspect=.6,
                 legend=False,
             )
             .set(
                 ylim=(0, gmm_density.max() * 1.504),
-                # yscale='log',
             )
             .set_titles('')
         )
-        for (r, c, h), _ in _g.facet_data():
-            ax = _g.axes[r, c]
-            _method_name = _g.col_names[c]
+        for (row_index, column_index, hue_index), _ in comparison_plot.facet_data():
+            ax = comparison_plot.axes[row_index, column_index]
+            method_name = comparison_plot.col_names[column_index]
             sns.lineplot(
                 data=overlay_df,
                 x='x',
@@ -307,7 +290,7 @@ def _(
                 linestyle='--',
                 label='Reward (scaled)',
             )
-            if mh_final is not None and _method_name != "MCMC Reference":
+            if mh_final is not None and method_name != "MCMC Reference":
                 sns.histplot(
                     data=mh_df,
                     x='x',
@@ -321,20 +304,18 @@ def _(
                 )
             ax.set_xlabel('')
             ax.get_legend().remove()
-        # _g.axes.flat[0].set_ylabel("Density")
-        handles, legend_labels = _g.axes.flat[1].get_legend_handles_labels()
-        _g.add_legend(dict(zip(legend_labels, handles)), loc="upper center", ncol=3,
+        handles, legend_labels = comparison_plot.axes.flat[0].get_legend_handles_labels()
+        comparison_plot.add_legend(dict(zip(legend_labels, handles)), loc="upper center", ncol=3,
                       bbox_to_anchor=(0.3, 1.04), 
                       frameon=True, fancybox=True)
-        # _g.figure.tight_layout(rect=[0, 0, 1, 1])
         comparison_view = mo.vstack(
             [
                 mo.md("## Sample Comparison"),
                 mo.md(f"Histogram spec (shared with KL): bins={plot_bin_count}, range=[{hist_range[0]:.2f}, {hist_range[1]:.2f}]"),
-                mo.as_html(_g),
+                mo.as_html(comparison_plot),
             ]
         )
-        plot_histogram = _g
+        plot_histogram = comparison_plot
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
     comparison_view
@@ -348,13 +329,7 @@ def _(plot_histogram, toy):
     return
 
 
-@app.cell
-def _():
-    # comp_fig.savefig('Toy.pdf', format='pdf', bbox_inches='tight', pad_inches=0.06)
-    return
-
-
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
@@ -402,6 +377,7 @@ def _(mo):
 
     controls = mo.vstack(
         [
+            mo.md("## Experiment Controls"),
             mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
@@ -410,7 +386,6 @@ def _(mo):
             mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
         ]
     )
-    mo.md("## Experiment Controls")
     controls
     return (
         batch_size,
@@ -501,18 +476,18 @@ def _(
             p_mh = (mh_counts.astype(np.float64) + eps)
             p_mh = p_mh / p_mh.sum()
 
-            for method_name in summary["method"].to_list():
-                if method_name == "MH":
-                    kl_by_method[method_name] = 0.0
+            for stats_method_name in summary["method"].to_list():
+                if stats_method_name == "MH":
+                    kl_by_method[stats_method_name] = 0.0
                     continue
-                method_x = stats_df.filter(pl.col("method") == method_name)["x"].to_numpy()
+                method_x = stats_df.filter(pl.col("method") == stats_method_name)["x"].to_numpy()
                 method_counts, _ = np.histogram(method_x, bins=hist_bin_edges)
                 p_method = (method_counts.astype(np.float64) + eps)
                 p_method = p_method / p_method.sum()
-                kl_by_method[method_name] = float(np.sum(p_mh * (np.log(p_mh) - np.log(p_method))))
+                kl_by_method[stats_method_name] = float(np.sum(p_mh * (np.log(p_mh) - np.log(p_method))))
         else:
-            for method_name in summary["method"].to_list():
-                kl_by_method[method_name] = None
+            for stats_method_name in summary["method"].to_list():
+                kl_by_method[stats_method_name] = None
 
         summary = summary.with_columns(
             pl.Series("kl_to_mh", [kl_by_method[m] for m in summary["method"].to_list()])
@@ -803,7 +778,6 @@ def _(
     reference_data = gmm_sample(int(n_reference.value), selected_device)
     score_model.set_training_data(reference_data)
 
-    # timesteps = torch.linspace(1.0, 0.0, int(n_steps.value), device=reference_data.device, dtype=reference_data.dtype)
     timesteps = score_model.prob_path.linspace_time(cfg.sampling_time_step_count, device=reference_data.device)
     return reference_data, score_model, timesteps
 

@@ -6,32 +6,29 @@ app = marimo.App()
 
 @app.cell
 def _():
-    import marimo as mo
     import duckdb
-    import seaborn as sns
-    sns.set_theme(style="white", font_scale=2.6)
     import matplotlib.pyplot as plt
+    import marimo as mo
+    import seaborn as sns
 
     import toy.plots
 
-    return mo, plt, sns, toy
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    _df = mo.sql(
-        f"""
-        attach if not exists 'runs.sqlite';
-        use runs;
-        """
-    )
-    return
+    sns.set_theme(style="white", font_scale=2.6)
+    return duckdb, mo, plt, sns, toy
 
 
 @app.cell
-def _(conf, mo, rpcn):
-    rpcn_rows = mo.sql(
-        f"""
+def _(duckdb):
+    duckdb.sql("attach if not exists 'runs.sqlite' as runs")
+    duckdb.sql("use runs")
+    runs_db = duckdb
+    return (runs_db,)
+
+
+@app.cell
+def _(runs_db):
+    rpcn_rows = runs_db.sql(
+        """
         select
             Conf.alt_id,
             RpCN.n_chains, RpCN.pcn_update_count,
@@ -94,9 +91,9 @@ def _(mo, to_plot):
 
 @app.cell
 def _(pivoted):
-    pivoted_pd = pivoted.to_pandas().set_index('n_chains')
-    pivoted_pd.index = pivoted_pd.index.rename('$K+1$')#.rename('$K+1$, replicas')
-    pivoted_pd.columns = pivoted_pd.columns.astype(int).rename('$M$')#.rename('$M$, pCN steps with replica exchanges')
+    pivoted_pd = pivoted.to_pandas().set_index("n_chains")
+    pivoted_pd.index = pivoted_pd.index.rename("$K+1$")
+    pivoted_pd.columns = pivoted_pd.columns.astype(int).rename("$M$")
     pivoted_pd = pivoted_pd.sort_index().sort_index(axis=1)
     pivoted_pd
     return (pivoted_pd,)
