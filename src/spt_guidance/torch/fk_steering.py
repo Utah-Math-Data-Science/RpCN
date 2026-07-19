@@ -166,8 +166,10 @@ class FeynmanKac:
     intermediate_reward : IntermediateReward
         One of ``IntermediateReward`` or its string value. Specificies the
         intermediate reward calculation to use.
-    inverse_temperature : scalar
+    inverse_temperature : scalar or one-dimensional torch.Tensor
         The inverse temperature (i.e., tilt) of the target param distribution.
+        Passing a temperature ladder runs one FK ensemble per temperature and
+        enables replica exchange between adjacent temperatures.
     kwargs_intermediate_reward : dict
         Additional keyword arguments for building the intermediate reward function.
 
@@ -200,31 +202,49 @@ class FeynmanKac:
             intermediate_reward = IntermediateReward(intermediate_reward)
         except ValueError:
             raise ValueError(f'intermediate_reward must be one of {[e.value for e in IntermediateReward]}, not {intermediate_reward!r}.')
+        inverse_temperature = torch.as_tensor(inverse_temperature)
+        if inverse_temperature.ndim > 1:
+            raise ValueError('inverse_temperature must be a scalar or one-dimensional tensor.')
+        if inverse_temperature.numel() == 0:
+            raise ValueError('inverse_temperature must contain at least one value.')
         self.kwargs_intermediate_reward = kwargs_intermediate_reward or {}
 
-        self.init_param_fn = torch.vmap(torch.vmap(lambda *_: init_param_fn(), randomness='different'), randomness='different')
-        self.intermediate_reward_fn = torch.vmap(
-            self.get_intermediate_reward_fn(intermediate_reward, reward_fn),
+        self.init_param_fn = torch.vmap(torch.vmap(torch.vmap(
+            lambda *_: init_param_fn(), randomness='different',
+        ), randomness='different'), randomness='different')
+        intermediate_reward_fn = self.get_intermediate_reward_fn(intermediate_reward, reward_fn)
+        self.intermediate_reward_fn = torch.vmap(torch.vmap(
+            intermediate_reward_fn,
             in_dims=(
                 None,  # t0
                 0,     # param batch
             ),
             randomness='different',
-        )
-        self.propose_fn = torch.vmap(propose_fn, in_dims=(
+        ), in_dims=(None, 0), randomness='different')
+        self.propose_fn = torch.vmap(torch.vmap(propose_fn, in_dims=(
             None,  # t0
             None,  # t1
             0,     # param batch
-        ), randomness='different')
-        self.resample_fn = torch.vmap(
+        ), randomness='different'), in_dims=(None, None, 0), randomness='different')
+        resample_fn = torch.vmap(
             resample_fn,
             in_dims=(None, None, 1),
             out_dims=(1, 0, 0),
             randomness='different',
         )
-        self.log_potential_fn = torch.vmap(self.get_log_potential_fn(potential, inverse_temperature))
+        self.resample_fn = torch.vmap(
+            resample_fn,
+            in_dims=(None, None, 0),
+            out_dims=(0, 0, 0),
+            randomness='different',
+        )
+        self.log_potential_fn = torch.vmap(torch.vmap(
+            self.get_log_potential_fn(potential, 1.),
+        ))
         self.potential = potential
-        self.inverse_temperature = inverse_temperature
+        self.scalar_inverse_temperature = inverse_temperature.ndim == 0
+        self.inverse_temperature = inverse_temperature.reshape(-1)
+        self.temperature_count = self.inverse_temperature.numel()
 
     def run(
         self,
@@ -249,12 +269,17 @@ class FeynmanKac:
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor]
-            The final particles with shape ``(ensemble_size, batch_size, ...)``
-            and their unnormalized log-weights with shape
-            ``(ensemble_size, batch_size)``.
+            For a scalar inverse temperature, the final particles have shape
+            ``(ensemble_size, batch_size, ...)`` and their unnormalized
+            log-weights have shape ``(ensemble_size, batch_size)``. For a
+            temperature ladder, both outputs have an additional leading
+            ``temperature_count`` dimension.
         """
-        batch = self.init_param_fn(torch.zeros(1).expand(ensemble_size, batch_size))
+        batch = self.init_param_fn(torch.zeros(1).expand(
+            self.temperature_count, ensemble_size, batch_size,
+        ))
         reward = self.intermediate_reward_fn(times[0], batch)
+        inverse_temperature = self.inverse_temperature.to(reward).reshape(-1, 1, 1)
         if self.potential in (Potential.DIFFERENCE, Potential.MAX):
             aggregated_reward = reward
         elif self.potential is Potential.SUM:
@@ -268,28 +293,67 @@ class FeynmanKac:
         aggregated_log_potential = torch.zeros_like(log_potential)
         log_weight = torch.zeros_like(log_potential)
         batch_indices = torch.arange(batch_size, device=batch.device)
+        temperature_indices = torch.arange(self.temperature_count, device=batch.device)[:, None, None]
         for time_step, (t0, t1) in enumerate(zip(times, times[1:])):
             ancestor_indices, did_resample, use_zero_log_potential = self.resample_fn(
-                time_step, ensemble_size, log_weight + log_potential,
+                time_step,
+                ensemble_size,
+                inverse_temperature * (log_weight + log_potential),
             )
             use_zero_log_potential = use_zero_log_potential & ~did_resample
-            log_potential = torch.where(use_zero_log_potential, 0., log_potential)
+            log_potential = torch.where(use_zero_log_potential[:, None], 0., log_potential)
             aggregated_log_potential = aggregated_log_potential + log_potential
             log_weight = log_weight + log_potential
-            batch = batch[ancestor_indices, batch_indices]
-            aggregated_reward = aggregated_reward[ancestor_indices, batch_indices]
-            aggregated_log_potential = aggregated_log_potential[ancestor_indices, batch_indices]
-            log_weight = log_weight[ancestor_indices, batch_indices]
-            log_weight = torch.where(did_resample, 0., log_weight)
+            batch = batch[temperature_indices, ancestor_indices, batch_indices]
+            aggregated_reward = aggregated_reward[temperature_indices, ancestor_indices, batch_indices]
+            aggregated_log_potential = aggregated_log_potential[temperature_indices, ancestor_indices, batch_indices]
+            log_weight = log_weight[temperature_indices, ancestor_indices, batch_indices]
+            log_weight = torch.where(did_resample[:, None], 0., log_weight)
             batch = self.propose_fn(t0, t1, batch)
             reward = self.intermediate_reward_fn(t1, batch)
+            for temperature in range(self.temperature_count - 1):
+                swap_probability = self.parallel_tempering_swap_probability(
+                    reward_hot=reward[temperature],
+                    inverse_temperature_hot=inverse_temperature[temperature],
+                    reward_cold=reward[temperature + 1],
+                    inverse_temperature_cold=inverse_temperature[temperature + 1],
+                )
+                swap = torch.bernoulli(swap_probability).to(torch.bool)
+                batch = self.swap_temperature(swap, batch, temperature)
+                reward = self.swap_temperature(swap, reward, temperature)
+                aggregated_reward = self.swap_temperature(swap, aggregated_reward, temperature)
+                aggregated_log_potential = self.swap_temperature(
+                    swap, aggregated_log_potential, temperature,
+                )
+                log_weight = self.swap_temperature(swap, log_weight, temperature)
             if t1 == times[-1]:
-                log_potential = self.inverse_temperature * reward
+                log_potential = reward
             else:
                 log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
         final_log_potential = log_potential - aggregated_log_potential
-        final_log_weight = log_weight + final_log_potential
+        final_log_weight = inverse_temperature * (log_weight + final_log_potential)
+        if self.scalar_inverse_temperature:
+            return batch[0], final_log_weight[0]
         return batch, final_log_weight
+
+    @staticmethod
+    def parallel_tempering_swap_probability(
+        reward_hot, inverse_temperature_hot,
+        reward_cold, inverse_temperature_cold,
+    ):
+        delta_reward = reward_cold - reward_hot
+        delta_inverse_temperature = inverse_temperature_cold - inverse_temperature_hot
+        return torch.clip(torch.exp(-delta_inverse_temperature * delta_reward), max=1)
+
+    @staticmethod
+    def swap_temperature(swap, value, temperature):
+        swap = swap.reshape(*swap.shape, *[1 for _ in range(value.ndim - 1 - swap.ndim)])
+        value_hot = torch.where(swap, value[temperature + 1], value[temperature])
+        value_cold = torch.where(swap, value[temperature], value[temperature + 1])
+        value = value.clone()
+        value[temperature] = value_hot
+        value[temperature + 1] = value_cold
+        return value
 
     def get_log_potential_fn(self, potential, inverse_temperature):
         if potential is Potential.DIFFERENCE:
