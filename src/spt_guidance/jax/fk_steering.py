@@ -2,6 +2,7 @@ import enum
 
 import jax
 import jax.random
+import jax.scipy.special
 import jax.numpy as jnp
 
 
@@ -21,34 +22,43 @@ class ResampleFn:
     Collection of resampling functions. Note that ``do_resample`` is intended
     to be used by other resampling functions to actually perform the resampling.
     Some of these functions also may take more arguments than will be passed by
-    the ``FeynmannKac`` class, so use ``functools.partial``.
+    the ``FeynmanKac`` class, so use ``functools.partial``.
     """
     @staticmethod
-    def do_resample(key, ensemble, probabilities):
+    def do_resample(key, ensemble_size, probabilities):
         """
-        Utility function to perform the resampling of the ensemble.
+        Utility function to sample ensemble ancestor indices.
 
         Args
         ----
         key : jax.random.PRNGKey
             Pseudo-random number generator key.
-        ensemble : jnp.Array[batch_size, ...]
-            The ensemble.
-        probabilities : jnp.Array[batch_size]
+        ensemble_size : int
+            The number of ensemble members.
+        probabilities : jnp.Array[ensemble_size]
             The probability of sampling each ensemble member.
 
         Returns
         -------
-        jnp.Array[batch_size, ...]
-            The new ensemble members after resampling.
+        jnp.Array[ensemble_size]
+            The sampled ancestor indices.
         """
-        return jax.random.choice(key, ensemble, shape=ensemble.shape[:1], p=probabilities)
+        return jax.random.choice(key, ensemble_size, shape=(ensemble_size,), p=probabilities)
 
     @staticmethod
-    def adaptive_resample(key, time_step, ensemble, potentials):
+    def adaptive_resample(
+        key,
+        time_step,
+        ensemble_size,
+        log_weights,
+        *,
+        zero_log_potential_when_skipping=False,
+    ):
         r"""
         Adaptive resampling of the ensemble. Resamples when the effective
         sample size (ESS) is less than one half of the ensemble size :math:`K`.
+        If ``zero_log_potential_when_skipping`` is true, a skipped resampling step
+        also requests that the current potential be replaced by one.
 
         .. math::
 
@@ -57,18 +67,91 @@ class ResampleFn:
         where :math:`\hat{G}_k` = G_k / \sum_{k = 1}^K G_k` and :math:`G_k`
         is the potential of ensemble member :math:`k`.
         """
-        probabilities = potentials / potentials.sum()
+        probabilities = jax.nn.softmax(log_weights)
         effective_sample_size = 1 / jnp.square(probabilities).sum()
-        return jnp.where(
-            effective_sample_size < ensemble.shape[0] // 2,
-            ResampleFn.do_resample(key, ensemble, probabilities),
-            ensemble,
+        should_resample = effective_sample_size < ensemble_size / 2
+        ancestor_indices = jnp.where(
+            should_resample,
+            ResampleFn.do_resample(key, ensemble_size, probabilities),
+            jnp.arange(ensemble_size),
         )
+        use_zero_log_potential = jnp.logical_and(zero_log_potential_when_skipping, ~should_resample)
+        return ancestor_indices, should_resample, use_zero_log_potential
 
 
-class FeynmannKac:
+class SelectFn:
+    """Collection of functions for selecting one final particle per batch."""
+
+    @staticmethod
+    def _select(particles, indices):
+        batch_indices = jnp.arange(particles.shape[1])
+        return particles[indices, batch_indices]
+
+    @staticmethod
+    def highest_weight(particles, log_weights):
+        """
+        Select the particle with the highest final log-weight.
+
+        Args
+        ----
+        particles : jnp.Array[ensemble_size, batch_size, ...]
+            The final particles.
+        log_weights : jnp.Array[ensemble_size, batch_size]
+            The final unnormalized log-weights.
+
+        Returns
+        -------
+        jnp.Array[batch_size, ...]
+            The selected particles.
+        """
+        return SelectFn._select(particles, jnp.argmax(log_weights, axis=0))
+
+    @staticmethod
+    def weighted_sample(key, particles, log_weights):
+        """
+        Sample one particle per batch from the normalized final weights.
+
+        Args
+        ----
+        key : jax.random.PRNGKey
+            Pseudo-random number generator key.
+        particles : jnp.Array[ensemble_size, batch_size, ...]
+            The final particles.
+        log_weights : jnp.Array[ensemble_size, batch_size]
+            The final unnormalized log-weights.
+
+        Returns
+        -------
+        jnp.Array[batch_size, ...]
+            The sampled particles.
+        """
+        indices = jax.random.categorical(key, log_weights, axis=0)
+        return SelectFn._select(particles, indices)
+
+    @staticmethod
+    def highest_reward(particles, reward_fn):
+        """
+        Select the particle with the highest terminal reward.
+
+        Args
+        ----
+        particles : jnp.Array[ensemble_size, batch_size, ...]
+            The final particles.
+        reward_fn : Callable[param: jnp.Array[batch_size, ...]]
+            Computes one terminal reward per batch member.
+
+        Returns
+        -------
+        jnp.Array[batch_size, ...]
+            The selected particles.
+        """
+        rewards = jax.vmap(reward_fn)(particles)
+        return SelectFn._select(particles, jnp.argmax(rewards, axis=0))
+
+
+class FeynmanKac:
     """
-    Feynmann-Kac Steering.
+    Feynman-Kac Steering.
 
     Keyword Args
     ------------
@@ -78,8 +161,11 @@ class FeynmannKac:
         Computes the reward of a param at the end time, which is to be maximized.
     propose_fn : Callable[key: jax.random.PRNGKey, t0: scalar, t1: scalar, param: jnp.Array[batch_size, ...]]
         Returns a proposal param for ``t1`` given the current param at ``t0``.
-    resample_fn : Callable[key: jax.random.PRNGKey, time_step: int, param: jnp.Array[batch_size, ...], potential: jnp.Array[batch_size]]
-        Returns a new param ensemble given the ``param`` ensemble at ``time_step`` and each ensemble member ``potential``.
+    resample_fn : Callable[key: jax.random.PRNGKey, time_step: int, ensemble_size: int, log_weight: jnp.Array[ensemble_size]]
+        Returns the ancestor index of each new ensemble member, whether
+        resampling occurred, and whether to replace the current potential by
+        one when resampling is skipped. The third return value must be false
+        when resampling occurs.
     potential : Potential
         One of ``Potential`` or its string value. Specificies the particle
         potential calculation to use.
@@ -137,8 +223,15 @@ class FeynmannKac:
             None,  # t1
             0,     # param batch
         )))
-        self.resample_fn = jax.jit(jax.vmap(resample_fn, in_axes=(0, None, 1, 1), out_axes=1))
-        self.potential_fn = jax.jit(jax.vmap(self.get_potential_fn(potential, inverse_temperature)))
+        self.resample_fn = jax.jit(
+            jax.vmap(
+                resample_fn,
+                in_axes=(0, None, None, 1),
+                out_axes=(1, 0, 0),
+            ),
+            static_argnums=2,
+        )
+        self.log_potential_fn = jax.jit(jax.vmap(self.get_log_potential_fn(potential, inverse_temperature)))
         self.potential = potential
         self.inverse_temperature = inverse_temperature
 
@@ -167,8 +260,10 @@ class FeynmannKac:
 
         Returns
         -------
-        jnp.Array
-            Final sampled params from all chains. The params array shape is (chain_count, batch_size, ...).
+        tuple[jnp.Array, jnp.Array]
+            The final particles with shape ``(ensemble_size, batch_size, ...)``
+            and their unnormalized log-weights with shape
+            ``(ensemble_size, batch_size)``.
         """
         (
             key_init_ensemble,
@@ -182,51 +277,61 @@ class FeynmannKac:
         if self.potential in (Potential.DIFFERENCE, Potential.MAX):
             aggregated_reward = reward
         elif self.potential is Potential.SUM:
-            aggregated_reward = jnp.zeros((ensemble_size, batch_size))
+            aggregated_reward = jnp.zeros_like(reward)
         else:
             raise ValueError(f'Aggregated reward initialization not implemented for {self.potential!r}.')
-        potential, aggregated_reward = self.potential_fn(reward, aggregated_reward)
-        aggregated_potential = 1.
+        if self.potential is Potential.DIFFERENCE:
+            log_potential = jnp.zeros_like(reward)
+        else:
+            log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
+        aggregated_log_potential = jnp.zeros_like(log_potential)
+        log_weight = jnp.zeros_like(log_potential)
+        batch_indices = jnp.arange(batch_size)
         for time_step, (t0, t1) in enumerate(zip(times, times[1:])):
-            aggregated_potential = aggregated_potential / potential
             key_resample, key_particle_resampling = jax.random.split(key_particle_resampling)
-            batch = self.resample_fn(jax.random.split(key_resample, batch_size), time_step, batch, potential)
+            ancestor_indices, did_resample, use_zero_log_potential = self.resample_fn(
+                jax.random.split(key_resample, batch_size), time_step, ensemble_size, log_weight + log_potential,
+            )
+            use_zero_log_potential = jnp.logical_and(use_zero_log_potential, ~did_resample)
+            log_potential = jnp.where(use_zero_log_potential, 0., log_potential)
+            aggregated_log_potential = aggregated_log_potential + log_potential
+            log_weight = log_weight + log_potential
+            batch = batch[ancestor_indices, batch_indices]
+            aggregated_reward = aggregated_reward[ancestor_indices, batch_indices]
+            aggregated_log_potential = aggregated_log_potential[ancestor_indices, batch_indices]
+            log_weight = log_weight[ancestor_indices, batch_indices]
+            log_weight = jnp.where(did_resample, 0., log_weight)
             key_propose, key_propose_next_intermediate = jax.random.split(key_propose_next_intermediate)
             batch = self.propose_fn(jax.random.split(key_propose, ensemble_size), t0, t1, batch)
             key_reward, key_reward_fn = jax.random.split(key_reward_fn)
-            reward = self.intermediate_reward_fn(jax.random.split(key_reward, ensemble_size), t0, batch)
-            if t1 == times[-1] and self.potential in (Potential.MAX, Potential.SUM):
-                potential = jnp.exp(self.inverse_temperature * reward)
+            reward = self.intermediate_reward_fn(jax.random.split(key_reward, ensemble_size), t1, batch)
+            if t1 == times[-1]:
+                log_potential = self.inverse_temperature * reward
             else:
-                potential, aggregated_reward = self.potential_fn(reward, aggregated_reward)
-        if self.potential in (Potential.MAX, Potential.SUM):
-            final_potential = potential / aggregated_potential
-        elif self.potential is Potential.DIFFERENCE:
-            final_potential = potential
-        else:
-            raise ValueError(f'Final potential computation not implemented for {self.potential!r}.')
-        batch = jax.vmap(lambda i, b: b[i], in_axes=(0, 1))(jnp.argmax(final_potential, axis=0), batch)
-        return batch
+                log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
+        final_log_potential = log_potential - aggregated_log_potential
+        final_log_weight = log_weight + final_log_potential
+        return batch, final_log_weight
 
-    def get_potential_fn(self, potential, inverse_temperature):
+    def get_log_potential_fn(self, potential, inverse_temperature):
         if potential is Potential.DIFFERENCE:
-            def potential_fn(new_reward, aggregated_reward):
-                new_potential = jnp.exp(inverse_temperature * (new_reward - aggregated_reward))
+            def log_potential_fn(new_reward, aggregated_reward):
+                new_log_potential = inverse_temperature * (new_reward - aggregated_reward)
                 new_aggregated_reward = new_reward
-                return new_potential, new_aggregated_reward
+                return new_log_potential, new_aggregated_reward
         elif potential is Potential.MAX:
-            def potential_fn(new_reward, aggregated_reward):
+            def log_potential_fn(new_reward, aggregated_reward):
                 new_aggregated_reward = jnp.maximum(new_reward, aggregated_reward)
-                new_potential = jnp.exp(inverse_temperature * new_aggregated_reward)
-                return new_potential, new_aggregated_reward
+                new_log_potential = inverse_temperature * new_aggregated_reward
+                return new_log_potential, new_aggregated_reward
         elif potential is Potential.SUM:
-            def potential_fn(new_reward, aggregated_reward):
+            def log_potential_fn(new_reward, aggregated_reward):
                 new_aggregated_reward = new_reward + aggregated_reward
-                new_potential = jnp.exp(inverse_temperature * new_aggregated_reward)
-                return new_potential, new_aggregated_reward
+                new_log_potential = inverse_temperature * new_aggregated_reward
+                return new_log_potential, new_aggregated_reward
         else:
-            raise ValueError(f'Unknown Feynmann-Kac steering potential: {potential}')
-        return potential_fn
+            raise ValueError(f'Unknown Feynman-Kac steering potential: {potential}')
+        return log_potential_fn
 
     def get_intermediate_reward_fn(self, intermediate_reward, reward_fn):
         if intermediate_reward is IntermediateReward.EXPECTED_SAMPLE:
@@ -250,7 +355,7 @@ class FeynmannKac:
                 def get_sub_ensemble_member_reward(key, y0):
                     return reward_fn(pushforward_fn(key, t0, y0))
                 sub_ensemble_member_reward = jax.vmap(get_sub_ensemble_member_reward)(key_sample_sub_ensemble, batch)
-                return jnp.log(jnp.exp(sub_ensemble_member_reward).mean(axis=0))
+                return jax.scipy.special.logsumexp(sub_ensemble_member_reward, axis=0) - jnp.log(sub_ensemble_size)
         else:
-            raise ValueError(f'Unknown Feynmann-Kac steering intermediate reward: {intermediate_reward}')
+            raise ValueError(f'Unknown Feynman-Kac steering intermediate reward: {intermediate_reward}')
         return intermediate_reward_fn
