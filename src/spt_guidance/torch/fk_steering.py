@@ -312,6 +312,14 @@ class FeynmanKac:
             batch = self.propose_fn(t0, t1, batch)
             reward = self.intermediate_reward_fn(t1, batch)
             for temperature in range(self.temperature_count - 1):
+                # randomly permute the hotter ensemble before swapping members with the colder ensemble
+                permutation = torch.rand(ensemble_size, batch_size, device=batch.device).argsort(dim=0)
+                batch[temperature] = batch[temperature][permutation, batch_indices]
+                reward[temperature] = reward[temperature][permutation, batch_indices]
+                aggregated_reward[temperature] = aggregated_reward[temperature][permutation, batch_indices]
+                aggregated_log_potential[temperature] = aggregated_log_potential[temperature][permutation, batch_indices]
+                log_weight[temperature] = log_weight[temperature][permutation, batch_indices]
+                # index-aligned swapping of members
                 swap_probability = self.parallel_tempering_swap_probability(
                     reward_hot=reward[temperature],
                     inverse_temperature_hot=inverse_temperature[temperature],
@@ -322,9 +330,7 @@ class FeynmanKac:
                 batch = self.swap_temperature(swap, batch, temperature)
                 reward = self.swap_temperature(swap, reward, temperature)
                 aggregated_reward = self.swap_temperature(swap, aggregated_reward, temperature)
-                aggregated_log_potential = self.swap_temperature(
-                    swap, aggregated_log_potential, temperature,
-                )
+                aggregated_log_potential = self.swap_temperature(swap, aggregated_log_potential, temperature)
                 log_weight = self.swap_temperature(swap, log_weight, temperature)
             if t1 == times[-1]:
                 log_potential = reward
@@ -350,7 +356,6 @@ class FeynmanKac:
         swap = swap.reshape(*swap.shape, *[1 for _ in range(value.ndim - 1 - swap.ndim)])
         value_hot = torch.where(swap, value[temperature + 1], value[temperature])
         value_cold = torch.where(swap, value[temperature], value[temperature + 1])
-        value = value.clone()
         value[temperature] = value_hot
         value[temperature + 1] = value_cold
         return value
