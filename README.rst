@@ -90,17 +90,17 @@ Example usage of Source Parallel Tempering.
    )[-1]  # take the last (coldest) chain
    final_samples = transport(last_chain)  # map source samples to the target distribution
 
-Feynmann-Kac Steering
----------------------
+Feynman-Kac Steering
+--------------------
 
-Example usage of Feynmann-Kac Steering.
+Example usage of Feynman-Kac Steering.
 
 .. code:: python
 
    import spt_guidance.torch.fk_steering as fk_steering
    # import spt_guidance.jax.fk_steering as fk_steering   # for Jax
 
-   fk = fk_steering.FeynmannKac(
+   fk = fk_steering.FeynmanKac(
        init_param_fn=partial(torch.randn, data_dims, device=device),  # data_dims is shape of one data sample, not a batch
        reward_fn=reward_fn,  # function be be maximized (reward function)
        propose_fn=propose_fn,  # function that updates the current particles to the next time step
@@ -112,9 +112,10 @@ Example usage of Feynmann-Kac Steering.
            expected_sample_fn=lambda t0, z: propose_fn(t0, 1., z),  # function to return the expected final samples of the current particles
        ),
    )
-   final_samples = fk.run(
-      # key,  # PRNG key if using Jax
-      times,  # sampling time interval discretization
-      4,  # number of FK Steering chains to use
-      batch_size=batch_size,  # number of target samples to generate at once
+   final_particles, final_log_weights = fk.run(
+       # key,  # PRNG key if using Jax
+       times,  # sampling time interval discretization
+       4,  # number of FK Steering chains to use
+       batch_size=batch_size,  # number of target samples to generate at once
    )
+   final_samples = fk_steering.SelectFn.highest_reward(final_particles, reward_fn)
