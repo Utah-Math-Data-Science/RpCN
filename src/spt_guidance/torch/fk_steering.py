@@ -238,7 +238,7 @@ class FeynmanKac:
             out_dims=(0, 0, 0),
             randomness='different',
         )
-        self.log_potential_fn = torch.vmap(torch.vmap(
+        self.log_potential_beta_one_fn = torch.vmap(torch.vmap(
             self.get_log_potential_fn(potential, 1.),
         ))
         self.potential = potential
@@ -287,28 +287,28 @@ class FeynmanKac:
         else:
             raise ValueError(f'Aggregated reward initialization not implemented for {self.potential!r}.')
         if self.potential is Potential.DIFFERENCE:
-            log_potential = torch.zeros_like(reward)
+            log_potential_beta_one = torch.zeros_like(reward)
         else:
-            log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
-        aggregated_log_potential = torch.zeros_like(log_potential)
-        log_weight = torch.zeros_like(log_potential)
+            log_potential_beta_one, aggregated_reward = self.log_potential_beta_one_fn(reward, aggregated_reward)
+        aggregated_log_potential_beta_one = torch.zeros_like(log_potential_beta_one)
+        log_weight_beta_one = torch.zeros_like(log_potential_beta_one)
         batch_indices = torch.arange(batch_size, device=batch.device)
         temperature_indices = torch.arange(self.temperature_count, device=batch.device)[:, None, None]
         for time_step, (t0, t1) in enumerate(zip(times, times[1:])):
             ancestor_indices, did_resample, use_zero_log_potential = self.resample_fn(
                 time_step,
                 ensemble_size,
-                inverse_temperature * (log_weight + log_potential),
+                inverse_temperature * (log_weight_beta_one + log_potential_beta_one),
             )
             use_zero_log_potential = use_zero_log_potential & ~did_resample
-            log_potential = torch.where(use_zero_log_potential[:, None], 0., log_potential)
-            aggregated_log_potential = aggregated_log_potential + log_potential
-            log_weight = log_weight + log_potential
+            log_potential_beta_one = torch.where(use_zero_log_potential[:, None], 0., log_potential_beta_one)
+            aggregated_log_potential_beta_one = aggregated_log_potential_beta_one + log_potential_beta_one
+            log_weight_beta_one = log_weight_beta_one + log_potential_beta_one
             batch = batch[temperature_indices, ancestor_indices, batch_indices]
             aggregated_reward = aggregated_reward[temperature_indices, ancestor_indices, batch_indices]
-            aggregated_log_potential = aggregated_log_potential[temperature_indices, ancestor_indices, batch_indices]
-            log_weight = log_weight[temperature_indices, ancestor_indices, batch_indices]
-            log_weight = torch.where(did_resample[:, None], 0., log_weight)
+            aggregated_log_potential_beta_one = aggregated_log_potential_beta_one[temperature_indices, ancestor_indices, batch_indices]
+            log_weight_beta_one = log_weight_beta_one[temperature_indices, ancestor_indices, batch_indices]
+            log_weight_beta_one = torch.where(did_resample[:, None], 0., log_weight_beta_one)
             batch = self.propose_fn(t0, t1, batch)
             reward = self.intermediate_reward_fn(t1, batch)
             for temperature in range(self.temperature_count - 1):
@@ -317,8 +317,8 @@ class FeynmanKac:
                 batch[temperature] = batch[temperature][permutation, batch_indices]
                 reward[temperature] = reward[temperature][permutation, batch_indices]
                 aggregated_reward[temperature] = aggregated_reward[temperature][permutation, batch_indices]
-                aggregated_log_potential[temperature] = aggregated_log_potential[temperature][permutation, batch_indices]
-                log_weight[temperature] = log_weight[temperature][permutation, batch_indices]
+                aggregated_log_potential_beta_one[temperature] = aggregated_log_potential_beta_one[temperature][permutation, batch_indices]
+                log_weight_beta_one[temperature] = log_weight_beta_one[temperature][permutation, batch_indices]
                 # index-aligned swapping of members
                 swap_probability = self.parallel_tempering_swap_probability(
                     reward_hot=reward[temperature],
@@ -330,17 +330,17 @@ class FeynmanKac:
                 batch = self.swap_temperature(swap, batch, temperature)
                 reward = self.swap_temperature(swap, reward, temperature)
                 aggregated_reward = self.swap_temperature(swap, aggregated_reward, temperature)
-                aggregated_log_potential = self.swap_temperature(swap, aggregated_log_potential, temperature)
-                log_weight = self.swap_temperature(swap, log_weight, temperature)
+                aggregated_log_potential_beta_one = self.swap_temperature(swap, aggregated_log_potential_beta_one, temperature)
+                log_weight_beta_one = self.swap_temperature(swap, log_weight_beta_one, temperature)
             if t1 == times[-1]:
-                log_potential = reward
+                log_potential_beta_one = reward
             else:
-                log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
-        final_log_potential = log_potential - aggregated_log_potential
-        final_log_weight = inverse_temperature * (log_weight + final_log_potential)
+                log_potential_beta_one, aggregated_reward = self.log_potential_beta_one_fn(reward, aggregated_reward)
+        log_potential_beta_one = log_potential_beta_one - aggregated_log_potential_beta_one
+        log_weight = inverse_temperature * (log_weight_beta_one + log_potential_beta_one)
         if self.scalar_inverse_temperature:
-            return batch[0], final_log_weight[0]
-        return batch, final_log_weight
+            return batch[0], log_weight[0]
+        return batch, log_weight
 
     @staticmethod
     def parallel_tempering_swap_probability(
