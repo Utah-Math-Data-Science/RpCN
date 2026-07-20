@@ -98,10 +98,10 @@ class JaxLightning(pl.LightningModule):
                         jnp.linspace(0, self.cfg.steering.tilt, self.cfg.steering.chain_count),
                         jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, self.cfg.steering.chain_count)),
                     )
-                elif isinstance(self.cfg.steering, conf.model.FeynmannKac):
+                elif isinstance(self.cfg.steering, conf.model.FeynmanKac):
                     def propose(key, t0, t1, sample):
                         return self.sample(t0, t1, dt, sample, as_score=True, key=key).ys[-1]
-                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmannKacIntermediateRewardExpectedSample):
+                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardExpectedSample):
                         intermediate_reward = fk_steering.IntermediateReward.EXPECTED_SAMPLE
                         def expected_sample_fn(key, t0, batch):
                             t0 = t0 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
@@ -111,7 +111,7 @@ class JaxLightning(pl.LightningModule):
                         kwargs_intermediate_reward = dict(
                             expected_sample_fn=expected_sample_fn,
                         )
-                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmannKacIntermediateRewardSubEnsemblePushforward):
+                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
                         intermediate_reward = fk_steering.IntermediateReward.SUB_ENSEMBLE_PUSHFORWARD
                         kwargs_intermediate_reward = dict(
                             sub_ensemble_size=self.cfg.steering.intermediate_reward.sub_ensemble_size,
@@ -124,8 +124,8 @@ class JaxLightning(pl.LightningModule):
                             ).ys[-1],
                         )
                     else:
-                        raise ValueError(f'Unknown Feynmann-Kac steering intermediate reward: {self.cfg.steering.intermediate_reward}')
-                    self.feynmann_kac = fk_steering.FeynmannKac(
+                        raise ValueError(f'Unknown Feynman-Kac steering intermediate reward: {self.cfg.steering.intermediate_reward}')
+                    self.feynman_kac = fk_steering.FeynmanKac(
                         init_param_fn=lambda key: self.noise_std * jax.random.normal(key, (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim)),
                         reward_fn=partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
                         propose_fn=propose,
@@ -142,7 +142,7 @@ class JaxLightning(pl.LightningModule):
                         g2_score = 2 * self.velocity(batch, t0, self.params_ema)
                         score_multiplier = self.diffusion.sigma2_from_one_step_forward(1 - t1, 1 - t0) / self.diffusion.g2(1 - t0)
                         return (batch + score_multiplier * g2_score) / self.diffusion.scale(1 - t0)
-                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmannKacIntermediateRewardExpectedSample):
+                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardExpectedSample):
                         intermediate_reward = fk_steering.IntermediateReward.EXPECTED_SAMPLE
                         def expected_sample_fn(key, t0, batch):
                             t0 = t0 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
@@ -152,7 +152,7 @@ class JaxLightning(pl.LightningModule):
                         kwargs_intermediate_reward = dict(
                             expected_sample_fn=expected_sample_fn,
                         )
-                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmannKacIntermediateRewardSubEnsemblePushforward):
+                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
                         intermediate_reward = fk_steering.IntermediateReward.SUB_ENSEMBLE_PUSHFORWARD
                         kwargs_intermediate_reward = dict(
                             sub_ensemble_size=self.cfg.steering.intermediate_reward.sub_ensemble_size,
@@ -264,10 +264,14 @@ class JaxLightning(pl.LightningModule):
             t1 = self.times[-1]
             dt = self.times[1] - self.times[0]
             batch = self.sample(t0, t1, dt, tempered_noise).ys[-1]
-        elif isinstance(self.cfg.steering, conf.model.FeynmannKac):
-            batch = self.feynmann_kac.run(
+        elif isinstance(self.cfg.steering, conf.model.FeynmanKac):
+            final_particles, _ = self.feynman_kac.run(
                 key, self.times, self.cfg.steering.ensemble_size,
                 batch_size=self.cfg.dataset.batch_size
+            )
+            batch = fk_steering.SelectFn.highest_reward(
+                final_particles,
+                partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
             )
         elif isinstance(self.cfg.steering, conf.model.RpCN):
             batch = self.rpcn.run(

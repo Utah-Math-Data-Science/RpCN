@@ -132,7 +132,7 @@ for model in (Trained, conf.model.FlowMatching,):
     orm.store_config(model, group=TrainingAndEvaluation.model.key)
 for probability_path in (conf.model.ConditionalOT, conf.model.VarianceExploding):
     orm.store_config(probability_path, group=f'{TrainingAndEvaluation.model.key}/{conf.model.FlowMatching.probability_path.key}')
-for steering in (conf.model.NoSteering, conf.model.SourceParallelTempering, conf.model.FeynmannKac, conf.model.RpCN):
+for steering in (conf.model.NoSteering, conf.model.SourceParallelTempering, conf.model.FeynmanKac, conf.model.RpCN):
     orm.store_config(steering, group=TrainingAndEvaluation.steering.key)
-for intermediate_reward in (conf.model.FeynmannKacIntermediateRewardExpectedSample, conf.model.FeynmannKacIntermediateRewardSubEnsemblePushforward):
-    orm.store_config(intermediate_reward, group=f'{TrainingAndEvaluation.steering.key}/{conf.model.FeynmannKac.intermediate_reward.key}')
+for intermediate_reward in (conf.model.FeynmanKacIntermediateRewardExpectedSample, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
+    orm.store_config(intermediate_reward, group=f'{TrainingAndEvaluation.steering.key}/{conf.model.FeynmanKac.intermediate_reward.key}')

@@ -62,32 +62,32 @@ class SourceParallelTempering(Steering):
     tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
 
 
-class FeynmannKacPotential(enum.StrEnum):
+class FeynmanKacPotential(enum.StrEnum):
     DIFFERENCE = 'difference'
     MAX = 'max'
     SUM = 'sum'
 
 
-class FeynmannKacIntermediateReward(orm.InheritableTable):
+class FeynmanKacIntermediateReward(orm.InheritableTable):
     pass
 
 
-class FeynmannKacIntermediateRewardExpectedSample(FeynmannKacIntermediateReward):
+class FeynmanKacIntermediateRewardExpectedSample(FeynmanKacIntermediateReward):
     pass
 
 
-class FeynmannKacIntermediateRewardSubEnsemblePushforward(FeynmannKacIntermediateReward):
+class FeynmanKacIntermediateRewardSubEnsemblePushforward(FeynmanKacIntermediateReward):
     sub_ensemble_size: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
 
 
-class FeynmannKac(Steering):
+class FeynmanKac(Steering):
     defaults: List[Any] = hydra_orm.utils.make_defaults_list([
         dict(intermediate_reward=omegaconf.MISSING),
         '_self_',
     ])
     ensemble_size: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
-    potential: FeynmannKacPotential = orm.make_field(orm.ColumnRequired(sa.Enum(FeynmannKacPotential)), default=omegaconf.MISSING)
-    intermediate_reward = orm.OneToManyField(FeynmannKacIntermediateReward, default=omegaconf.MISSING)
+    potential: FeynmanKacPotential = orm.make_field(orm.ColumnRequired(sa.Enum(FeynmanKacPotential)), default=omegaconf.MISSING)
+    intermediate_reward = orm.OneToManyField(FeynmanKacIntermediateReward, default=omegaconf.MISSING)
     tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
 
 
@@ -96,7 +96,7 @@ class RpCN(Steering):
         dict(intermediate_reward=omegaconf.MISSING),
         '_self_',
     ])
-    intermediate_reward = orm.OneToManyField(FeynmannKacIntermediateReward, default=omegaconf.MISSING)
+    intermediate_reward = orm.OneToManyField(FeynmanKacIntermediateReward, default=omegaconf.MISSING)
     chain_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
     pcn_update_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
     tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
