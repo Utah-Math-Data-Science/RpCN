@@ -172,8 +172,10 @@ class FeynmanKac:
     intermediate_reward : IntermediateReward
         One of ``IntermediateReward`` or its string value. Specificies the
         intermediate reward calculation to use.
-    inverse_temperature : scalar
+    inverse_temperature : scalar or one-dimensional jnp.Array
         The inverse temperature (i.e., tilt) of the target param distribution.
+        Passing a temperature ladder runs one FK ensemble per temperature and
+        enables replica exchange between adjacent temperatures.
     kwargs_intermediate_reward : dict
         Additional keyword arguments for building the intermediate reward function.
 
@@ -206,34 +208,46 @@ class FeynmanKac:
             intermediate_reward = IntermediateReward(intermediate_reward)
         except ValueError:
             raise ValueError(f'intermediate_reward must be one of {[e.value for e in IntermediateReward]}, not {intermediate_reward!r}.')
+        inverse_temperature = jnp.asarray(inverse_temperature)
+        if inverse_temperature.ndim > 1:
+            raise ValueError('inverse_temperature must be a scalar or one-dimensional array.')
+        if inverse_temperature.size == 0:
+            raise ValueError('inverse_temperature must contain at least one value.')
         self.kwargs_intermediate_reward = kwargs_intermediate_reward or {}
 
-        self.init_param_fn = jax.jit(jax.vmap(jax.vmap(init_param_fn)))
-        self.intermediate_reward_fn = jax.jit(jax.vmap(
-            self.get_intermediate_reward_fn(intermediate_reward, reward_fn),
+        self.init_param_fn = jax.jit(jax.vmap(jax.vmap(jax.vmap(init_param_fn))))
+        intermediate_reward_fn = self.get_intermediate_reward_fn(intermediate_reward, reward_fn)
+        self.intermediate_reward_fn = jax.jit(jax.vmap(jax.vmap(
+            intermediate_reward_fn,
             in_axes=(
                 0,     # key
                 None,  # t0
                 0,     # param batch
             ),
-        ))
-        self.propose_fn = jax.jit(jax.vmap(propose_fn, in_axes=(
+        ), in_axes=(0, None, 0)))
+        self.propose_fn = jax.jit(jax.vmap(jax.vmap(propose_fn, in_axes=(
             0,     # key
             None,  # t0
             None,  # t1
             0,     # param batch
-        )))
-        self.resample_fn = jax.jit(
-            jax.vmap(
-                resample_fn,
-                in_axes=(0, None, None, 1),
-                out_axes=(1, 0, 0),
-            ),
-            static_argnums=2,
+        )), in_axes=(0, None, None, 0)))
+        resample_fn = jax.vmap(
+            resample_fn,
+            in_axes=(0, None, None, 1),
+            out_axes=(1, 0, 0),
         )
-        self.log_potential_fn = jax.jit(jax.vmap(self.get_log_potential_fn(potential, inverse_temperature)))
+        self.resample_fn = jax.jit(jax.vmap(
+            resample_fn,
+            in_axes=(0, None, None, 0),
+            out_axes=(0, 0, 0),
+        ), static_argnums=2)
+        self.log_potential_beta_one_fn = jax.jit(jax.vmap(jax.vmap(
+            self.get_log_potential_fn(potential, 1.),
+        )))
         self.potential = potential
-        self.inverse_temperature = inverse_temperature
+        self.scalar_inverse_temperature = inverse_temperature.ndim == 0
+        self.inverse_temperature = inverse_temperature.reshape(-1)
+        self.temperature_count = self.inverse_temperature.size
 
     def run(
         self,
@@ -261,19 +275,27 @@ class FeynmanKac:
         Returns
         -------
         tuple[jnp.Array, jnp.Array]
-            The final particles with shape ``(ensemble_size, batch_size, ...)``
-            and their unnormalized log-weights with shape
-            ``(ensemble_size, batch_size)``.
+            For a scalar inverse temperature, the final particles have shape
+            ``(ensemble_size, batch_size, ...)`` and their unnormalized
+            log-weights have shape ``(ensemble_size, batch_size)``. For a
+            temperature ladder, both outputs have an additional leading
+            ``temperature_count`` dimension.
         """
         (
             key_init_ensemble,
             key_particle_resampling,
             key_reward_fn,
             key_propose_next_intermediate,
-        ) = jax.random.split(key, 4)
-        batch = self.init_param_fn(jax.random.split(key_init_ensemble, (ensemble_size, batch_size)))
+            key_parallel_tempering,
+        ) = jax.random.split(key, 5)
+        batch = self.init_param_fn(jax.random.split(
+            key_init_ensemble, (self.temperature_count, ensemble_size, batch_size),
+        ))
         key_reward, key_reward_fn = jax.random.split(key_reward_fn)
-        reward = self.intermediate_reward_fn(jax.random.split(key_reward, ensemble_size), times[0], batch)
+        reward = self.intermediate_reward_fn(jax.random.split(
+            key_reward, (self.temperature_count, ensemble_size),
+        ), times[0], batch)
+        inverse_temperature = self.inverse_temperature.astype(reward.dtype).reshape(-1, 1, 1)
         if self.potential in (Potential.DIFFERENCE, Potential.MAX):
             aggregated_reward = reward
         elif self.potential is Potential.SUM:
@@ -281,37 +303,99 @@ class FeynmanKac:
         else:
             raise ValueError(f'Aggregated reward initialization not implemented for {self.potential!r}.')
         if self.potential is Potential.DIFFERENCE:
-            log_potential = jnp.zeros_like(reward)
+            log_potential_beta_one = jnp.zeros_like(reward)
         else:
-            log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
-        aggregated_log_potential = jnp.zeros_like(log_potential)
-        log_weight = jnp.zeros_like(log_potential)
+            log_potential_beta_one, aggregated_reward = self.log_potential_beta_one_fn(reward, aggregated_reward)
+        aggregated_log_potential_beta_one = jnp.zeros_like(log_potential_beta_one)
+        log_weight_beta_one = jnp.zeros_like(log_potential_beta_one)
         batch_indices = jnp.arange(batch_size)
+        temperature_indices = jnp.arange(self.temperature_count)[:, None, None]
         for time_step, (t0, t1) in enumerate(zip(times, times[1:])):
             key_resample, key_particle_resampling = jax.random.split(key_particle_resampling)
             ancestor_indices, did_resample, use_zero_log_potential = self.resample_fn(
-                jax.random.split(key_resample, batch_size), time_step, ensemble_size, log_weight + log_potential,
+                jax.random.split(key_resample, (self.temperature_count, batch_size)),
+                time_step,
+                ensemble_size,
+                inverse_temperature * (log_weight_beta_one + log_potential_beta_one),
             )
             use_zero_log_potential = jnp.logical_and(use_zero_log_potential, ~did_resample)
-            log_potential = jnp.where(use_zero_log_potential, 0., log_potential)
-            aggregated_log_potential = aggregated_log_potential + log_potential
-            log_weight = log_weight + log_potential
-            batch = batch[ancestor_indices, batch_indices]
-            aggregated_reward = aggregated_reward[ancestor_indices, batch_indices]
-            aggregated_log_potential = aggregated_log_potential[ancestor_indices, batch_indices]
-            log_weight = log_weight[ancestor_indices, batch_indices]
-            log_weight = jnp.where(did_resample, 0., log_weight)
+            log_potential_beta_one = jnp.where(use_zero_log_potential[:, None], 0., log_potential_beta_one)
+            aggregated_log_potential_beta_one = aggregated_log_potential_beta_one + log_potential_beta_one
+            log_weight_beta_one = log_weight_beta_one + log_potential_beta_one
+            batch = batch[temperature_indices, ancestor_indices, batch_indices]
+            aggregated_reward = aggregated_reward[temperature_indices, ancestor_indices, batch_indices]
+            aggregated_log_potential_beta_one = aggregated_log_potential_beta_one[
+                temperature_indices, ancestor_indices, batch_indices,
+            ]
+            log_weight_beta_one = log_weight_beta_one[temperature_indices, ancestor_indices, batch_indices]
+            log_weight_beta_one = jnp.where(did_resample[:, None], 0., log_weight_beta_one)
             key_propose, key_propose_next_intermediate = jax.random.split(key_propose_next_intermediate)
-            batch = self.propose_fn(jax.random.split(key_propose, ensemble_size), t0, t1, batch)
+            batch = self.propose_fn(jax.random.split(
+                key_propose, (self.temperature_count, ensemble_size),
+            ), t0, t1, batch)
             key_reward, key_reward_fn = jax.random.split(key_reward_fn)
-            reward = self.intermediate_reward_fn(jax.random.split(key_reward, ensemble_size), t1, batch)
+            reward = self.intermediate_reward_fn(jax.random.split(
+                key_reward, (self.temperature_count, ensemble_size),
+            ), t1, batch)
+            for temperature in range(self.temperature_count - 1):
+                key_permutation, key_swap, key_parallel_tempering = jax.random.split(key_parallel_tempering, 3)
+                permutation = jax.vmap(
+                    lambda permutation_key: jax.random.permutation(permutation_key, ensemble_size),
+                )(jax.random.split(key_permutation, batch_size)).T
+                batch = batch.at[temperature].set(batch[temperature][permutation, batch_indices])
+                reward = reward.at[temperature].set(reward[temperature][permutation, batch_indices])
+                aggregated_reward = aggregated_reward.at[temperature].set(
+                    aggregated_reward[temperature][permutation, batch_indices],
+                )
+                aggregated_log_potential_beta_one = aggregated_log_potential_beta_one.at[temperature].set(
+                    aggregated_log_potential_beta_one[temperature][permutation, batch_indices],
+                )
+                log_weight_beta_one = log_weight_beta_one.at[temperature].set(
+                    log_weight_beta_one[temperature][permutation, batch_indices],
+                )
+                swap_probability = self.parallel_tempering_swap_probability(
+                    reward_hot=reward[temperature],
+                    inverse_temperature_hot=inverse_temperature[temperature],
+                    reward_cold=reward[temperature + 1],
+                    inverse_temperature_cold=inverse_temperature[temperature + 1],
+                )
+                swap = jax.random.bernoulli(key_swap, swap_probability)
+                batch = self.swap_temperature(swap, batch, temperature)
+                reward = self.swap_temperature(swap, reward, temperature)
+                aggregated_reward = self.swap_temperature(swap, aggregated_reward, temperature)
+                aggregated_log_potential_beta_one = self.swap_temperature(
+                    swap, aggregated_log_potential_beta_one, temperature,
+                )
+                log_weight_beta_one = self.swap_temperature(swap, log_weight_beta_one, temperature)
             if t1 == times[-1]:
-                log_potential = self.inverse_temperature * reward
+                log_potential_beta_one = reward
             else:
-                log_potential, aggregated_reward = self.log_potential_fn(reward, aggregated_reward)
-        final_log_potential = log_potential - aggregated_log_potential
-        final_log_weight = log_weight + final_log_potential
-        return batch, final_log_weight
+                log_potential_beta_one, aggregated_reward = self.log_potential_beta_one_fn(
+                    reward, aggregated_reward,
+                )
+        log_potential_beta_one = log_potential_beta_one - aggregated_log_potential_beta_one
+        log_weight = inverse_temperature * (log_weight_beta_one + log_potential_beta_one)
+        if self.scalar_inverse_temperature:
+            return batch[0], log_weight[0]
+        return batch, log_weight
+
+    @staticmethod
+    def parallel_tempering_swap_probability(
+        reward_hot, inverse_temperature_hot,
+        reward_cold, inverse_temperature_cold,
+    ):
+        delta_reward = reward_cold - reward_hot
+        delta_inverse_temperature = inverse_temperature_cold - inverse_temperature_hot
+        return jnp.clip(jnp.exp(-delta_inverse_temperature * delta_reward), max=1)
+
+    @staticmethod
+    def swap_temperature(swap, value, temperature):
+        swap = swap.reshape(*swap.shape, *[1 for _ in range(value.ndim - 1 - swap.ndim)])
+        value_hot = jnp.where(swap, value[temperature + 1], value[temperature])
+        value_cold = jnp.where(swap, value[temperature], value[temperature + 1])
+        value = value.at[temperature].set(value_hot)
+        value = value.at[temperature + 1].set(value_cold)
+        return value
 
     def get_log_potential_fn(self, potential, inverse_temperature):
         if potential is Potential.DIFFERENCE:
