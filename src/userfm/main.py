@@ -125,6 +125,11 @@ class JaxLightning(pl.LightningModule):
                         )
                     else:
                         raise ValueError(f'Unknown Feynman-Kac steering intermediate reward: {self.cfg.steering.intermediate_reward}')
+                    inverse_temperature = self.cfg.steering.tilt
+                    if self.cfg.steering.chain_count > 1:
+                        inverse_temperature = jnp.linspace(
+                            0, self.cfg.steering.tilt, self.cfg.steering.chain_count,
+                        )
                     self.feynman_kac = fk_steering.FeynmanKac(
                         init_param_fn=lambda key: self.noise_std * jax.random.normal(key, (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim)),
                         reward_fn=partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
@@ -132,7 +137,7 @@ class JaxLightning(pl.LightningModule):
                         resample_fn=fk_steering.ResampleFn.adaptive_resample,
                         potential=self.cfg.steering.potential,
                         intermediate_reward=intermediate_reward,
-                        inverse_temperature=self.cfg.steering.tilt,
+                        inverse_temperature=inverse_temperature,
                         kwargs_intermediate_reward=kwargs_intermediate_reward,
                     )
                 elif isinstance(self.cfg.steering, conf.model.RpCN):
@@ -269,6 +274,8 @@ class JaxLightning(pl.LightningModule):
                 key, self.times, self.cfg.steering.ensemble_size,
                 batch_size=self.cfg.dataset.batch_size
             )
+            if self.cfg.steering.chain_count > 1:
+                final_particles = final_particles[-1]
             batch = fk_steering.SelectFn.highest_reward(
                 final_particles,
                 partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),

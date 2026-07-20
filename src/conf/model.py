@@ -86,6 +86,7 @@ class FeynmanKac(Steering):
         '_self_',
     ])
     ensemble_size: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
+    chain_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=1)
     potential: FeynmanKacPotential = orm.make_field(orm.ColumnRequired(sa.Enum(FeynmanKacPotential)), default=omegaconf.MISSING)
     intermediate_reward = orm.OneToManyField(FeynmanKacIntermediateReward, default=omegaconf.MISSING)
     tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
