@@ -99,7 +99,7 @@ def _(mo):
     return (n_modes,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, n_modes):
     mode_count = int(n_modes.value)
     default_std = 3
@@ -354,6 +354,7 @@ def _(mo):
 
     fk_n_chains = mo.ui.number(start=1, stop=64, step=1, value=20, label="fk_n_chains")
     fk_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="fk_inverse_temperature")
+    fk_temperature_count = mo.ui.number(start=1, stop=64, step=1, value=1, label="fk_temperature_count")
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
 
@@ -381,7 +382,7 @@ def _(mo):
             mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
-            mo.hstack([fk_n_chains, fk_inverse_temperature, fk_resample_threshold, fk_check_every], justify="start"),
+            mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
             mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
         ]
@@ -396,6 +397,7 @@ def _(mo):
         fk_inverse_temperature,
         fk_n_chains,
         fk_resample_threshold,
+        fk_temperature_count,
         mh_burn_in,
         mh_inverse_temp,
         mh_num_chains,
@@ -812,6 +814,7 @@ def _(
     fk_n_chains,
     fk_resample_threshold,
     fk_steering,
+    fk_temperature_count,
     reference_data,
     reward_fn,
     run_fk,
@@ -823,6 +826,19 @@ def _(
 ):
     if run_fk.value:
         torch.manual_seed(int(seed.value))
+        target_inverse_temperature = float(fk_inverse_temperature.value)
+        temperature_count = int(fk_temperature_count.value)
+        if temperature_count == 1:
+            fk_inverse_temperatures = target_inverse_temperature
+        else:
+            fk_inverse_temperatures = torch.linspace(
+                0.0,
+                target_inverse_temperature,
+                temperature_count,
+                device=reference_data.device,
+                dtype=reference_data.dtype,
+            )
+
         def propose_step(t0, t1, z):
             mean = score_model.expected_next_fn(t0, t1, z)
             if t1 > 0:
@@ -830,19 +846,24 @@ def _(
                 return mean + std * torch.randn_like(z)
             return mean
 
-        def adaptive_resample_safe(time_step, ensemble, potentials):
+        def adaptive_resample_safe(time_step, ensemble_size, log_weights):
+            identity_indices = torch.arange(ensemble_size, device=log_weights.device)
             if time_step % int(fk_check_every.value) != 0:
-                return ensemble
-            weights = torch.nan_to_num(potentials, nan=0.0, posinf=0.0, neginf=0.0)
-            weights = weights.clamp_min(0.0)
-            tiny = 1e-9
-            weights = torch.where(weights.sum() > tiny, weights, 1.)
-            probs = weights / weights.sum()
+                did_resample = torch.tensor(False, device=log_weights.device)
+                return identity_indices, did_resample, did_resample
+            safe_log_weights = torch.nan_to_num(log_weights, nan=0.0)
+            probs = torch.softmax(safe_log_weights, dim=0)
             ess = 1.0 / probs.square().sum()
-            threshold = float(fk_resample_threshold.value) * ensemble.shape[0]
-            return torch.where(ess < threshold, fk_steering.ResampleFn.do_resample(ensemble, probs), ensemble)
+            threshold = float(fk_resample_threshold.value) * ensemble_size
+            did_resample = ess < threshold
+            ancestor_indices = torch.where(
+                did_resample,
+                fk_steering.ResampleFn.do_resample(ensemble_size, probs),
+                identity_indices,
+            )
+            return ancestor_indices, did_resample, torch.zeros_like(did_resample)
 
-        fk = fk_steering.FeynmannKac(
+        fk = fk_steering.FeynmanKac(
             init_param_fn=lambda: torch.randn(
                 1,
                 device=reference_data.device,
@@ -853,17 +874,19 @@ def _(
             resample_fn=adaptive_resample_safe,
             potential=fk_steering.Potential.DIFFERENCE,
             intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,
-            inverse_temperature=float(fk_inverse_temperature.value),
+            inverse_temperature=fk_inverse_temperatures,
             kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},
         )
 
         with torch.no_grad():
+            fk_particles, _fk_log_weights = fk.run(
+                timesteps,
+                int(fk_n_chains.value),
+                batch_size=int(batch_size.value),
+            )
+            target_particles = fk_particles if temperature_count == 1 else fk_particles[-1]
             set_fk_samples(
-                fk.run(
-                    timesteps,
-                    int(fk_n_chains.value),
-                    batch_size=int(batch_size.value),
-                )
+                fk_steering.SelectFn.highest_reward(target_particles, reward_fn)
             )
     return
 
