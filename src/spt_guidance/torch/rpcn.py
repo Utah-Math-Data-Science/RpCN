@@ -209,14 +209,13 @@ class ResidualMCMCSteering:
                     )
                     if pcn_should_replica_exchange_fn(time_step, t0, t1, pcn_update, reward_with_unit_temperature):
                         for k in range(self.chain_count - 1):
-                            reward_with_unit_temperature_before_swap = reward_with_unit_temperature
                             swap_probability = self.kernel.parallel_tempering_swap_probability(
                                 reward_hot=reward_with_unit_temperature[k], inverse_temperature_hot=self.inverse_temperature[k],
                                 reward_cold=reward_with_unit_temperature[k + 1], inverse_temperature_cold=self.inverse_temperature[k + 1],
                             )
                             swap = torch.bernoulli(swap_probability).to(torch.bool)
-                            sample_noise, reward_with_unit_temperature = self.swap_chain(swap, sample_noise, reward_with_unit_temperature_before_swap, k)
-                            expected_next, _ = self.swap_chain(swap, expected_next, reward_with_unit_temperature_before_swap, k)
+                            sample_noise, reward_with_unit_temperature = self.swap_chain(swap, sample_noise, k, reward_with_unit_temperature)
+                            expected_next, _ = self.swap_chain(swap, expected_next, k)
             batch = expected_next + sample_noise
         return batch
 
@@ -232,11 +231,12 @@ class ResidualMCMCSteering:
         updated_param = torch.where(accept, new_param, param)
         return updated_param, updated_reward_with_unit_temperature
 
-    def swap_chain(self, swap, param, reward_with_unit_temperature, k):
-        reward_temp_1_kp1 = torch.where(swap, reward_with_unit_temperature[k], reward_with_unit_temperature[k + 1])
-        reward_temp_1_k = torch.where(swap, reward_with_unit_temperature[k + 1], reward_with_unit_temperature[k])
-        reward_with_unit_temperature[k] = reward_temp_1_k
-        reward_with_unit_temperature[k + 1] = reward_temp_1_kp1
+    def swap_chain(self, swap, param, k, reward_with_unit_temperature=None):
+        if reward_with_unit_temperature is not None:
+            reward_temp_1_kp1 = torch.where(swap, reward_with_unit_temperature[k], reward_with_unit_temperature[k + 1])
+            reward_temp_1_k = torch.where(swap, reward_with_unit_temperature[k + 1], reward_with_unit_temperature[k])
+            reward_with_unit_temperature[k] = reward_temp_1_k
+            reward_with_unit_temperature[k + 1] = reward_temp_1_kp1
         swap = swap.reshape(*swap.shape, *[1 for _ in range(param.ndim - 1 - swap.ndim)])
         param_kp1 = torch.where(swap, param[k], param[k + 1])
         param_k = torch.where(swap, param[k + 1], param[k])
