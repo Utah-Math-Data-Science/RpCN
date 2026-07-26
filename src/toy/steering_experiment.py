@@ -14,6 +14,16 @@ from toy.model import Bao2024EnsembleScoreMatching, EnsembleScoreModel, metropol
 
 log = toy.utils.get_logger_by_filename(__file__)
 
+MH_REFERENCE_N_CHAINS = 64
+MH_REFERENCE_NUM_SAMPLES = 2000
+MH_REFERENCE_BURN_IN = 2000
+MH_REFERENCE_THINNING = 2
+MH_REFERENCE_PROPOSAL_STD = 0.4
+MH_REFERENCE_INVERSE_TEMPERATURE = 25.0
+KL_HISTOGRAM_BINS = 60
+KL_HISTOGRAM_RANGE = (-10.0, 10.0)
+KL_EPSILON = 1e-8
+
 
 def _build_reward_fn(cfg_exp: conf.setting.GMMExperiment) -> Callable[[torch.Tensor], torch.Tensor]:
     if cfg_exp.reward_kind != conf.setting.RewardKind.SIGNED_GAUSSIAN_PAIR:
@@ -165,7 +175,7 @@ def _run_rpcn(cfg, score_model, reference_data, reward_fn, timesteps):
 
     def rpcn_update_fn(step_idx, t0, t1, reward):
         _ = (t0, t1, reward)
-        return step_idx % cfg_rpcn.check_every == 0
+        return (step_idx >= 5) and (step_idx % cfg_rpcn.check_every == 0)
 
     with torch.no_grad():
         rpcn_samples = steering.run(
@@ -221,8 +231,46 @@ def _run_mh(cfg, selected_device, gmm_sample, gmm_log_prob, reward_fn):
     return mh_samples.reshape(-1, 1)
 
 
+def _run_mh_reference(cfg, selected_device, gmm_sample, gmm_log_prob, reward_fn):
+    torch.manual_seed(cfg.seed)
+
+    def log_target_fn(x: torch.Tensor) -> torch.Tensor:
+        x_flat = x[:, 0]
+        return gmm_log_prob(x_flat) + MH_REFERENCE_INVERSE_TEMPERATURE * reward_fn(x_flat)
+
+    reference_samples, reference_diag = metropolis_hastings_sample(
+        log_target_fn=log_target_fn,
+        num_chains=MH_REFERENCE_N_CHAINS,
+        num_samples=MH_REFERENCE_NUM_SAMPLES,
+        dim=1,
+        burn_in=MH_REFERENCE_BURN_IN,
+        proposal_std=MH_REFERENCE_PROPOSAL_STD,
+        thinning=MH_REFERENCE_THINNING,
+        initial_x=gmm_sample(MH_REFERENCE_N_CHAINS, selected_device),
+        device=torch.device(selected_device),
+        dtype=torch.float32,
+    )
+    log.info('MH reference acceptance rate: %.4f', reference_diag['acceptance_rate'])
+    return reference_samples.reshape(-1)
+
+
+def _kl_to_mh_reference(samples: torch.Tensor, reference_samples: torch.Tensor) -> float:
+    histogram_kwargs = {
+        'bins': KL_HISTOGRAM_BINS,
+        'range': KL_HISTOGRAM_RANGE,
+    }
+    method_counts = torch.histogram(samples.float().cpu(), **histogram_kwargs).hist
+    reference_counts = torch.histogram(reference_samples.float().cpu(), **histogram_kwargs).hist
+    p_method = (method_counts.double() + KL_EPSILON)
+    p_method /= p_method.sum()
+    p_reference = (reference_counts.double() + KL_EPSILON)
+    p_reference /= p_reference.sum()
+    return float(torch.sum(p_reference * (torch.log(p_reference) - torch.log(p_method))))
+
+
 def run_and_make_samples_df(cfg) -> pl.DataFrame:
     gmm_sample, gmm_log_prob, reward_fn = _build_gmm(cfg.setting)
+    torch.manual_seed(cfg.seed)
     selected_device, score_model = _build_score_model(cfg)
     reference_data = gmm_sample(cfg.score_model.n_reference, selected_device)
     score_model.set_training_data(reference_data)
@@ -243,11 +291,20 @@ def run_and_make_samples_df(cfg) -> pl.DataFrame:
     final_samples = final_samples.detach().cpu()
     x_values = final_samples[:, 0]
     rewards = torch.vmap(reward_fn)(x_values).detach().cpu()
+    mh_reference = _run_mh_reference(cfg, selected_device, gmm_sample, gmm_log_prob, reward_fn)
+    kl_to_mh = _kl_to_mh_reference(x_values, mh_reference)
+    log.info(
+        'KL to MH reference: %.6f (bins=%d range=[%.1f, %.1f])',
+        kl_to_mh,
+        KL_HISTOGRAM_BINS,
+        *KL_HISTOGRAM_RANGE,
+    )
     sample_ids = torch.arange(x_values.shape[0], dtype=torch.int64)
     return pl.DataFrame(
         {
             'sample_id': sample_ids.tolist(),
             'x': x_values.tolist(),
             'reward': rewards.tolist(),
+            'kl_to_mh': [kl_to_mh] * x_values.shape[0],
         }
     )
