@@ -46,7 +46,7 @@ def _(mo):
     # 1D Steering Explorer
 
     Define a 1D Gaussian mixture and a reward function `reward_fn(x)`, then run
-    unsteered, FK, RpCN, and MH reference samplers independently.
+    unsteered, FK, DAS, RpCN, and MH reference samplers independently.
     """)
     return
 
@@ -196,6 +196,7 @@ def _(np, x_max, x_min):
 
 @app.cell(hide_code=True)
 def _(
+    das_final,
     fk_final,
     gmm_density,
     hist_bin_edges,
@@ -209,11 +210,11 @@ def _(
     unsteered_samples,
     x_grid,
 ):
-    has_samples_plot = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
+    has_samples_plot = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and mh_final is None)
     plot_histogram = None
     plot_bin_count = len(hist_bin_edges) - 1
     if has_samples_plot:
-        method_order = ["Base", "MCMC Reference", "FK Steering", "RpCN Steering"]
+        method_order = ["Base", "MCMC Reference", "FK Steering", "DAS Steering", "RpCN Steering"]
         sample_frames = []
         if unsteered_samples is not None:
             sample_frames.append(
@@ -222,6 +223,10 @@ def _(
         if fk_final is not None:
             sample_frames.append(
                 pl.DataFrame({"method": ["FK Steering"] * fk_final.shape[0], "x": fk_final[:, 0].cpu().numpy().tolist()})
+            )
+        if das_final is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["DAS Steering"] * das_final.shape[0], "x": das_final[:, 0].cpu().numpy().tolist()})
             )
         if rpcn_final is not None:
             sample_frames.append(
@@ -252,6 +257,7 @@ def _(
                 palette={
                     'Base': 'tab:grey',
                     'FK Steering': 'tab:blue',
+                    'DAS Steering': 'tab:green',
                     'RpCN Steering': 'tab:orange',
                     'MCMC Reference': 'tab:grey',
                 },
@@ -358,6 +364,12 @@ def _(mo):
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
 
+    das_n_particles = mo.ui.number(start=2, stop=128, step=1, value=8, label="das_n_particles")
+    das_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="das_inverse_temperature")
+    das_proposal_scale = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.01, label="das_proposal_scale")
+    das_tempering_gamma = mo.ui.number(start=-1.0, stop=1.0, step=0.001, value=0.024, label="das_tempering_gamma")
+    das_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="das_ess_threshold")
+
     rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=4, label="rpcn_n_chains")
     rpcn_update_count = mo.ui.number(start=1, stop=200, step=1, value=5, label="rpcn_update_count")
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
@@ -373,16 +385,19 @@ def _(mo):
 
     run_unsteered = mo.ui.run_button(label="Unsteered")
     run_fk = mo.ui.run_button(label="FK")
+    run_das = mo.ui.run_button(label="DAS")
     run_rpcn = mo.ui.run_button(label="RpCN")
     run_mh = mo.ui.run_button(label="MH")
 
     controls = mo.vstack(
         [
             mo.md("## Experiment Controls"),
-            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_rpcn], justify="start"),
+            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
             mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
+            mo.hstack([das_n_particles, das_inverse_temperature, das_proposal_scale, das_tempering_gamma, das_resample_threshold], justify="start"),
+            mo.md("DAS uses the paper's exponential schedule `lambda_i=min((1+gamma)^i-1, 1)` and enforces terminal `lambda=1`. Set `das_proposal_scale=1` for the undamped Gaussian proposal; smaller values retain the exact importance correction while improving finite-particle stability for this non-concave reward."),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
             mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
         ]
@@ -390,6 +405,11 @@ def _(mo):
     controls
     return (
         batch_size,
+        das_inverse_temperature,
+        das_n_particles,
+        das_proposal_scale,
+        das_resample_threshold,
+        das_tempering_gamma,
         device,
         epsilon_alpha,
         epsilon_beta,
@@ -412,6 +432,7 @@ def _(mo):
         rpcn_inverse_temp_max,
         rpcn_n_chains,
         rpcn_update_count,
+        run_das,
         run_fk,
         run_mh,
         run_rpcn,
@@ -424,8 +445,9 @@ def _(mo):
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
+    das_final,
     fk_final,
     hist_bin_edges,
     hist_range,
@@ -438,7 +460,7 @@ def _(
     torch,
     unsteered_samples,
 ):
-    has_samples_stats = not (unsteered_samples is None and fk_final is None and rpcn_final is None and mh_final is None)
+    has_samples_stats = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and mh_final is None)
     stats_bin_count = len(hist_bin_edges) - 1
     if has_samples_stats:
         method_frames = []
@@ -446,6 +468,8 @@ def _(
             method_frames.append(pl.DataFrame({"method": ["Unsteered"] * unsteered_samples.shape[0], "x": unsteered_samples[:, 0].cpu().numpy().tolist()}))
         if fk_final is not None:
             method_frames.append(pl.DataFrame({"method": ["FK"] * fk_final.shape[0], "x": fk_final[:, 0].cpu().numpy().tolist()}))
+        if das_final is not None:
+            method_frames.append(pl.DataFrame({"method": ["DAS"] * das_final.shape[0], "x": das_final[:, 0].cpu().numpy().tolist()}))
         if rpcn_final is not None:
             method_frames.append(pl.DataFrame({"method": ["RpCN"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()}))
         if mh_final is not None:
@@ -606,7 +630,7 @@ def _(
 
         def rpcn_update_fn(step_idx, t0, t1, reward):
             _ = (t0, t1, reward)
-            return step_idx % int(rpcn_check_every.value) == 0
+            return (step_idx >= 5) and (step_idx % int(rpcn_check_every.value) == 0)
 
         with torch.no_grad():
             set_rpcn_samples(
@@ -727,15 +751,18 @@ def _(reward_fn, torch, x_grid):
 def _(mo):
     get_unsteered_samples, set_unsteered_samples = mo.state(None)
     get_fk_samples, set_fk_samples = mo.state(None)
+    get_das_samples, set_das_samples = mo.state(None)
     get_rpcn_samples, set_rpcn_samples = mo.state(None)
     get_mh_samples, set_mh_samples = mo.state(None)
     get_mh_diagnostics, set_mh_diagnostics = mo.state(None)
     return (
+        get_das_samples,
         get_fk_samples,
         get_mh_diagnostics,
         get_mh_samples,
         get_rpcn_samples,
         get_unsteered_samples,
+        set_das_samples,
         set_fk_samples,
         set_mh_diagnostics,
         set_mh_samples,
@@ -786,18 +813,21 @@ def _(
 
 @app.cell
 def _(
+    get_das_samples,
     get_fk_samples,
     get_mh_diagnostics,
     get_mh_samples,
     get_rpcn_samples,
     get_unsteered_samples,
 ):
+    das_samples = get_das_samples()
     fk_samples = get_fk_samples()
     mh_diagnostics = get_mh_diagnostics()
     mh_samples = get_mh_samples()
     rpcn_samples = get_rpcn_samples()
     unsteered_samples = get_unsteered_samples()
     return (
+        das_samples,
         fk_samples,
         mh_diagnostics,
         mh_samples,
@@ -893,6 +923,121 @@ def _(
 
 @app.cell
 def _(
+    batch_size,
+    das_inverse_temperature,
+    das_n_particles,
+    das_proposal_scale,
+    das_resample_threshold,
+    das_tempering_gamma,
+    reference_data,
+    reward_fn,
+    run_das,
+    score_model,
+    seed,
+    set_das_samples,
+    timesteps,
+    torch,
+):
+    if run_das.value:
+        torch.manual_seed(int(seed.value))
+        das_batch_count = int(batch_size.value)
+        das_particle_count = int(das_n_particles.value)
+        das_inverse_temp = float(das_inverse_temperature.value)
+        das_guidance_scale = float(das_proposal_scale.value)
+        das_tempering_steps = torch.arange(
+            timesteps.numel(),
+            device=reference_data.device,
+            dtype=reference_data.dtype,
+        )
+        das_tempering = ((1.0 + float(das_tempering_gamma.value)) ** das_tempering_steps - 1.0).clamp(max=1.0)
+        das_tempering = torch.cat([das_tempering[:-1], torch.ones_like(das_tempering[-1:])])
+
+        def das_tweedie_fn(das_time, das_latents):
+            das_score = score_model._score_particles(das_time, das_latents)
+            das_alpha = score_model.prob_path.alpha(das_time)
+            das_beta = score_model.prob_path.beta(das_time)
+            return (das_latents + das_beta.square() * das_score) / das_alpha
+
+        def das_log_gaussian_fn(das_value, das_mean, das_std):
+            das_variance = das_std.square()
+            das_dimension = das_value.shape[-1]
+            das_squared_distance = (das_value - das_mean).square().sum(dim=-1)
+            return -0.5 * (
+                das_squared_distance / das_variance
+                + das_dimension * torch.log(2.0 * torch.pi * das_variance)
+            )
+
+        das_particles = torch.randn(
+            das_batch_count,
+            das_particle_count,
+            1,
+            device=reference_data.device,
+            dtype=reference_data.dtype,
+        )
+        das_log_weights = torch.full(
+            (das_batch_count, das_particle_count),
+            -torch.log(torch.tensor(float(das_particle_count), device=reference_data.device, dtype=reference_data.dtype)),
+            device=reference_data.device,
+            dtype=reference_data.dtype,
+        )
+
+        for das_step_idx, das_time_pair in enumerate(timesteps.unfold(0, 2, 1)):
+            das_t0 = das_time_pair[0]
+            das_t1 = das_time_pair[1]
+            das_log_normalized = das_log_weights - torch.logsumexp(das_log_weights, dim=1, keepdim=True)
+            das_probabilities = das_log_normalized.exp()
+            das_ess = 1.0 / das_probabilities.square().sum(dim=1)
+            das_should_resample = das_ess < float(das_resample_threshold.value) * das_particle_count
+            das_sampled_indices = torch.multinomial(das_probabilities, das_particle_count, replacement=True)
+            das_identity_indices = torch.arange(das_particle_count, device=reference_data.device).expand(das_batch_count, -1)
+            das_ancestor_indices = torch.where(das_should_resample[:, None], das_sampled_indices, das_identity_indices)
+            das_particles = torch.gather(das_particles, 1, das_ancestor_indices[:, :, None])
+            das_resampled_log_weights = torch.where(
+                das_should_resample[:, None],
+                -torch.log(torch.tensor(float(das_particle_count), device=reference_data.device, dtype=reference_data.dtype)),
+                das_log_normalized,
+            )
+
+            das_current = das_particles.reshape(-1, 1).detach().requires_grad_(True)
+            das_base_mean = score_model.expected_next_fn(das_t0, das_t1, das_current)
+            das_current_tweedie = das_tweedie_fn(das_t0, das_current)
+            das_current_reward = reward_fn(das_current_tweedie).reshape(-1)
+            das_reward_gradient = torch.autograd.grad(das_current_reward.sum(), das_current)[0]
+            das_transition_std = score_model.std_fn(das_t0, das_t1)
+            das_next_lambda = das_tempering[das_step_idx + 1]
+            das_current_lambda = das_tempering[das_step_idx]
+            das_proposal_mean = (
+                das_base_mean
+                + das_guidance_scale
+                * das_transition_std.square()
+                * das_next_lambda
+                * das_inverse_temp
+                * das_reward_gradient
+            )
+
+            with torch.no_grad():
+                das_next = das_proposal_mean + das_transition_std * torch.randn_like(das_current)
+                das_next_tweedie = das_tweedie_fn(das_t1, das_next)
+                das_next_reward = reward_fn(das_next_tweedie).reshape(-1)
+                das_incremental_log_weights = (
+                    das_log_gaussian_fn(das_next, das_base_mean, das_transition_std)
+                    - das_log_gaussian_fn(das_next, das_proposal_mean, das_transition_std)
+                    + das_next_lambda * das_inverse_temp * das_next_reward
+                    - das_current_lambda * das_inverse_temp * das_current_reward
+                )
+                das_log_weights = das_resampled_log_weights + das_incremental_log_weights.reshape(das_batch_count, das_particle_count)
+                das_particles = das_next.reshape(das_batch_count, das_particle_count, 1)
+
+        with torch.no_grad():
+            das_final_probabilities = torch.softmax(das_log_weights, dim=1)
+            das_final_indices = torch.multinomial(das_final_probabilities, 1)
+            das_selected = torch.gather(das_particles, 1, das_final_indices[:, :, None]).squeeze(1)
+            set_das_samples(das_selected)
+    return
+
+
+@app.cell
+def _(
     n_steps,
     reference_data,
     run_unsteered,
@@ -925,6 +1070,17 @@ def _(fk_samples):
 
 
 @app.cell
+def _(das_samples):
+    das_final = None
+    if das_samples is not None:
+        if das_samples.ndim != 2 or das_samples.shape[-1] != 1:
+            raise ValueError(f"Unexpected DAS sample shape: {das_samples.shape}")
+        das_final = das_samples
+    das_final = das_final.detach().cpu() if das_final is not None else None
+    return (das_final,)
+
+
+@app.cell
 def _(rpcn_samples):
     rpcn_final = None
     if rpcn_samples is not None:
@@ -950,10 +1106,19 @@ def _(mh_samples):
 
 
 @app.cell
-def _(fk_final, mh_diagnostics, mh_final, mo, rpcn_final, unsteered_samples):
+def _(
+    das_final,
+    fk_final,
+    mh_diagnostics,
+    mh_final,
+    mo,
+    rpcn_final,
+    unsteered_samples,
+):
     statuses = []
     statuses.append("Unsteered: ready" if unsteered_samples is not None else "Unsteered: not run")
     statuses.append("FK: ready" if fk_final is not None else "FK: not run")
+    statuses.append("DAS: ready" if das_final is not None else "DAS: not run")
     statuses.append("RpCN: ready" if rpcn_final is not None else "RpCN: not run")
     statuses.append("MH: ready" if mh_final is not None else "MH: not run")
     if mh_diagnostics is not None:
@@ -964,12 +1129,14 @@ def _(fk_final, mh_diagnostics, mh_final, mo, rpcn_final, unsteered_samples):
 
 
 @app.cell
-def _(fk_final, mh_final, mo, rpcn_final, unsteered_samples):
+def _(das_final, fk_final, mh_final, mo, rpcn_final, unsteered_samples):
     debug_rows = []
     if unsteered_samples is not None:
         debug_rows.append({"sampler": "Unsteered", "shape": str(tuple(unsteered_samples.shape))})
     if fk_final is not None:
         debug_rows.append({"sampler": "FK", "shape": str(tuple(fk_final.shape))})
+    if das_final is not None:
+        debug_rows.append({"sampler": "DAS", "shape": str(tuple(das_final.shape))})
     if rpcn_final is not None:
         debug_rows.append({"sampler": "RpCN", "shape": str(tuple(rpcn_final.shape))})
     if mh_final is not None:

@@ -57,8 +57,8 @@ def _(logged_metrics, mo, rpcn_rows):
         select
         	alt_id,
             n_chains, pcn_update_count,
-            mean(reward),
-            max(reward),
+            mean(kl_to_mh),
+            max(kl_to_mh),
         from rpcn_rows
         join logged_metrics using (alt_id)
         group by alt_id, n_chains, pcn_update_count
@@ -74,15 +74,15 @@ def _(mo, to_plot):
         pivot (
             select
             	n_chains, pcn_update_count,
-                "mean(reward)",
+                "mean(kl_to_mh)",
             from to_plot
             where true
             --and 1 <= n_chains and n_chains <= 7
-            and n_chains in (1, 2, 4, 8)
-            and pcn_update_count in (1, 2, 4, 8, 16, 32)
+            --and n_chains in (1, 2, 4, 8)
+            --and pcn_update_count in (1, 2, 4, 8, 16, 32)
         ) 
         on pcn_update_count 
-        using first("mean(reward)") 
+        using first("mean(kl_to_mh)") 
         group by n_chains
         """
     )
@@ -101,13 +101,15 @@ def _(pivoted):
 
 @app.cell
 def _(pivoted_pd, plt, sns):
-    fig, ax = plt.subplots(figsize=(11.5,5))
+    # fig, ax = plt.subplots(figsize=(11.5,5))
+    fig, ax = plt.subplots(figsize=(81.5,40))
     (
         sns.heatmap(
             data=pivoted_pd,
-            vmax=1,
+            # vmax=1,
             annot=True,
-            vmin=-2,
+            # vmin=-2,
+            vmin=0,
             ax=ax,
             fmt='.2f',
             cmap='viridis'
