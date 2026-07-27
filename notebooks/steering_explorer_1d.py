@@ -395,7 +395,7 @@ def _(mo):
     crepe_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="crepe_inverse_temp")
     crepe_reward_power = mo.ui.number(start=0.5, stop=20.0, step=0.5, value=5.0, label="crepe_reward_rho")
     crepe_refresh_reference = mo.ui.checkbox(value=True, label="crepe_refresh_reference")
-    crepe_replica_count = mo.ui.number(start=4, stop=1000, step=1, value=32, label="crepe_replica_count")
+    crepe_replica_count = mo.ui.number(start=4, stop=1000, step=1, value=50, label="crepe_replica_count")
     crepe_pt_min_time = mo.ui.number(start=1e-6, stop=0.1, step=1e-4, value=1e-4, label="crepe_pt_min_time")
     crepe_denoise_steps = mo.ui.number(start=1, stop=1000, step=1, value=32, label="crepe_denoise_steps")
     crepe_karras_rho = mo.ui.number(start=1.0, stop=20.0, step=0.5, value=7.0, label="crepe_karras_rho")
@@ -527,9 +527,9 @@ def _(
             stats_df.group_by("method")
             .agg(
                 pl.len().alias("count"),
-                pl.col("reward").quantile(0.05).alias("q05"),
-                pl.col("reward").quantile(0.50).alias("q50"),
-                pl.col("reward").quantile(0.95).alias("q95"),
+                # pl.col("reward").quantile(0.05).alias("q05"),
+                # pl.col("reward").quantile(0.50).alias("q50"),
+                # pl.col("reward").quantile(0.95).alias("q95"),
                 pl.col("reward").mean().alias("reward_mean"),
                 pl.col("reward").max().alias("reward_max"),
                 pl.col("reward").min().alias("reward_min"),
@@ -1392,14 +1392,19 @@ def _(
         )
 
         with torch.no_grad():
-            fk_particles, _fk_log_weights = fk.run(
+            fk_particles, fk_log_weights = fk.run(
                 timesteps,
                 int(fk_n_chains.value),
                 batch_size=int(batch_size.value),
             )
-            target_particles = fk_particles if temperature_count == 1 else fk_particles[-1]
+            if temperature_count == 1:
+                target_particles = fk_particles
+                target_log_weights = fk_log_weights
+            else:
+                target_particles = fk_particles[-1]
+                target_log_weights = fk_log_weights[-1]
             set_fk_samples(
-                fk_steering.SelectFn.highest_reward(target_particles, reward_fn)
+                fk_steering.SelectFn.weighted_sample(target_particles, target_log_weights)
             )
     return
 
