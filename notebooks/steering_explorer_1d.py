@@ -6,6 +6,7 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import functools
     import math
     import numpy as np
 
@@ -13,6 +14,7 @@ def _():
     import polars as pl
     import seaborn as sns
     sns.set_theme(style="white", font_scale=2)
+    import spt_guidance.torch.crepe as crepe
     import spt_guidance.torch.fk_steering as fk_steering
     import spt_guidance.torch.rpcn as rpcn
     import torch
@@ -27,7 +29,9 @@ def _():
     return (
         Bao2024EnsembleScoreMatching,
         EnsembleScoreModel,
+        crepe,
         fk_steering,
+        functools,
         math,
         metropolis_hastings_sample,
         mo,
@@ -46,7 +50,7 @@ def _(mo):
     # 1D Steering Explorer
 
     Define a 1D Gaussian mixture and a reward function `reward_fn(x)`, then run
-    unsteered, FK, DAS, RpCN, and MH reference samplers independently.
+    unsteered, FK, DAS, RpCN, CREPE, and MH reference samplers independently.
     """)
     return
 
@@ -180,8 +184,10 @@ def _(torch):
     def gauss_low_high(x, m):
         return 1.6615 * reward_gauss(x - m) - 2 * reward_gauss(x - m + 1, s=1)
     def reward_fn(x):
+        if x.ndim < 1 or x.shape[-1] != 1:
+            raise ValueError("reward_fn expects states with shape (..., 1)")
         r = gauss_low_high(x, 3) + gauss_low_high(-x, 3)
-        return r.squeeze()
+        return r.squeeze(-1)
 
     return (reward_fn,)
 
@@ -196,6 +202,7 @@ def _(np, x_max, x_min):
 
 @app.cell(hide_code=True)
 def _(
+    crepe_final,
     das_final,
     fk_final,
     gmm_density,
@@ -210,11 +217,11 @@ def _(
     unsteered_samples,
     x_grid,
 ):
-    has_samples_plot = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and mh_final is None)
+    has_samples_plot = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and crepe_final is None and mh_final is None)
     plot_histogram = None
     plot_bin_count = len(hist_bin_edges) - 1
     if has_samples_plot:
-        method_order = ["Base", "MCMC Reference", "FK Steering", "DAS Steering", "RpCN Steering"]
+        method_order = ["Base", "MCMC Reference", "FK Steering", "DAS Steering", "RpCN Steering", "CREPE"]
         sample_frames = []
         if unsteered_samples is not None:
             sample_frames.append(
@@ -231,6 +238,10 @@ def _(
         if rpcn_final is not None:
             sample_frames.append(
                 pl.DataFrame({"method": ["RpCN Steering"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()})
+            )
+        if crepe_final is not None:
+            sample_frames.append(
+                pl.DataFrame({"method": ["CREPE"] * crepe_final.shape[0], "x": crepe_final[:, 0].cpu().numpy().tolist()})
             )
         if mh_final is not None:
             mh_df = pl.DataFrame({"method": ["MCMC Reference"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()})
@@ -259,6 +270,7 @@ def _(
                     'FK Steering': 'tab:blue',
                     'DAS Steering': 'tab:green',
                     'RpCN Steering': 'tab:orange',
+                    'CREPE': 'tab:purple',
                     'MCMC Reference': 'tab:grey',
                 },
                 alpha=.6,
@@ -312,7 +324,7 @@ def _(
             ax.get_legend().remove()
         handles, legend_labels = comparison_plot.axes.flat[0].get_legend_handles_labels()
         comparison_plot.add_legend(dict(zip(legend_labels, handles)), loc="upper center", ncol=3,
-                      bbox_to_anchor=(0.3, 1.04), 
+                      bbox_to_anchor=(0.3, 1.04),
                       frameon=True, fancybox=True)
         comparison_view = mo.vstack(
             [
@@ -364,10 +376,10 @@ def _(mo):
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
 
-    das_n_particles = mo.ui.number(start=2, stop=128, step=1, value=8, label="das_n_particles")
+    das_n_particles = mo.ui.number(start=2, stop=128, step=1, value=20, label="das_n_particles")
     das_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="das_inverse_temperature")
-    das_proposal_scale = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.01, label="das_proposal_scale")
-    das_tempering_gamma = mo.ui.number(start=-1.0, stop=1.0, step=0.001, value=0.024, label="das_tempering_gamma")
+    das_proposal_scale = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=1.0, label="das_proposal_scale")
+    das_tempering_gamma = mo.ui.number(start=-1.0, stop=1.0, step=0.001, value=0.003, label="das_tempering_gamma")
     das_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="das_ess_threshold")
 
     rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=4, label="rpcn_n_chains")
@@ -375,6 +387,18 @@ def _(mo):
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
     rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=25.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
+
+    crepe_n_chains = mo.ui.number(start=1, stop=1024, step=1, value=64, label="crepe_n_chains")
+    crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=16, label="crepe_num_samples")
+    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=2, value=500, label="crepe_burn_in")
+    crepe_thinning = mo.ui.number(start=2, stop=100, step=2, value=2, label="crepe_thinning")
+    crepe_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="crepe_inverse_temp")
+    crepe_reward_power = mo.ui.number(start=0.5, stop=20.0, step=0.5, value=5.0, label="crepe_reward_rho")
+    crepe_refresh_reference = mo.ui.checkbox(value=True, label="crepe_refresh_reference")
+    crepe_replica_count = mo.ui.number(start=4, stop=1000, step=1, value=32, label="crepe_replica_count")
+    crepe_pt_min_time = mo.ui.number(start=1e-6, stop=0.1, step=1e-4, value=1e-4, label="crepe_pt_min_time")
+    crepe_denoise_steps = mo.ui.number(start=1, stop=1000, step=1, value=32, label="crepe_denoise_steps")
+    crepe_karras_rho = mo.ui.number(start=1.0, stop=20.0, step=0.5, value=7.0, label="crepe_karras_rho")
 
     mh_num_chains = mo.ui.number(start=1, stop=256, step=1, value=64, label="mh_num_chains")
     mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
@@ -387,24 +411,39 @@ def _(mo):
     run_fk = mo.ui.run_button(label="FK")
     run_das = mo.ui.run_button(label="DAS")
     run_rpcn = mo.ui.run_button(label="RpCN")
+    run_crepe = mo.ui.run_button(label="CREPE")
     run_mh = mo.ui.run_button(label="MH")
 
     controls = mo.vstack(
         [
             mo.md("## Experiment Controls"),
-            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn], justify="start"),
+            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn, run_crepe], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
             mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([das_n_particles, das_inverse_temperature, das_proposal_scale, das_tempering_gamma, das_resample_threshold], justify="start"),
             mo.md("DAS uses the paper's exponential schedule `lambda_i=min((1+gamma)^i-1, 1)` and enforces terminal `lambda=1`. Set `das_proposal_scale=1` for the undamped Gaussian proposal; smaller values retain the exact importance correction while improving finite-particle stability for this non-concave reward."),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
+            mo.hstack([crepe_n_chains, crepe_num_samples, crepe_burn_in, crepe_thinning, crepe_inverse_temp, crepe_reward_power, crepe_refresh_reference], justify="start"),
+            mo.hstack([crepe_replica_count, crepe_pt_min_time, crepe_denoise_steps, crepe_karras_rho], justify="start"),
+            mo.md("CREPE follows the paper's Karras schedule and runs PT only on `[crepe_pt_min_time, 1]`; retained states are then reverse-diffused to `t=0`. Each iteration is one checkerboard half-sweep. Retained output count is `crepe_num_samples * crepe_n_chains`."),
             mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
         ]
     )
     controls
     return (
         batch_size,
+        crepe_burn_in,
+        crepe_denoise_steps,
+        crepe_inverse_temp,
+        crepe_karras_rho,
+        crepe_n_chains,
+        crepe_num_samples,
+        crepe_pt_min_time,
+        crepe_refresh_reference,
+        crepe_replica_count,
+        crepe_reward_power,
+        crepe_thinning,
         das_inverse_temperature,
         das_n_particles,
         das_proposal_scale,
@@ -432,6 +471,7 @@ def _(mo):
         rpcn_inverse_temp_max,
         rpcn_n_chains,
         rpcn_update_count,
+        run_crepe,
         run_das,
         run_fk,
         run_mh,
@@ -447,6 +487,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    crepe_final,
     das_final,
     fk_final,
     hist_bin_edges,
@@ -460,7 +501,7 @@ def _(
     torch,
     unsteered_samples,
 ):
-    has_samples_stats = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and mh_final is None)
+    has_samples_stats = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and crepe_final is None and mh_final is None)
     stats_bin_count = len(hist_bin_edges) - 1
     if has_samples_stats:
         method_frames = []
@@ -472,12 +513,14 @@ def _(
             method_frames.append(pl.DataFrame({"method": ["DAS"] * das_final.shape[0], "x": das_final[:, 0].cpu().numpy().tolist()}))
         if rpcn_final is not None:
             method_frames.append(pl.DataFrame({"method": ["RpCN"] * rpcn_final.shape[0], "x": rpcn_final[:, 0].cpu().numpy().tolist()}))
+        if crepe_final is not None:
+            method_frames.append(pl.DataFrame({"method": ["CREPE"] * crepe_final.shape[0], "x": crepe_final[:, 0].cpu().numpy().tolist()}))
         if mh_final is not None:
             method_frames.append(pl.DataFrame({"method": ["MH"] * mh_final.shape[0], "x": mh_final[:, 0].cpu().numpy().tolist()}))
         stats_df = pl.concat(method_frames)
 
-        reward_x = torch.tensor(stats_df["x"].to_numpy(), dtype=torch.float32)
-        reward_vals = torch.vmap(reward_fn)(reward_x).detach().cpu().numpy().tolist()
+        reward_x = torch.tensor(stats_df["x"].to_numpy(), dtype=torch.float32).unsqueeze(-1)
+        reward_vals = reward_fn(reward_x).detach().cpu().numpy().tolist()
         stats_df = stats_df.with_columns(pl.Series("reward", reward_vals))
 
         summary = (
@@ -572,6 +615,75 @@ def _(mh_diagnostics, mo):
 
 
 @app.cell(hide_code=True)
+def _(crepe_diagnostics, crepe_is_stale, mo):
+    if crepe_diagnostics is None:
+        crepe_diag_view = mo.vstack([mo.md("## CREPE Diagnostics"), mo.md("Run CREPE to populate diagnostics.")])
+    else:
+        if crepe_is_stale:
+            crepe_status_label = "Stale"
+            crepe_status_hint = "Controls changed after this run. Run CREPE again before comparing samples."
+        elif crepe_diagnostics["cold_edge_acceptance_rate"] < 0.05:
+            crepe_status_label = "Cold-edge bottleneck"
+            crepe_status_hint = "Replica 0 is barely moving. Increase burn-in, reduce inverse temperature, or refine the reward ladder."
+        elif crepe_diagnostics["minimum_edge_acceptance_rate"] < 0.05:
+            crepe_status_label = "Ladder bottleneck"
+            crepe_status_hint = f"Communication is blocked near edge {crepe_diagnostics['bottleneck_edge']}. Increase the replica count or reduce inverse temperature."
+        elif crepe_diagnostics["chains_without_cold_acceptance_fraction"] > 0.25:
+            crepe_status_label = "Under-mixed"
+            crepe_status_hint = "Many chains never accepted a target-edge proposal. Increase burn-in before interpreting the histogram."
+        else:
+            crepe_status_label = "Communicating"
+            crepe_status_hint = "Cold-edge communication is active; confirm stability across longer burn-in runs."
+        crepe_diag_table = [
+            {"metric": "acceptance_rate_mean", "value": f"{crepe_diagnostics['acceptance_rate_mean']:.4f}"},
+            {"metric": "cold_edge_acceptance_rate", "value": f"{crepe_diagnostics['cold_edge_acceptance_rate']:.4f}"},
+            {"metric": "minimum_edge_acceptance_rate", "value": f"{crepe_diagnostics['minimum_edge_acceptance_rate']:.4f}"},
+            {"metric": "bottleneck_edge", "value": str(crepe_diagnostics["bottleneck_edge"])},
+            {"metric": "chains_without_cold_acceptance", "value": f"{crepe_diagnostics['chains_without_cold_acceptance_fraction']:.4f}"},
+            {"metric": "retained_duplicate_fraction", "value": f"{crepe_diagnostics['duplicate_fraction']:.4f}"},
+            {"metric": "accepted", "value": int(crepe_diagnostics["accepted"])},
+            {"metric": "attempted", "value": int(crepe_diagnostics["attempted"])},
+            {"metric": "iterations_half_sweeps", "value": int(crepe_diagnostics["iteration_count"])},
+            {"metric": "full_sweep_equivalents", "value": float(crepe_diagnostics["full_sweep_equivalents"])},
+            {"metric": "saved_iterations", "value": int(crepe_diagnostics["saved_iterations"])},
+            {"metric": "chain_count", "value": int(crepe_diagnostics["chain_count"])},
+            {"metric": "replica_count", "value": int(crepe_diagnostics["replica_count"])},
+            {"metric": "pt_min_time", "value": crepe_diagnostics["pt_min_time"]},
+            {"metric": "karras_rho", "value": crepe_diagnostics["karras_rho"]},
+            {"metric": "final_denoise_steps", "value": int(crepe_diagnostics["final_denoise_steps"])},
+            {"metric": "minimum_time_step", "value": crepe_diagnostics["minimum_time_step"]},
+            {"metric": "maximum_time_step", "value": crepe_diagnostics["maximum_time_step"]},
+        ]
+        crepe_edge_table = [
+            {
+                "edge": f"({edge_index}, {edge_index + 1})",
+                "acceptance_rate": edge_rate,
+                "accepted": edge_accepted,
+                "attempted": edge_attempted,
+            }
+            for edge_index, (edge_rate, edge_accepted, edge_attempted) in enumerate(
+                zip(
+                    crepe_diagnostics["acceptance_rate_by_edge"],
+                    crepe_diagnostics["accepted_by_edge"],
+                    crepe_diagnostics["attempted_by_edge"],
+                )
+            )
+        ]
+        crepe_diag_view = mo.vstack(
+            [
+                mo.md("## CREPE Diagnostics"),
+                mo.md(f"**Status:** {crepe_status_label}"),
+                mo.ui.table(crepe_diag_table),
+                mo.md(crepe_status_hint),
+                mo.md("### Communication By Edge"),
+                mo.ui.table(crepe_edge_table),
+            ]
+        )
+    crepe_diag_view
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     Helpers
@@ -646,6 +758,307 @@ def _(
 
 @app.cell
 def _(
+    crepe,
+    crepe_burn_in,
+    crepe_config_signature,
+    crepe_denoise_steps,
+    crepe_inverse_temp,
+    crepe_karras_rho,
+    crepe_n_chains,
+    crepe_num_samples,
+    crepe_pt_min_time,
+    crepe_refresh_reference,
+    crepe_replica_count,
+    crepe_reward_power,
+    crepe_thinning,
+    functools,
+    reference_data,
+    reward_fn,
+    run_crepe,
+    score_model,
+    seed,
+    set_crepe_diagnostics,
+    set_crepe_samples,
+    timesteps,
+    torch,
+):
+    if run_crepe.value:
+        torch.manual_seed(int(seed.value))
+        crepe_pt_min_time_value = float(crepe_pt_min_time.value)
+        crepe_karras_rho_value = float(crepe_karras_rho.value)
+        crepe_karras_fraction = torch.linspace(
+            0.0,
+            1.0,
+            int(crepe_replica_count.value),
+            device=timesteps.device,
+            dtype=torch.float64,
+        )
+        crepe_descending_times = (
+            1.0
+            + crepe_karras_fraction
+            * (crepe_pt_min_time_value ** (1.0 / crepe_karras_rho_value) - 1.0)
+        ).pow(crepe_karras_rho_value)
+        crepe_times = crepe_descending_times.flip(0).to(dtype=timesteps.dtype)
+        crepe_inverse_temperature_value = float(crepe_inverse_temp.value)
+        crepe_reward_power_value = float(crepe_reward_power.value)
+
+        def crepe_diffusion(crepe_time):
+            return score_model.prob_path.g(crepe_time)
+
+        def crepe_model_forward_drift(crepe_time, crepe_batch):
+            return score_model.prob_path.f(crepe_time, crepe_batch)
+
+        def crepe_model_backward_drift(crepe_time, crepe_batch):
+            crepe_sigma = crepe_diffusion(crepe_time)
+            crepe_score = score_model._score_particles(crepe_time, crepe_batch)
+            return crepe_model_forward_drift(crepe_time, crepe_batch) - crepe_sigma.square() * crepe_score
+
+        def crepe_proposal_forward_drift(crepe_time, crepe_batch):
+            return crepe_model_backward_drift(crepe_time, crepe_batch)
+
+        def crepe_proposal_backward_drift(crepe_time, crepe_batch):
+            return crepe_model_forward_drift(crepe_time, crepe_batch)
+
+        def crepe_annealed_reward(crepe_time, crepe_batch):
+            crepe_predicted_clean = score_model.get_tweedie(crepe_time, crepe_batch)
+            crepe_level_progress = (
+                crepe_time.pow(1.0 / crepe_karras_rho_value) - 1.0
+            ) / (
+                crepe_pt_min_time_value ** (1.0 / crepe_karras_rho_value) - 1.0
+            )
+            crepe_schedule = crepe_level_progress.clamp(0.0, 1.0).pow(
+                crepe_reward_power_value
+            )
+            return crepe_inverse_temperature_value * crepe_schedule * reward_fn(crepe_predicted_clean)
+
+        def crepe_log_gaussian(crepe_value, crepe_mean, crepe_std):
+            crepe_variance = crepe_std.square()
+            crepe_event_size = crepe_value.shape[-1]
+            return -0.5 * (
+                (crepe_value - crepe_mean).square().sum(dim=-1) / crepe_variance
+                + crepe_event_size * torch.log(2.0 * torch.pi * crepe_variance)
+            )
+
+        def crepe_summarize_path(crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy):
+            crepe_dt = crepe_t1 - crepe_t0
+            crepe_proposal_forward_mean = (
+                crepe_less_noisy
+                + crepe_dt
+                * crepe_proposal_forward_drift(crepe_t0, crepe_less_noisy)
+            )
+            crepe_proposal_backward_mean = (
+                crepe_more_noisy
+                - crepe_dt
+                * crepe_proposal_backward_drift(crepe_t1, crepe_more_noisy)
+            )
+            crepe_proposal_forward_log_probability = crepe_log_gaussian(
+                crepe_more_noisy,
+                crepe_proposal_forward_mean,
+                crepe_dt.sqrt() * crepe_diffusion(crepe_t0),
+            )
+            crepe_proposal_backward_log_probability = crepe_log_gaussian(
+                crepe_less_noisy,
+                crepe_proposal_backward_mean,
+                crepe_dt.sqrt() * crepe_diffusion(crepe_t1),
+            )
+            crepe_proposal_log_rne = crepe.PathLogRatio.from_transition_log_probabilities(
+                crepe_proposal_forward_log_probability.unsqueeze(0),
+                crepe_proposal_backward_log_probability.unsqueeze(0),
+            )
+            crepe_model_forward_mean = (
+                crepe_less_noisy
+                + crepe_dt * crepe_model_forward_drift(crepe_t0, crepe_less_noisy)
+            )
+            crepe_model_backward_mean = (
+                crepe_more_noisy
+                - crepe_dt * crepe_model_backward_drift(crepe_t1, crepe_more_noisy)
+            )
+            crepe_model_forward_log_probability = crepe_log_gaussian(
+                crepe_more_noisy,
+                crepe_model_forward_mean,
+                crepe_dt.sqrt() * crepe_diffusion(crepe_t0),
+            )
+            crepe_model_backward_log_probability = crepe_log_gaussian(
+                crepe_less_noisy,
+                crepe_model_backward_mean,
+                crepe_dt.sqrt() * crepe_diffusion(crepe_t1),
+            )
+            crepe_model_log_rne = crepe.PathLogRatio.from_transition_log_probabilities(
+                crepe_model_forward_log_probability.unsqueeze(0),
+                crepe_model_backward_log_probability.unsqueeze(0),
+            )
+            crepe_target_log_ratio = crepe.TargetLogRatio.reward_tilt(
+                crepe_model_log_rne,
+                crepe_annealed_reward(crepe_t0, crepe_less_noisy),
+                crepe_annealed_reward(crepe_t1, crepe_more_noisy),
+            )
+            return crepe_target_log_ratio, crepe_proposal_log_rne
+
+        def crepe_forward_path_fn(crepe_t0, crepe_t1, crepe_less_noisy):
+            crepe_dt = crepe_t1 - crepe_t0
+            crepe_more_noisy = (
+                crepe_less_noisy
+                + crepe_dt * crepe_proposal_forward_drift(crepe_t0, crepe_less_noisy)
+                + crepe_dt.sqrt() * crepe_diffusion(crepe_t0) * torch.randn_like(crepe_less_noisy)
+            )
+            crepe_target_log_ratio, crepe_proposal_log_rne = crepe_summarize_path(
+                crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy
+            )
+            return crepe_more_noisy, crepe_target_log_ratio, crepe_proposal_log_rne
+
+        def crepe_backward_path_fn(crepe_t0, crepe_t1, crepe_more_noisy):
+            crepe_dt = crepe_t1 - crepe_t0
+            crepe_less_noisy = (
+                crepe_more_noisy
+                - crepe_dt * crepe_proposal_backward_drift(crepe_t1, crepe_more_noisy)
+                + crepe_dt.sqrt() * crepe_diffusion(crepe_t1) * torch.randn_like(crepe_more_noisy)
+            )
+            crepe_target_log_ratio, crepe_proposal_log_rne = crepe_summarize_path(
+                crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy
+            )
+            return crepe_less_noisy, crepe_target_log_ratio, crepe_proposal_log_rne
+
+        def crepe_sample_model_marginal(crepe_time):
+            crepe_reference_index = torch.randint(
+                reference_data.shape[0], (), device=reference_data.device
+            )
+            crepe_reference_weights = torch.nn.functional.one_hot(
+                crepe_reference_index, reference_data.shape[0]
+            ).to(dtype=reference_data.dtype)
+            crepe_datum = (crepe_reference_weights[:, None] * reference_data).sum(dim=0)
+            return (
+                score_model.prob_path.mean(crepe_time, crepe_datum)
+                + score_model.prob_path.std(crepe_time, crepe_datum) * torch.randn_like(crepe_datum)
+            )
+
+        def crepe_init_path_fn(crepe_ladder_times):
+            crepe_descending_times = crepe_ladder_times.flip(0)
+            crepe_state = crepe_sample_model_marginal(crepe_descending_times[0])
+            crepe_descending_states = [crepe_state]
+            for crepe_time_pair in crepe_descending_times.unfold(0, 2, 1):
+                crepe_more_noisy_time = crepe_time_pair[0]
+                crepe_less_noisy_time = crepe_time_pair[1]
+                crepe_init_dt = crepe_less_noisy_time - crepe_more_noisy_time
+                crepe_state_batch = crepe_state.unsqueeze(0)
+                crepe_state = (
+                    crepe_state
+                    + crepe_init_dt
+                    * crepe_model_backward_drift(crepe_more_noisy_time, crepe_state_batch)[0]
+                    + crepe_init_dt.abs().sqrt()
+                    * crepe_diffusion(crepe_more_noisy_time)
+                    * torch.randn_like(crepe_state)
+                )
+                crepe_descending_states.append(crepe_state)
+            return torch.stack(crepe_descending_states[::-1])
+
+        crepe_sampler = crepe.CREPE(
+            init_path_fn=crepe_init_path_fn,
+            forward_path_fn=crepe_forward_path_fn,
+            backward_path_fn=crepe_backward_path_fn,
+            refresh_reference_fn=(
+                crepe_sample_model_marginal if crepe_refresh_reference.value else None
+            ),
+        )
+        crepe_iteration_count = (
+            int(crepe_burn_in.value)
+            + 1
+            + (int(crepe_num_samples.value) - 1) * int(crepe_thinning.value)
+        )
+        with torch.no_grad():
+            crepe_result = crepe_sampler.run(
+                crepe_times,
+                crepe_iteration_count,
+                batch_size=int(crepe_n_chains.value),
+                should_save_sample_fn=functools.partial(
+                    crepe.SaveSampleFn.burn_in_and_thin,
+                    burn_in=int(crepe_burn_in.value),
+                    thin=int(crepe_thinning.value),
+                ),
+            )
+            crepe_final_denoise_fraction = torch.linspace(
+                0.0,
+                1.0,
+                int(crepe_denoise_steps.value) + 1,
+                device=crepe_times.device,
+                dtype=crepe_times.dtype,
+            )
+            crepe_final_denoise_times = (
+                crepe_pt_min_time_value ** (1.0 / crepe_karras_rho_value)
+                * (1.0 - crepe_final_denoise_fraction)
+            ).pow(crepe_karras_rho_value)
+            crepe_final_samples = crepe_result.samples.reshape(-1, *crepe_result.samples.shape[2:])
+            for crepe_denoise_time_pair in crepe_final_denoise_times.unfold(0, 2, 1):
+                crepe_denoise_t0 = crepe_denoise_time_pair[0]
+                crepe_denoise_t1 = crepe_denoise_time_pair[1]
+                crepe_denoise_dt = crepe_denoise_t1 - crepe_denoise_t0
+                crepe_final_samples = (
+                    crepe_final_samples
+                    + crepe_denoise_dt
+                    * crepe_model_backward_drift(crepe_denoise_t0, crepe_final_samples)
+                    + crepe_denoise_dt.abs().sqrt()
+                    * crepe_diffusion(crepe_denoise_t0)
+                    * torch.randn_like(crepe_final_samples)
+                )
+            crepe_final_samples = crepe_final_samples.reshape(crepe_result.samples.shape)
+        if not torch.isfinite(crepe_final_samples).all():
+            raise ValueError("CREPE final denoising produced non-finite samples")
+        set_crepe_samples(crepe_final_samples)
+        crepe_accepted_by_edge = crepe_result.acceptance_count.sum(dim=1)
+        crepe_attempted_by_edge = crepe_result.attempt_count.sum(dim=1)
+        crepe_acceptance_by_edge = (
+            crepe_accepted_by_edge / crepe_attempted_by_edge.clamp(min=1)
+        )
+        crepe_cold_acceptance_by_chain = crepe_result.acceptance_count[0]
+        if crepe_result.samples.shape[0] > 1:
+            crepe_duplicate_fraction = float(
+                (crepe_result.samples[1:] == crepe_result.samples[:-1])
+                .flatten(start_dim=2)
+                .all(dim=2)
+                .to(torch.float32)
+                .mean()
+                .item()
+            )
+        else:
+            crepe_duplicate_fraction = 0.0
+        set_crepe_diagnostics(
+            {
+                "config_signature": crepe_config_signature,
+                "acceptance_rate_mean": float(crepe_result.acceptance_rate.mean().item()),
+                "acceptance_rate_min": float(crepe_result.acceptance_rate.min().item()),
+                "acceptance_rate_by_edge": crepe_acceptance_by_edge.cpu().tolist(),
+                "minimum_edge_acceptance_rate": float(crepe_acceptance_by_edge.min().item()),
+                "bottleneck_edge": int(crepe_acceptance_by_edge.argmin().item()),
+                "accepted": int(crepe_result.acceptance_count.sum().item()),
+                "attempted": int(crepe_result.attempt_count.sum().item()),
+                "accepted_by_edge": crepe_accepted_by_edge.cpu().tolist(),
+                "attempted_by_edge": crepe_attempted_by_edge.cpu().tolist(),
+                "cold_edge_acceptance_rate": float(crepe_acceptance_by_edge[0].item()),
+                "cold_edge_accepted": int(crepe_accepted_by_edge[0].item()),
+                "cold_edge_attempted": int(crepe_attempted_by_edge[0].item()),
+                "chains_without_cold_acceptance_fraction": float(
+                    (crepe_cold_acceptance_by_chain == 0)
+                    .to(torch.float32)
+                    .mean()
+                    .item()
+                ),
+                "duplicate_fraction": crepe_duplicate_fraction,
+                "iteration_count": crepe_iteration_count,
+                "full_sweep_equivalents": crepe_iteration_count / 2,
+                "saved_iterations": int(crepe_result.samples.shape[0]),
+                "chain_count": int(crepe_result.samples.shape[1]),
+                "replica_count": int(crepe_times.numel()),
+                "pt_min_time": crepe_pt_min_time_value,
+                "karras_rho": crepe_karras_rho_value,
+                "final_denoise_steps": int(crepe_denoise_steps.value),
+                "minimum_time_step": float((crepe_times[1:] - crepe_times[:-1]).min().item()),
+                "maximum_time_step": float((crepe_times[1:] - crepe_times[:-1]).max().item()),
+            }
+        )
+    return
+
+
+@app.cell
+def _(
     device,
     gmm_log_prob,
     gmm_sample,
@@ -672,7 +1085,7 @@ def _(
 
         def log_target_fn(x: torch.Tensor) -> torch.Tensor:
             x_flat = x[:, 0]
-            return gmm_log_prob(x_flat) + float(mh_inverse_temp.value) * reward_fn(x_flat)
+            return gmm_log_prob(x_flat) + float(mh_inverse_temp.value) * reward_fn(x)
 
         mh_chain_samples, mh_diag = metropolis_hastings_sample(
             log_target_fn=log_target_fn,
@@ -711,6 +1124,56 @@ def _(mean_array, std_array, torch, weight_array):
 
 
 @app.cell
+def _(
+    crepe_burn_in,
+    crepe_denoise_steps,
+    crepe_inverse_temp,
+    crepe_karras_rho,
+    crepe_n_chains,
+    crepe_num_samples,
+    crepe_pt_min_time,
+    crepe_refresh_reference,
+    crepe_replica_count,
+    crepe_reward_power,
+    crepe_thinning,
+    device,
+    epsilon_alpha,
+    epsilon_beta,
+    means,
+    n_reference,
+    sampling_max_score_norm,
+    seed,
+    stds,
+    vmap_chunk_size,
+    weights,
+):
+    crepe_config_signature = (
+        int(seed.value),
+        device.value,
+        int(n_reference.value),
+        float(epsilon_alpha.value),
+        float(epsilon_beta.value),
+        int(vmap_chunk_size.value),
+        float(sampling_max_score_norm.value),
+        tuple(float(value) for value in means.tolist()),
+        tuple(float(value) for value in stds.tolist()),
+        tuple(float(value) for value in weights.tolist()),
+        int(crepe_n_chains.value),
+        int(crepe_num_samples.value),
+        int(crepe_burn_in.value),
+        int(crepe_thinning.value),
+        float(crepe_inverse_temp.value),
+        float(crepe_reward_power.value),
+        bool(crepe_refresh_reference.value),
+        int(crepe_replica_count.value),
+        float(crepe_pt_min_time.value),
+        int(crepe_denoise_steps.value),
+        float(crepe_karras_rho.value),
+    )
+    return (crepe_config_signature,)
+
+
+@app.cell
 def _(means, n_grid, stds, torch, weights, x_max, x_min):
     x_grid = torch.linspace(float(x_min.value), float(x_max.value), int(n_grid.value), dtype=torch.float32)
 
@@ -739,9 +1202,9 @@ def _(means, n_grid, stds, torch, weights, x_max, x_min):
 
 @app.cell
 def _(reward_fn, torch, x_grid):
-    reward_values = torch.stack([torch.as_tensor(reward_fn(xi), dtype=torch.float32) for xi in x_grid])
+    reward_values = reward_fn(x_grid.unsqueeze(-1))
     if reward_values.ndim != 1:
-        raise ValueError("reward_fn must return scalar values for scalar tensor inputs")
+        raise ValueError("reward_fn must map (..., 1) states to (...) rewards")
     if not torch.isfinite(reward_values).all():
         raise ValueError("reward_fn returned non-finite values on preview grid")
     return (reward_values,)
@@ -753,15 +1216,21 @@ def _(mo):
     get_fk_samples, set_fk_samples = mo.state(None)
     get_das_samples, set_das_samples = mo.state(None)
     get_rpcn_samples, set_rpcn_samples = mo.state(None)
+    get_crepe_samples, set_crepe_samples = mo.state(None)
+    get_crepe_diagnostics, set_crepe_diagnostics = mo.state(None)
     get_mh_samples, set_mh_samples = mo.state(None)
     get_mh_diagnostics, set_mh_diagnostics = mo.state(None)
     return (
+        get_crepe_diagnostics,
+        get_crepe_samples,
         get_das_samples,
         get_fk_samples,
         get_mh_diagnostics,
         get_mh_samples,
         get_rpcn_samples,
         get_unsteered_samples,
+        set_crepe_diagnostics,
+        set_crepe_samples,
         set_das_samples,
         set_fk_samples,
         set_mh_diagnostics,
@@ -813,6 +1282,9 @@ def _(
 
 @app.cell
 def _(
+    crepe_config_signature,
+    get_crepe_diagnostics,
+    get_crepe_samples,
     get_das_samples,
     get_fk_samples,
     get_mh_diagnostics,
@@ -820,6 +1292,14 @@ def _(
     get_rpcn_samples,
     get_unsteered_samples,
 ):
+    crepe_diagnostics = get_crepe_diagnostics()
+    crepe_samples = get_crepe_samples()
+    crepe_is_stale = (
+        crepe_diagnostics is not None
+        and crepe_diagnostics.get("config_signature") != crepe_config_signature
+    )
+    if crepe_is_stale:
+        crepe_samples = None
     das_samples = get_das_samples()
     fk_samples = get_fk_samples()
     mh_diagnostics = get_mh_diagnostics()
@@ -827,6 +1307,9 @@ def _(
     rpcn_samples = get_rpcn_samples()
     unsteered_samples = get_unsteered_samples()
     return (
+        crepe_diagnostics,
+        crepe_is_stale,
+        crepe_samples,
         das_samples,
         fk_samples,
         mh_diagnostics,
@@ -929,17 +1412,20 @@ def _(
     das_proposal_scale,
     das_resample_threshold,
     das_tempering_gamma,
+    np,
     reference_data,
     reward_fn,
     run_das,
     score_model,
     seed,
     set_das_samples,
+    ssp_resample_indices,
     timesteps,
     torch,
 ):
     if run_das.value:
         torch.manual_seed(int(seed.value))
+        das_ssp_rng = np.random.default_rng(int(seed.value))
         das_batch_count = int(batch_size.value)
         das_particle_count = int(das_n_particles.value)
         das_inverse_temp = float(das_inverse_temperature.value)
@@ -988,9 +1474,19 @@ def _(
             das_probabilities = das_log_normalized.exp()
             das_ess = 1.0 / das_probabilities.square().sum(dim=1)
             das_should_resample = das_ess < float(das_resample_threshold.value) * das_particle_count
-            das_sampled_indices = torch.multinomial(das_probabilities, das_particle_count, replacement=True)
             das_identity_indices = torch.arange(das_particle_count, device=reference_data.device).expand(das_batch_count, -1)
-            das_ancestor_indices = torch.where(das_should_resample[:, None], das_sampled_indices, das_identity_indices)
+            das_ancestor_indices = das_identity_indices.clone()
+            for das_batch_idx in torch.nonzero(das_should_resample, as_tuple=False).flatten().tolist():
+                das_ssp_indices = ssp_resample_indices(
+                    das_probabilities[das_batch_idx].detach().cpu().numpy(),
+                    das_particle_count,
+                    das_ssp_rng,
+                )
+                das_ancestor_indices[das_batch_idx] = torch.as_tensor(
+                    das_ssp_indices,
+                    device=reference_data.device,
+                    dtype=torch.long,
+                )
             das_particles = torch.gather(das_particles, 1, das_ancestor_indices[:, :, None])
             das_resampled_log_weights = torch.where(
                 das_should_resample[:, None],
@@ -1034,6 +1530,58 @@ def _(
             das_selected = torch.gather(das_particles, 1, das_final_indices[:, :, None]).squeeze(1)
             set_das_samples(das_selected)
     return
+
+
+@app.cell
+def _(np):
+    def ssp_resample_indices(weights, output_size, rng):
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.ndim != 1 or weights.size == 0:
+            raise ValueError("SSP weights must be a non-empty one-dimensional array")
+        if not np.isfinite(weights).all() or np.any(weights < 0.0):
+            raise ValueError("SSP weights must be finite and non-negative")
+        weight_sum = weights.sum()
+        if weight_sum <= 0.0:
+            raise ValueError("SSP weights must have positive sum")
+        weights = weights / weight_sum
+
+        particle_count = weights.shape[0]
+        scaled_weights = output_size * weights
+        offspring_counts = np.floor(scaled_weights).astype(np.int64)
+        fractional_counts = scaled_weights - offspring_counts
+        if particle_count == 1:
+            offspring_counts[0] = output_size
+            return np.arange(particle_count, dtype=np.int64).repeat(offspring_counts)
+
+        uniforms = rng.random(particle_count - 1)
+        i, j = 0, 1
+        for step_idx in range(particle_count - 1):
+            delta_i = min(fractional_counts[j], 1.0 - fractional_counts[i])
+            delta_j = min(fractional_counts[i], 1.0 - fractional_counts[j])
+            delta_sum = delta_i + delta_j
+            increase_i_probability = delta_i / delta_sum if delta_sum > 0.0 else 0.0
+            if uniforms[step_idx] < increase_i_probability:
+                j, i = i, j
+                delta_i = delta_j
+            if fractional_counts[j] < 1.0 - fractional_counts[i]:
+                fractional_counts[i] += delta_i
+                j = step_idx + 2
+            else:
+                fractional_counts[j] -= delta_i
+                offspring_counts[i] += 1
+                i = step_idx + 2
+
+        offspring_total = offspring_counts.sum()
+        if offspring_total == output_size - 1:
+            last_index = i if j == particle_count else j
+            if fractional_counts[last_index] > 0.99:
+                offspring_counts[last_index] += 1
+                offspring_total += 1
+        if offspring_total != output_size:
+            raise ValueError("SSP resampling produced the wrong number of offspring")
+        return np.arange(particle_count, dtype=np.int64).repeat(offspring_counts)
+
+    return (ssp_resample_indices,)
 
 
 @app.cell
@@ -1095,6 +1643,17 @@ def _(rpcn_samples):
 
 
 @app.cell
+def _(crepe_samples):
+    crepe_final = None
+    if crepe_samples is not None:
+        if crepe_samples.ndim != 3 or crepe_samples.shape[-1] != 1:
+            raise ValueError(f"Unexpected CREPE sample shape: {crepe_samples.shape}")
+        crepe_final = crepe_samples.reshape(-1, 1)
+    crepe_final = crepe_final.detach().cpu() if crepe_final is not None else None
+    return (crepe_final,)
+
+
+@app.cell
 def _(mh_samples):
     mh_final = None
     if mh_samples is not None:
@@ -1107,6 +1666,9 @@ def _(mh_samples):
 
 @app.cell
 def _(
+    crepe_diagnostics,
+    crepe_final,
+    crepe_is_stale,
     das_final,
     fk_final,
     mh_diagnostics,
@@ -1120,7 +1682,13 @@ def _(
     statuses.append("FK: ready" if fk_final is not None else "FK: not run")
     statuses.append("DAS: ready" if das_final is not None else "DAS: not run")
     statuses.append("RpCN: ready" if rpcn_final is not None else "RpCN: not run")
+    if crepe_is_stale:
+        statuses.append("CREPE: stale")
+    else:
+        statuses.append("CREPE: ready" if crepe_final is not None else "CREPE: not run")
     statuses.append("MH: ready" if mh_final is not None else "MH: not run")
+    if crepe_diagnostics is not None and not crepe_is_stale:
+        statuses.append(f"CREPE accept={crepe_diagnostics['acceptance_rate_mean']:.3f}")
     if mh_diagnostics is not None:
         statuses.append(f"MH accept={mh_diagnostics['acceptance_rate']:.3f}")
     status_view = mo.vstack([mo.md("## Sampler Status"), mo.md(" | ".join(statuses))])
@@ -1129,7 +1697,15 @@ def _(
 
 
 @app.cell
-def _(das_final, fk_final, mh_final, mo, rpcn_final, unsteered_samples):
+def _(
+    crepe_final,
+    das_final,
+    fk_final,
+    mh_final,
+    mo,
+    rpcn_final,
+    unsteered_samples,
+):
     debug_rows = []
     if unsteered_samples is not None:
         debug_rows.append({"sampler": "Unsteered", "shape": str(tuple(unsteered_samples.shape))})
@@ -1139,6 +1715,8 @@ def _(das_final, fk_final, mh_final, mo, rpcn_final, unsteered_samples):
         debug_rows.append({"sampler": "DAS", "shape": str(tuple(das_final.shape))})
     if rpcn_final is not None:
         debug_rows.append({"sampler": "RpCN", "shape": str(tuple(rpcn_final.shape))})
+    if crepe_final is not None:
+        debug_rows.append({"sampler": "CREPE", "shape": str(tuple(crepe_final.shape))})
     if mh_final is not None:
         debug_rows.append({"sampler": "MH", "shape": str(tuple(mh_final.shape))})
     if debug_rows:
