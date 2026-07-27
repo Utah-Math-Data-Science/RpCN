@@ -379,7 +379,7 @@ def _(mo):
     das_n_particles = mo.ui.number(start=2, stop=128, step=1, value=20, label="das_n_particles")
     das_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="das_inverse_temperature")
     das_proposal_scale = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=1.0, label="das_proposal_scale")
-    das_tempering_gamma = mo.ui.number(start=-1.0, stop=1.0, step=0.001, value=0.003, label="das_tempering_gamma")
+    das_tempering_gamma = mo.ui.number(start=0.0, stop=1.0, value=0.003, label="das_tempering_gamma")
     das_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="das_ess_threshold")
 
     rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=4, label="rpcn_n_chains")
