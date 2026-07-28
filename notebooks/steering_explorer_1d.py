@@ -377,7 +377,7 @@ def _(
 ):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
-    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=2, label="batch_size")
+    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=1024, label="batch_size")
     n_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="n_steps")
     n_reference = mo.ui.number(start=128, stop=32768, step=128, value=1024, label="n_reference")
 
