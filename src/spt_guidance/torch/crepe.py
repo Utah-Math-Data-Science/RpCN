@@ -102,6 +102,66 @@ class PathLogRatio:
         return (backward_log_probability - forward_log_probability).sum(dim=0)
 
     @staticmethod
+    def from_euler_maruyama(
+        times,
+        path,
+        forward_drift,
+        backward_drift,
+        diffusion,
+    ):
+        r"""Return the exact log RNE of one Euler-Maruyama transition.
+
+        ``path`` is represented from the less-noisy endpoint to the more-noisy
+        endpoint. The forward kernel has mean
+        ``path[0] + dt * forward_drift[0]`` and the backward kernel has mean
+        ``path[1] - dt * backward_drift[1]``. This matches a backward SDE drift
+        integrated over a negative time increment.
+
+        Args
+        ----
+        times : torch.Tensor[2]
+            Strictly increasing endpoint times.
+        path : torch.Tensor[2, batch_size, ...]
+            Less-noisy and more-noisy endpoint states.
+        forward_drift : torch.Tensor[2, batch_size, ...]
+            Forward drift at both endpoints. Only the less-noisy value is used.
+        backward_drift : torch.Tensor[2, batch_size, ...]
+            Backward drift at both endpoints. Only the more-noisy value is used.
+        diffusion : torch.Tensor
+            Diffusion coefficients at both endpoints, with the same broadcasting
+            rules as :meth:`from_ito_integrals`.
+
+        Returns
+        -------
+        torch.Tensor[batch_size]
+            ``log backward transition - log forward transition``.
+        """
+        PathLogRatio._validate_sde_path(times, path, forward_drift, backward_drift)
+        diffusion = PathLogRatio._broadcast_diffusion(diffusion, path)
+        time_delta = times[1] - times[0]
+        forward_variance = time_delta * diffusion[0].square()
+        backward_variance = time_delta * diffusion[1].square()
+        forward_residual = path[1] - (path[0] + time_delta * forward_drift[0])
+        backward_residual = path[0] - (path[1] - time_delta * backward_drift[1])
+
+        log_two_pi = torch.log(path.new_tensor(2 * torch.pi))
+        forward_log_probability = -0.5 * (
+            forward_residual.square() / forward_variance
+            + log_two_pi
+            + forward_variance.log()
+        )
+        backward_log_probability = -0.5 * (
+            backward_residual.square() / backward_variance
+            + log_two_pi
+            + backward_variance.log()
+        )
+        event_dims = tuple(range(1, path[0].ndim))
+        if event_dims:
+            forward_log_probability = forward_log_probability.sum(dim=event_dims)
+            backward_log_probability = backward_log_probability.sum(dim=event_dims)
+        return backward_log_probability - forward_log_probability
+
+    @staticmethod
     def from_ito_integrals(
         times,
         path,
@@ -142,22 +202,7 @@ class PathLogRatio:
         torch.Tensor[batch_size]
             Two-endpoint path log RNE for each batch member.
         """
-        if times.ndim != 1 or times.shape[0] != 2:
-            raise ValueError('times must have shape (2,).')
-        if path.ndim < 2 or path.shape[0] != 2:
-            raise ValueError('path must have shape (2, batch_size, ...).')
-        if forward_drift.shape != path.shape:
-            raise ValueError('forward_drift must have the shape of path.')
-        if backward_drift.shape != path.shape:
-            raise ValueError('backward_drift must have the shape of path.')
-        if times.device != path.device:
-            raise ValueError('times and path must be on the same device.')
-        if forward_drift.device != path.device or backward_drift.device != path.device:
-            raise ValueError('drifts and path must be on the same device.')
-        if not torch.is_floating_point(times) or not torch.is_floating_point(path):
-            raise ValueError('times and path must have floating-point dtypes.')
-        if not torch.is_floating_point(forward_drift) or not torch.is_floating_point(backward_drift):
-            raise ValueError('drifts must have floating-point dtypes.')
+        PathLogRatio._validate_sde_path(times, path, forward_drift, backward_drift)
 
         diffusion = PathLogRatio._broadcast_diffusion(diffusion, path)
         time_delta = times[1] - times[0]
@@ -250,6 +295,25 @@ class PathLogRatio:
             raise ValueError('transition log probabilities must have floating-point dtypes.')
         if forward.device != backward.device:
             raise ValueError('forward and backward log probabilities must be on the same device.')
+
+    @staticmethod
+    def _validate_sde_path(times, path, forward_drift, backward_drift):
+        if times.ndim != 1 or times.shape[0] != 2:
+            raise ValueError('times must have shape (2,).')
+        if path.ndim < 2 or path.shape[0] != 2:
+            raise ValueError('path must have shape (2, batch_size, ...).')
+        if forward_drift.shape != path.shape:
+            raise ValueError('forward_drift must have the shape of path.')
+        if backward_drift.shape != path.shape:
+            raise ValueError('backward_drift must have the shape of path.')
+        if times.device != path.device:
+            raise ValueError('times and path must be on the same device.')
+        if forward_drift.device != path.device or backward_drift.device != path.device:
+            raise ValueError('drifts and path must be on the same device.')
+        if not torch.is_floating_point(times) or not torch.is_floating_point(path):
+            raise ValueError('times and path must have floating-point dtypes.')
+        if not torch.is_floating_point(forward_drift) or not torch.is_floating_point(backward_drift):
+            raise ValueError('drifts must have floating-point dtypes.')
 
     @staticmethod
     def _broadcast_diffusion(diffusion, path):
