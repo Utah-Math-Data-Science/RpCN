@@ -349,35 +349,9 @@ def _(plot_histogram, toy):
 
 @app.cell(hide_code=True)
 def _(mo):
-    crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=512, label="crepe_num_samples")
-    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=1, value=50, label="crepe_burn_in")
-    crepe_thinning = mo.ui.number(start=1, stop=1000, step=1, value=1, label="crepe_thinning")
-    crepe_inverse_temp = mo.ui.number(start=0.0, step=0.05, value=25.0, label="crepe_inverse_temperature")
-    crepe_reward_power = mo.ui.number(start=0.05, stop=10.0, step=0.05, value=1.0, label="crepe_reward_schedule_power")
-    crepe_refresh_reference = mo.ui.checkbox(value=True, label="crepe_refresh_reference")
-    return (
-        crepe_burn_in,
-        crepe_inverse_temp,
-        crepe_num_samples,
-        crepe_refresh_reference,
-        crepe_reward_power,
-        crepe_thinning,
-    )
-
-
-@app.cell(hide_code=True)
-def _(
-    crepe_burn_in,
-    crepe_inverse_temp,
-    crepe_num_samples,
-    crepe_refresh_reference,
-    crepe_reward_power,
-    crepe_thinning,
-    mo,
-):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
-    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=1024, label="batch_size")
+    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=2, label="batch_size")
     n_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="n_steps")
     n_reference = mo.ui.number(start=128, stop=32768, step=128, value=1024, label="n_reference")
 
@@ -421,6 +395,41 @@ def _(
     mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.4, label="mh_proposal_std")
     mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="mh_inverse_temp")
 
+    crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=512, label="crepe_num_samples")
+    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=1, value=50, label="crepe_burn_in")
+    crepe_thinning = mo.ui.number(start=1, stop=1000, step=1, value=1, label="crepe_thinning")
+    crepe_inverse_temp = mo.ui.number(start=0.0, step=0.05, value=25.0, label="crepe_inverse_temperature")
+    crepe_reward_power = mo.ui.number(start=0.05, stop=10.0, step=0.05, value=1.0, label="crepe_reward_schedule_power")
+    crepe_reward_reference = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.0, label="crepe_reward_at_reference")
+    crepe_reward_target = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=1.0, label="crepe_reward_at_target")
+    crepe_refresh_reference = mo.ui.checkbox(value=True, label="crepe_refresh_reference")
+
+    crepe_replica_count = mo.ui.number(start=2, stop=1000, step=1, value=51, label="crepe_replica_count")
+    crepe_substeps = mo.ui.number(start=1, stop=64, step=1, value=1, label="crepe_edge_substeps_K")
+    crepe_time_min = mo.ui.number(start=0.0, stop=0.99, step=0.001, value=0.001, label="crepe_time_min")
+    crepe_time_max = mo.ui.number(start=0.01, stop=1.0, step=0.001, value=1.0, label="crepe_time_max")
+    crepe_time_spacing = mo.ui.dropdown(options=["linear", "karras"], value="karras", label="crepe_time_spacing")
+    crepe_karras_rho = mo.ui.number(start=0.1, stop=20.0, step=0.1, value=7.0, label="crepe_karras_rho")
+    crepe_continuation_steps = mo.ui.number(start=1, stop=1000, step=1, value=20, label="crepe_continuation_steps")
+    crepe_ttr_score_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=0.0, label="crepe_target_to_reference_score_scale")
+    crepe_rtt_score_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=1.0, label="crepe_reference_to_target_score_scale")
+    crepe_ttr_reward_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=0.0, label="crepe_target_to_reference_reward_gradient_scale")
+    crepe_rtt_reward_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=1.0, label="crepe_reference_to_target_reward_gradient_scale")
+    crepe_gradient_clip = mo.ui.number(start=0.0, stop=10000.0, step=1.0, value=1000.0, label="crepe_reward_gradient_clip")
+    crepe_initialization = mo.ui.dropdown(
+        options=["denoising path", "independent marginals", "shared clean ancestor"],
+        value="denoising path",
+        label="crepe_initialization",
+    )
+    crepe_rne_method = mo.ui.dropdown(
+        options=["exact transition", "ito approximation", "gaussian stabilized"],
+        value="exact transition",
+        label="crepe_rne_method",
+    )
+    crepe_local_exploration = mo.ui.checkbox(value=False, label="crepe_local_ULA")
+    crepe_local_steps = mo.ui.number(start=1, stop=100, step=1, value=1, label="crepe_local_steps")
+    crepe_local_scale = mo.ui.number(start=0.0, stop=10.0, step=0.05, value=1.0, label="crepe_local_step_scale")
+
     run_unsteered = mo.ui.run_button(label="Unsteered")
     run_fk = mo.ui.run_button(label="FK")
     run_das = mo.ui.run_button(label="DAS")
@@ -430,22 +439,117 @@ def _(
 
     controls = mo.vstack(
         [
+            mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
             mo.md("## Experiment Controls"),
-            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn, run_crepe], justify="start"),
+            mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
             mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([das_n_particles, das_inverse_temperature, das_proposal_scale, das_tempering_gamma, das_resample_threshold], justify="start"),
             mo.md("DAS uses the paper's exponential schedule `lambda_i=min((1+gamma)^i-1, 1)` and enforces terminal `lambda=1`. Set `das_proposal_scale=1` for the undamped Gaussian proposal; smaller values retain the exact importance correction while improving finite-particle stability for this non-concave reward."),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
-            mo.hstack([crepe_num_samples, crepe_burn_in, crepe_thinning, crepe_inverse_temp, crepe_reward_power, crepe_refresh_reference], justify="start"),
-            mo.md("CREPE uses the reversed full diffusion ladder from `t=0` to `t=1`. Its forward proposal includes the annealed Tweedie reward gradient. `n_steps` is the replica count and `batch_size` is the chain count. Each iteration is one checkerboard half-sweep."),
-            mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
+            mo.hstack([mo.md("### CREPE"), run_crepe]),
+            mo.hstack([crepe_num_samples, crepe_burn_in, crepe_thinning, crepe_inverse_temp, crepe_refresh_reference], justify="start"),
+            mo.hstack([crepe_replica_count, crepe_substeps, crepe_time_min, crepe_time_max, crepe_time_spacing, crepe_karras_rho, crepe_continuation_steps], justify="start"),
+            mo.hstack([crepe_reward_target, crepe_reward_reference, crepe_reward_power], justify="start"),
+            mo.hstack([crepe_ttr_score_scale, crepe_rtt_score_scale, crepe_ttr_reward_scale, crepe_rtt_reward_scale, crepe_gradient_clip], justify="start"),
+            mo.hstack([crepe_initialization, crepe_rne_method, crepe_local_exploration, crepe_local_steps, crepe_local_scale], justify="start"),
+            mo.md("CREPE times are stored target-to-reference. `crepe_replica_count` controls levels, `K` controls Euler substeps per edge, and each iteration is one checkerboard half-sweep. If `time_min > 0`, retained target-replica states are denoised to `t=0`. Forced clean-edge acceptance is intentionally excluded because it violates Eq. (13)."),
+            mo.md(r"""
+            #### CREPE Parameter Reference
+
+            CREPE stores diffusion times in increasing target-to-reference order: `time_min` is the least-noisy target-side replica and `time_max` is the noisiest reference-side replica. One CREPE iteration is one checkerboard parity half-sweep, so each edge is attempted on alternating iterations.
+
+            **Sampling and execution**
+
+            | Control | Description |
+            |---|---|
+            | `seed` | Seeds PyTorch before initialization and sampling. CREPE shares this control with the other samplers. |
+            | `device` | Runs the score model and CREPE on CPU or CUDA. CUDA falls back to CPU when unavailable. |
+            | `batch_size` | Number of independent CREPE chains evolved together. The final histogram receives `crepe_num_samples * batch_size` correlated MCMC samples. |
+            | `crepe_num_samples` | Number of retained target-replica batches per chain. This is not the raw half-sweep count. |
+            | `crepe_burn_in` | Number of initial checkerboard half-sweeps discarded. The first retained batch is recorded after half-sweep index `burn_in`. |
+            | `crepe_thinning` | Number of half-sweeps between retained batches after burn-in. The run uses `burn_in + (num_samples - 1) * thinning + 1` raw half-sweeps. |
+
+            **Diffusion ladder and path discretization**
+
+            | Control | Description |
+            |---|---|
+            | `crepe_replica_count` | Number of simultaneous diffusion-time replicas, including both ladder endpoints. There are `replica_count - 1` communication edges. More replicas shorten individual exchanges but increase memory and score evaluations per half-sweep. |
+            | `crepe_edge_substeps_K` | Euler-Maruyama transitions simulated in each direction for one edge proposal. The full discretization contains `(replica_count - 1) * K + 1` points, and every `K`-th point is a replica. Simulation and RNE evaluation use the same transitions. |
+            | `crepe_time_min` | Least-noisy time used by replica exchange. If greater than zero, each retained target replica is subsequently denoised to `t=0`; that continuation is not Metropolis-corrected by CREPE. |
+            | `crepe_time_max` | Noisiest reference-side time. It must be greater than `time_min` and at most one for this probability path. |
+            | `crepe_time_spacing` | `linear` spaces Gaussian-path times uniformly. `karras` spaces the effective EDM noise `sigma_eff(t)=beta(t)/alpha(t)` with the Karras power schedule and then maps those noise levels back to Gaussian-path times. |
+            | `crepe_karras_rho` | Exponent in `sigma_i = (sigma_min^(1/rho) + ramp_i * (sigma_max^(1/rho) - sigma_min^(1/rho)))^rho`, where `sigma_min/max = beta(time_min/max) / alpha(time_min/max)`. Larger values allocate relatively more resolution near low effective noise. It is ignored for linear spacing. |
+            | `crepe_continuation_steps` | Number of reference-to-target Euler steps used to continue samples from `time_min` to `t=0`. It only affects runs with `time_min > 0`. |
+
+            **Reward-tilted target**
+
+            The noisy reward is `r_t(x) = inverse_temperature * gamma(t) * reward_fn(Tweedie(x, t))`, where
+            `gamma(t) = reward_at_reference + (reward_at_target - reward_at_reference) * ((time_max - t) / (time_max - time_min))^power`.
+
+            | Control | Description |
+            |---|---|
+            | `crepe_inverse_temperature` | Overall multiplier on the clean reward. Larger values define a more strongly tilted target and usually make communication harder. |
+            | `crepe_reward_at_target` | Reward-schedule value at `time_min`. The paper normally uses one. |
+            | `crepe_reward_at_reference` | Reward-schedule value at `time_max`. The paper normally uses zero so the reference distribution remains directly sampleable. Exact reference refresh requires this control to be zero. |
+            | `crepe_reward_schedule_power` | Curvature of the target-to-reference reward interpolation. Larger powers suppress the reward over more of the noisy ladder and turn it on closer to the target side. |
+
+            **Proposal dynamics**
+
+            Each directional proposal drift has the form `f - g^2 * (score_scale * model_score + reward_scale * grad(r_t))`. These controls change proposal efficiency, not the reward-tilted target used in the Metropolis acceptance ratio.
+
+            | Control | Description |
+            |---|---|
+            | `crepe_target_to_reference_score_scale` | Model-score strength in the increasing-time/noising proposal. Zero gives the base forward/noising drift, matching the natural official-code convention. |
+            | `crepe_reference_to_target_score_scale` | Model-score strength in the decreasing-time/denoising proposal. One gives the usual learned reverse-SDE drift. |
+            | `crepe_target_to_reference_reward_gradient_scale` | Annealed Tweedie reward-gradient strength in the increasing-time proposal. Zero omits reward guidance in this direction. |
+            | `crepe_reference_to_target_reward_gradient_scale` | Annealed Tweedie reward-gradient strength in the decreasing-time proposal. The Metropolis correction remains active when this differs from one or is zero. |
+            | `crepe_reward_gradient_clip` | Symmetric componentwise clamp applied to reward gradients before proposal and local-move scaling. Zero disables clipping. Clipping changes the proposal but not the target ratio. |
+
+            **Initialization, RNE, and local moves**
+
+            | Control | Description |
+            |---|---|
+            | `crepe_initialization` | `denoising path` samples the top marginal and follows one guided reference-to-target trajectory while retaining replica levels. `independent marginals` samples every base diffusion marginal independently. `shared clean ancestor` noises one shared clean reference sample independently at every level. Initialization affects burn-in, not the stationary target. |
+            | `crepe_rne_method` | `exact transition` sums exact Gaussian log-density ratios for the discretized Euler kernels. `ito approximation` uses the report's two-endpoint Ito approximation. `gaussian stabilized` divides transition ratios by a tractable Gaussian process with marginal variance `alpha(t)^2 + beta(t)^2` and restores its endpoint ratio. |
+            | `crepe_refresh_reference` | Replaces the noisiest replica after every half-sweep with an exact sample from the model probability-path marginal. It is valid for the controlled target only when `reward_at_reference=0`. The refreshed top replica does not also receive a local ULA move. |
+            | `crepe_local_ULA` | Applies unadjusted Langevin exploration independently at each non-refreshed replica after communication. ULA can improve same-level mixing but introduces finite-step discretization bias. |
+            | `crepe_local_steps` | Number of ULA updates applied to each eligible replica after every half-sweep. It is ignored when local ULA is disabled. |
+            | `crepe_local_step_scale` | Multiplier on the denoising-aligned ULA step `h = 0.5 * g(t)^2 * delta_t * scale`; the update uses `x + h * target_score + sqrt(2h) * noise`. Zero leaves replicas unchanged. |
+
+            Acceptance diagnostics are reported per edge using each edge's own attempt count. Forced clean-edge acceptance from parts of the official experiment code is intentionally unavailable because it bypasses the CREPE Metropolis rule and can bias the target.
+            """),
         ]
     )
     controls
     return (
         batch_size,
+        crepe_burn_in,
+        crepe_continuation_steps,
+        crepe_gradient_clip,
+        crepe_initialization,
+        crepe_inverse_temp,
+        crepe_karras_rho,
+        crepe_local_exploration,
+        crepe_local_scale,
+        crepe_local_steps,
+        crepe_num_samples,
+        crepe_refresh_reference,
+        crepe_replica_count,
+        crepe_reward_power,
+        crepe_reward_reference,
+        crepe_reward_target,
+        crepe_rne_method,
+        crepe_rtt_reward_scale,
+        crepe_rtt_score_scale,
+        crepe_substeps,
+        crepe_thinning,
+        crepe_time_max,
+        crepe_time_min,
+        crepe_time_spacing,
+        crepe_ttr_reward_scale,
+        crepe_ttr_score_scale,
         das_inverse_temperature,
         das_n_particles,
         das_proposal_scale,
@@ -619,63 +723,55 @@ def _(mh_diagnostics, mo):
 @app.cell(hide_code=True)
 def _(crepe_diagnostics, crepe_is_stale, mo):
     if crepe_diagnostics is None:
-        crepe_diag_view = mo.vstack([mo.md("## CREPE Diagnostics"), mo.md("Run CREPE to populate diagnostics.")])
+        crepe_diag_view = mo.vstack(
+            [mo.md("## CREPE Diagnostics"), mo.md("Run CREPE to populate diagnostics.")]
+        )
+    elif crepe_is_stale:
+        crepe_diag_view = mo.vstack(
+            [mo.md("## CREPE Diagnostics"), mo.md("Controls changed; rerun CREPE.")]
+        )
     else:
-        if crepe_is_stale:
-            crepe_status_label = "Stale"
-            crepe_status_hint = "Controls changed after this run. Run CREPE again before comparing samples."
-        elif crepe_diagnostics["cold_edge_acceptance_rate"] < 0.05:
-            crepe_status_label = "Cold-edge bottleneck"
-            crepe_status_hint = "Replica 0 is barely moving. Increase burn-in, reduce inverse temperature, or refine the reward ladder."
-        elif crepe_diagnostics["minimum_edge_acceptance_rate"] < 0.05:
-            crepe_status_label = "Ladder bottleneck"
-            crepe_status_hint = f"Communication is blocked near edge {crepe_diagnostics['bottleneck_edge']}. Increase the replica count or reduce inverse temperature."
-        elif crepe_diagnostics["chains_without_cold_acceptance_fraction"] > 0.25:
-            crepe_status_label = "Under-mixed"
-            crepe_status_hint = "Many chains never accepted a target-edge proposal. Increase burn-in before interpreting the histogram."
-        else:
-            crepe_status_label = "Communicating"
-            crepe_status_hint = "Cold-edge communication is active; confirm stability across longer burn-in runs."
-        crepe_diag_table = [
-            {"metric": "acceptance_rate_mean", "value": f"{crepe_diagnostics['acceptance_rate_mean']:.4f}"},
-            {"metric": "cold_edge_acceptance_rate", "value": f"{crepe_diagnostics['cold_edge_acceptance_rate']:.4f}"},
-            {"metric": "minimum_edge_acceptance_rate", "value": f"{crepe_diagnostics['minimum_edge_acceptance_rate']:.4f}"},
-            {"metric": "bottleneck_edge", "value": str(crepe_diagnostics["bottleneck_edge"])},
-            {"metric": "chains_without_cold_acceptance", "value": f"{crepe_diagnostics['chains_without_cold_acceptance_fraction']:.4f}"},
-            {"metric": "retained_duplicate_fraction", "value": f"{crepe_diagnostics['duplicate_fraction']:.4f}"},
-            {"metric": "accepted", "value": int(crepe_diagnostics["accepted"])},
-            {"metric": "attempted", "value": int(crepe_diagnostics["attempted"])},
-            {"metric": "iterations_half_sweeps", "value": int(crepe_diagnostics["iteration_count"])},
-            {"metric": "full_sweep_equivalents", "value": float(crepe_diagnostics["full_sweep_equivalents"])},
-            {"metric": "saved_iterations", "value": int(crepe_diagnostics["saved_iterations"])},
-            {"metric": "chain_count", "value": int(crepe_diagnostics["chain_count"])},
-            {"metric": "replica_count", "value": int(crepe_diagnostics["replica_count"])},
-            {"metric": "minimum_time_step", "value": crepe_diagnostics["minimum_time_step"]},
-            {"metric": "maximum_time_step", "value": crepe_diagnostics["maximum_time_step"]},
+        crepe_diag_summary = [
+            {"metric": "mean_edge_acceptance", "value": f"{crepe_diagnostics['acceptance_rate_mean']:.4f}"},
+            {"metric": "replica_count", "value": crepe_diagnostics["replica_count"]},
+            {"metric": "edge_count", "value": crepe_diagnostics["edge_count"]},
+            {"metric": "communication_substeps_K", "value": crepe_diagnostics["substeps"]},
+            {"metric": "raw_half_sweeps", "value": crepe_diagnostics["iteration_count"]},
+            {"metric": "retained_batches", "value": crepe_diagnostics["retained_batches"]},
+            {"metric": "chain_batch_size", "value": crepe_diagnostics["batch_size"]},
+            {"metric": "initialization", "value": crepe_diagnostics["initialization"]},
+            {"metric": "RNE method", "value": crepe_diagnostics["rne_method"]},
+            {"metric": "time_spacing", "value": crepe_diagnostics["time_spacing"]},
+            {"metric": "time_range", "value": f"[{crepe_diagnostics['time_min']:.4g}, {crepe_diagnostics['time_max']:.4g}]"},
+            {"metric": "Karras rho", "value": crepe_diagnostics["karras_rho"]},
+            {"metric": "inverse_temperature", "value": crepe_diagnostics["inverse_temperature"]},
+            {"metric": "reward schedule target/reference/power", "value": f"{crepe_diagnostics['reward_at_target']}/{crepe_diagnostics['reward_at_reference']}/{crepe_diagnostics['reward_power']}"},
+            {"metric": "target-to-reference score/reward", "value": f"{crepe_diagnostics['target_to_reference_score_scale']}/{crepe_diagnostics['target_to_reference_reward_scale']}"},
+            {"metric": "reference-to-target score/reward", "value": f"{crepe_diagnostics['reference_to_target_score_scale']}/{crepe_diagnostics['reference_to_target_reward_scale']}"},
+            {"metric": "local_exploration", "value": crepe_diagnostics["local_exploration"]},
+            {"metric": "reference_refresh", "value": crepe_diagnostics["reference_refresh"]},
         ]
-        crepe_edge_table = [
+        crepe_diag_times = crepe_diagnostics["replica_times"]
+        crepe_diag_accepts = crepe_diagnostics["acceptance_count"].sum(dim=1)
+        crepe_diag_attempts = crepe_diagnostics["attempt_count"].sum(dim=1)
+        crepe_diag_rates = crepe_diag_accepts / crepe_diag_attempts.clamp(min=1)
+        crepe_diag_edges = [
             {
-                "edge": f"({edge_index}, {edge_index + 1})",
-                "acceptance_rate": edge_rate,
-                "accepted": edge_accepted,
-                "attempted": edge_attempted,
+                "edge": crepe_diag_idx,
+                "time_lower": float(crepe_diag_times[crepe_diag_idx]),
+                "time_upper": float(crepe_diag_times[crepe_diag_idx + 1]),
+                "accepted": int(crepe_diag_accepts[crepe_diag_idx]),
+                "attempted": int(crepe_diag_attempts[crepe_diag_idx]),
+                "acceptance_rate": float(crepe_diag_rates[crepe_diag_idx]),
             }
-            for edge_index, (edge_rate, edge_accepted, edge_attempted) in enumerate(
-                zip(
-                    crepe_diagnostics["acceptance_rate_by_edge"],
-                    crepe_diagnostics["accepted_by_edge"],
-                    crepe_diagnostics["attempted_by_edge"],
-                )
-            )
+            for crepe_diag_idx in range(crepe_diagnostics["edge_count"])
         ]
         crepe_diag_view = mo.vstack(
             [
                 mo.md("## CREPE Diagnostics"),
-                mo.md(f"**Status:** {crepe_status_label}"),
-                mo.ui.table(crepe_diag_table),
-                mo.md(crepe_status_hint),
-                mo.md("### Communication By Edge"),
-                mo.ui.table(crepe_edge_table),
+                mo.ui.table(crepe_diag_summary),
+                mo.md("### Edge Communication"),
+                mo.ui.table(crepe_diag_edges),
             ]
         )
     crepe_diag_view
@@ -761,11 +857,29 @@ def _(
     crepe,
     crepe_burn_in,
     crepe_config_signature,
+    crepe_continuation_steps,
+    crepe_fine_times,
+    crepe_gradient_clip,
+    crepe_initialization,
     crepe_inverse_temp,
+    crepe_karras_rho,
+    crepe_local_exploration,
+    crepe_local_scale,
+    crepe_local_steps,
     crepe_num_samples,
     crepe_refresh_reference,
+    crepe_replica_times,
     crepe_reward_power,
+    crepe_reward_reference,
+    crepe_reward_target,
+    crepe_rne_method,
+    crepe_rtt_reward_scale,
+    crepe_rtt_score_scale,
+    crepe_substeps,
     crepe_thinning,
+    crepe_time_spacing,
+    crepe_ttr_reward_scale,
+    crepe_ttr_score_scale,
     functools,
     reference_data,
     reward_fn,
@@ -774,241 +888,511 @@ def _(
     seed,
     set_crepe_diagnostics,
     set_crepe_samples,
-    timesteps,
     torch,
 ):
     if run_crepe.value:
         torch.manual_seed(int(seed.value))
-        crepe_times = timesteps.flip(0)
-        if not bool((crepe_times[1:] > crepe_times[:-1]).all()):
-            raise ValueError("CREPE requires a strictly increasing diffusion ladder")
+        crepe_reward_beta = float(crepe_inverse_temp.value)
+        crepe_reward_exponent = float(crepe_reward_power.value)
+        crepe_reward_floor = float(crepe_reward_reference.value)
+        crepe_reward_ceiling = float(crepe_reward_target.value)
+        if crepe_refresh_reference.value and crepe_reward_floor != 0.0:
+            raise ValueError(
+                "Exact reference refresh requires crepe_reward_at_reference=0"
+            )
+        crepe_ttr_score = float(crepe_ttr_score_scale.value)
+        crepe_rtt_score = float(crepe_rtt_score_scale.value)
+        crepe_ttr_reward = float(crepe_ttr_reward_scale.value)
+        crepe_rtt_reward = float(crepe_rtt_reward_scale.value)
+        crepe_clip = float(crepe_gradient_clip.value)
+        crepe_min_time = crepe_replica_times[0]
+        crepe_max_time = crepe_replica_times[-1]
+        crepe_edge_substeps = int(crepe_substeps.value)
 
-        def crepe_diffusion(crepe_time):
-            return score_model.prob_path.g(crepe_time)
+        def crepe_schedule_value(crepe_schedule_time):
+            crepe_schedule_fraction = (
+                (crepe_max_time - crepe_schedule_time)
+                / (crepe_max_time - crepe_min_time)
+            ).clamp(0.0, 1.0)
+            return crepe_reward_floor + (
+                crepe_reward_ceiling - crepe_reward_floor
+            ) * crepe_schedule_fraction.pow(crepe_reward_exponent)
 
-        def crepe_model_forward_drift(crepe_time, crepe_batch):
-            return score_model.prob_path.f(crepe_time, crepe_batch)
-
-        def crepe_model_backward_drift(crepe_time, crepe_batch):
-            crepe_sigma = crepe_diffusion(crepe_time)
-            crepe_score = score_model._score_particles(crepe_time, crepe_batch)
-            return crepe_model_forward_drift(crepe_time, crepe_batch) - crepe_sigma.square() * crepe_score
-
-        def crepe_annealed_reward(crepe_time, crepe_batch):
-            crepe_predicted_clean = score_model.get_tweedie(crepe_time, crepe_batch)
-            crepe_reward_schedule = (1 - crepe_time).pow(float(crepe_reward_power.value))
-            return float(crepe_inverse_temp.value) * crepe_reward_schedule * reward_fn(crepe_predicted_clean)
-
-        def crepe_single_annealed_reward(crepe_time, crepe_state):
-            crepe_state_batch = crepe_state.unsqueeze(0)
-            crepe_score = score_model._score_particles(crepe_time, crepe_state_batch)[0]
-            crepe_alpha = score_model.prob_path.alpha(crepe_time)
-            crepe_beta = score_model.prob_path.beta(crepe_time)
-            crepe_predicted_clean = (
-                crepe_state + crepe_beta.square() * crepe_score
-            ) / crepe_alpha
-            crepe_reward_schedule = (1 - crepe_time).pow(float(crepe_reward_power.value))
+        def crepe_tweedie_value(crepe_tweedie_time, crepe_tweedie_state):
+            crepe_tweedie_score = score_model._score_particles(
+                crepe_tweedie_time, crepe_tweedie_state
+            )
+            crepe_tweedie_alpha = score_model.prob_path.alpha(crepe_tweedie_time)
+            crepe_tweedie_beta = score_model.prob_path.beta(crepe_tweedie_time)
             return (
-                float(crepe_inverse_temp.value)
-                * crepe_reward_schedule
-                * reward_fn(crepe_predicted_clean)
-            )
+                crepe_tweedie_state
+                + crepe_tweedie_beta.square() * crepe_tweedie_score
+            ) / crepe_tweedie_alpha
 
-        crepe_single_reward_gradient = torch.func.grad(
-            crepe_single_annealed_reward,
-            argnums=1,
-        )
-
-        def crepe_reward_gradient(crepe_time, crepe_batch):
-            return torch.vmap(
-                crepe_single_reward_gradient,
-                in_dims=(None, 0),
-            )(crepe_time, crepe_batch)
-
-        def crepe_proposal_forward_drift(crepe_time, crepe_batch):
-            crepe_sigma = crepe_diffusion(crepe_time)
-            # The reward-tilted score adds grad(r_t), so the backward drift subtracts this term.
+        def crepe_log_reward(crepe_reward_time, crepe_reward_state):
             return (
-                crepe_model_backward_drift(crepe_time, crepe_batch)
-                - crepe_sigma.square() * crepe_reward_gradient(crepe_time, crepe_batch)
+                crepe_reward_beta
+                * crepe_schedule_value(crepe_reward_time)
+                * reward_fn(crepe_tweedie_value(crepe_reward_time, crepe_reward_state))
             )
 
-        def crepe_proposal_backward_drift(crepe_time, crepe_batch):
-            return crepe_model_forward_drift(crepe_time, crepe_batch)
+        def crepe_reward_gradient(crepe_gradient_time, crepe_gradient_state):
+            def crepe_summed_reward(crepe_gradient_input):
+                return crepe_log_reward(
+                    crepe_gradient_time, crepe_gradient_input
+                ).sum()
 
-        def crepe_summarize_path(crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy):
-            crepe_path_times = torch.stack((crepe_t0, crepe_t1))
-            crepe_path = torch.stack((crepe_less_noisy, crepe_more_noisy))
-            crepe_diffusion_at_endpoints = torch.stack((crepe_diffusion(crepe_t0), crepe_diffusion(crepe_t1)))
-            crepe_proposal_forward_drifts = torch.stack((
-                crepe_proposal_forward_drift(crepe_t0, crepe_less_noisy),
-                crepe_proposal_forward_drift(crepe_t1, crepe_more_noisy),
-            ))
-            crepe_proposal_backward_drifts = torch.stack((
-                crepe_proposal_backward_drift(crepe_t0, crepe_less_noisy),
-                crepe_proposal_backward_drift(crepe_t1, crepe_more_noisy),
-            ))
-            crepe_proposal_log_rne = crepe.PathLogRatio.from_ito_integrals(
-                crepe_path_times,
-                crepe_path,
-                crepe_proposal_forward_drifts,
-                crepe_proposal_backward_drifts,
-                crepe_diffusion_at_endpoints,
-            )
-            crepe_model_forward_drifts = torch.stack((
-                crepe_model_forward_drift(crepe_t0, crepe_less_noisy),
-                crepe_model_forward_drift(crepe_t1, crepe_more_noisy),
-            ))
-            crepe_model_backward_drifts = torch.stack((
-                crepe_model_backward_drift(crepe_t0, crepe_less_noisy),
-                crepe_model_backward_drift(crepe_t1, crepe_more_noisy),
-            ))
-            crepe_model_log_rne = crepe.PathLogRatio.from_ito_integrals(
-                crepe_path_times,
-                crepe_path,
-                crepe_model_forward_drifts,
-                crepe_model_backward_drifts,
-                crepe_diffusion_at_endpoints,
-            )
-            crepe_target_log_ratio = crepe.TargetLogRatio.reward_tilt(
-                crepe_model_log_rne,
-                crepe_annealed_reward(crepe_t0, crepe_less_noisy),
-                crepe_annealed_reward(crepe_t1, crepe_more_noisy),
-            )
-            return crepe_target_log_ratio, crepe_proposal_log_rne
+            crepe_gradient = torch.func.grad(crepe_summed_reward)(crepe_gradient_state)
+            if crepe_clip > 0.0:
+                crepe_gradient = crepe_gradient.clamp(-crepe_clip, crepe_clip)
+            return crepe_gradient.detach()
 
-        def crepe_forward_path_fn(crepe_t0, crepe_t1, crepe_less_noisy):
-            crepe_dt = crepe_t1 - crepe_t0
-            crepe_more_noisy = (
-                crepe_less_noisy
-                + crepe_dt * crepe_proposal_forward_drift(crepe_t0, crepe_less_noisy)
-                + crepe_dt.sqrt() * crepe_diffusion(crepe_t0) * torch.randn_like(crepe_less_noisy)
-            )
-            crepe_target_log_ratio, crepe_proposal_log_rne = crepe_summarize_path(
-                crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy
-            )
-            return crepe_more_noisy, crepe_target_log_ratio, crepe_proposal_log_rne
+        def crepe_model_ttr_drift(crepe_drift_time, crepe_drift_state):
+            return score_model.prob_path.f(crepe_drift_time, crepe_drift_state)
 
-        def crepe_backward_path_fn(crepe_t0, crepe_t1, crepe_more_noisy):
-            crepe_dt = crepe_t1 - crepe_t0
-            crepe_less_noisy = (
-                crepe_more_noisy
-                - crepe_dt * crepe_proposal_backward_drift(crepe_t1, crepe_more_noisy)
-                + crepe_dt.sqrt() * crepe_diffusion(crepe_t1) * torch.randn_like(crepe_more_noisy)
-            )
-            crepe_target_log_ratio, crepe_proposal_log_rne = crepe_summarize_path(
-                crepe_t0, crepe_t1, crepe_less_noisy, crepe_more_noisy
-            )
-            return crepe_less_noisy, crepe_target_log_ratio, crepe_proposal_log_rne
-
-        def crepe_sample_model_marginal(crepe_time):
-            crepe_reference_index = torch.randint(
-                reference_data.shape[0], (), device=reference_data.device
-            )
-            crepe_reference_mask = (
-                torch.arange(reference_data.shape[0], device=reference_data.device)
-                == crepe_reference_index
-            ).to(reference_data.dtype)
-            crepe_datum = (crepe_reference_mask[:, None] * reference_data).sum(dim=0)
-            return (
-                score_model.prob_path.mean(crepe_time, crepe_datum)
-                + score_model.prob_path.std(crepe_time, crepe_datum) * torch.randn_like(crepe_datum)
+        def crepe_model_rtt_drift(crepe_drift_time, crepe_drift_state):
+            crepe_drift_g = score_model.prob_path.g(crepe_drift_time)
+            return score_model.prob_path.f(
+                crepe_drift_time, crepe_drift_state
+            ) - crepe_drift_g.square() * score_model._score_particles(
+                crepe_drift_time, crepe_drift_state
             )
 
-        def crepe_init_path_fn(crepe_init_times):
-            crepe_descending_times = crepe_init_times.flip(0)
-            crepe_state = crepe_sample_model_marginal(crepe_descending_times[0])
-            crepe_descending_states = [crepe_state]
-            for crepe_time_pair in crepe_descending_times.unfold(0, 2, 1):
-                crepe_more_noisy_time = crepe_time_pair[0]
-                crepe_less_noisy_time = crepe_time_pair[1]
-                crepe_init_dt = crepe_less_noisy_time - crepe_more_noisy_time
-                crepe_state_batch = crepe_state.unsqueeze(0)
-                crepe_state = (
-                    crepe_state
-                    + crepe_init_dt * crepe_model_backward_drift(crepe_more_noisy_time, crepe_state_batch)[0]
-                    + crepe_init_dt.abs().sqrt()
-                    * crepe_diffusion(crepe_more_noisy_time)
-                    * torch.randn_like(crepe_state)
+        def crepe_proposal_ttr_drift(crepe_drift_time, crepe_drift_state):
+            crepe_drift_g = score_model.prob_path.g(crepe_drift_time)
+            crepe_drift_score = score_model._score_particles(
+                crepe_drift_time, crepe_drift_state
+            )
+            crepe_drift_reward = (
+                crepe_reward_gradient(crepe_drift_time, crepe_drift_state)
+                if crepe_ttr_reward != 0.0
+                else torch.zeros_like(crepe_drift_state)
+            )
+            return score_model.prob_path.f(
+                crepe_drift_time, crepe_drift_state
+            ) - crepe_drift_g.square() * (
+                crepe_ttr_score * crepe_drift_score
+                + crepe_ttr_reward * crepe_drift_reward
+            )
+
+        def crepe_proposal_rtt_drift(crepe_drift_time, crepe_drift_state):
+            crepe_drift_g = score_model.prob_path.g(crepe_drift_time)
+            crepe_drift_score = score_model._score_particles(
+                crepe_drift_time, crepe_drift_state
+            )
+            crepe_drift_reward = (
+                crepe_reward_gradient(crepe_drift_time, crepe_drift_state)
+                if crepe_rtt_reward != 0.0
+                else torch.zeros_like(crepe_drift_state)
+            )
+            return score_model.prob_path.f(
+                crepe_drift_time, crepe_drift_state
+            ) - crepe_drift_g.square() * (
+                crepe_rtt_score * crepe_drift_score
+                + crepe_rtt_reward * crepe_drift_reward
+            )
+
+        def crepe_gaussian_log_prob(
+            crepe_gaussian_value,
+            crepe_gaussian_mean,
+            crepe_gaussian_variance,
+        ):
+            crepe_gaussian_log = -0.5 * (
+                (crepe_gaussian_value - crepe_gaussian_mean).square()
+                / crepe_gaussian_variance
+                + torch.log(2.0 * torch.pi * crepe_gaussian_variance)
+            )
+            return crepe_gaussian_log.flatten(1).sum(dim=1)
+
+        def crepe_transition_logs(
+            crepe_path_times,
+            crepe_path_states,
+            crepe_ttr_drift_fn,
+            crepe_rtt_drift_fn,
+        ):
+            crepe_ttr_logs = []
+            crepe_rtt_logs = []
+            for crepe_path_idx in range(crepe_path_times.numel() - 1):
+                crepe_path_t0 = crepe_path_times[crepe_path_idx]
+                crepe_path_t1 = crepe_path_times[crepe_path_idx + 1]
+                crepe_path_dt = crepe_path_t1 - crepe_path_t0
+                crepe_path_lower = crepe_path_states[crepe_path_idx]
+                crepe_path_upper = crepe_path_states[crepe_path_idx + 1]
+                crepe_ttr_variance = (
+                    crepe_path_dt * score_model.prob_path.g(crepe_path_t0).square()
                 )
-                crepe_descending_states.append(crepe_state)
-            return torch.stack(crepe_descending_states[::-1])
+                crepe_rtt_variance = (
+                    crepe_path_dt * score_model.prob_path.g(crepe_path_t1).square()
+                )
+                crepe_ttr_mean = crepe_path_lower + crepe_path_dt * crepe_ttr_drift_fn(
+                    crepe_path_t0, crepe_path_lower
+                )
+                crepe_rtt_mean = crepe_path_upper - crepe_path_dt * crepe_rtt_drift_fn(
+                    crepe_path_t1, crepe_path_upper
+                )
+                crepe_ttr_logs.append(
+                    crepe_gaussian_log_prob(
+                        crepe_path_upper, crepe_ttr_mean, crepe_ttr_variance
+                    )
+                )
+                crepe_rtt_logs.append(
+                    crepe_gaussian_log_prob(
+                        crepe_path_lower, crepe_rtt_mean, crepe_rtt_variance
+                    )
+                )
+            return torch.stack(crepe_ttr_logs), torch.stack(crepe_rtt_logs)
 
-        crepe_sampler = crepe.CREPE(
-            init_path_fn=crepe_init_path_fn,
-            forward_path_fn=crepe_forward_path_fn,
-            backward_path_fn=crepe_backward_path_fn,
-            refresh_reference_fn=(
-                crepe_sample_model_marginal if bool(crepe_refresh_reference.value) else None
-            ),
-        )
-        crepe_iteration_count = (
-            int(crepe_burn_in.value)
-            + 1
-            + (int(crepe_num_samples.value) - 1) * int(crepe_thinning.value)
-        )
-        with torch.no_grad():
-            crepe_result = crepe_sampler.run(
-                crepe_times,
-                crepe_iteration_count,
-                batch_size=int(batch_size.value),
-                should_save_sample_fn=functools.partial(
-                    crepe.SaveSampleFn.burn_in_and_thin,
-                    burn_in=int(crepe_burn_in.value),
-                    thin=int(crepe_thinning.value),
+        def crepe_stabilizing_rtt_drift(crepe_stable_time, crepe_stable_state):
+            crepe_stable_alpha = score_model.prob_path.alpha(crepe_stable_time)
+            crepe_stable_beta = score_model.prob_path.beta(crepe_stable_time)
+            crepe_stable_variance = crepe_stable_alpha.square() + crepe_stable_beta.square()
+            crepe_stable_score = -crepe_stable_state / crepe_stable_variance
+            crepe_stable_g = score_model.prob_path.g(crepe_stable_time)
+            return score_model.prob_path.f(
+                crepe_stable_time, crepe_stable_state
+            ) - crepe_stable_g.square() * crepe_stable_score
+
+        def crepe_stabilizing_marginal_log_prob(
+            crepe_stable_time, crepe_stable_state
+        ):
+            crepe_stable_alpha = score_model.prob_path.alpha(crepe_stable_time)
+            crepe_stable_beta = score_model.prob_path.beta(crepe_stable_time)
+            crepe_stable_variance = crepe_stable_alpha.square() + crepe_stable_beta.square()
+            return crepe_gaussian_log_prob(
+                crepe_stable_state,
+                torch.zeros_like(crepe_stable_state),
+                crepe_stable_variance,
+            )
+
+        def crepe_path_log_rne(
+            crepe_path_times,
+            crepe_path_states,
+            crepe_ttr_drift_fn,
+            crepe_rtt_drift_fn,
+        ):
+            if crepe_rne_method.value == "ito approximation":
+                crepe_ito_terms = []
+                for crepe_ito_idx in range(crepe_path_times.numel() - 1):
+                    crepe_ito_times = crepe_path_times[crepe_ito_idx : crepe_ito_idx + 2]
+                    crepe_ito_path = crepe_path_states[crepe_ito_idx : crepe_ito_idx + 2]
+                    crepe_ito_ttr_drift = torch.stack(
+                        [
+                            crepe_ttr_drift_fn(crepe_ito_times[0], crepe_ito_path[0]),
+                            crepe_ttr_drift_fn(crepe_ito_times[1], crepe_ito_path[1]),
+                        ]
+                    )
+                    crepe_ito_rtt_drift = torch.stack(
+                        [
+                            crepe_rtt_drift_fn(crepe_ito_times[0], crepe_ito_path[0]),
+                            crepe_rtt_drift_fn(crepe_ito_times[1], crepe_ito_path[1]),
+                        ]
+                    )
+                    crepe_ito_diffusion = torch.stack(
+                        [
+                            score_model.prob_path.g(crepe_ito_times[0]),
+                            score_model.prob_path.g(crepe_ito_times[1]),
+                        ]
+                    )
+                    crepe_ito_terms.append(
+                        crepe.PathLogRatio.from_ito_integrals(
+                            crepe_ito_times,
+                            crepe_ito_path,
+                            crepe_ito_ttr_drift,
+                            crepe_ito_rtt_drift,
+                            crepe_ito_diffusion,
+                        )
+                    )
+                return torch.stack(crepe_ito_terms).sum(dim=0)
+
+            crepe_primary_ttr_logs, crepe_primary_rtt_logs = crepe_transition_logs(
+                crepe_path_times,
+                crepe_path_states,
+                crepe_ttr_drift_fn,
+                crepe_rtt_drift_fn,
+            )
+            if crepe_rne_method.value == "exact transition":
+                return crepe.PathLogRatio.from_transition_log_probabilities(
+                    crepe_primary_ttr_logs, crepe_primary_rtt_logs
+                )
+
+            crepe_stable_ttr_logs, crepe_stable_rtt_logs = crepe_transition_logs(
+                crepe_path_times,
+                crepe_path_states,
+                crepe_model_ttr_drift,
+                crepe_stabilizing_rtt_drift,
+            )
+            return crepe.PathLogRatio.from_reference_stabilized_transition_log_probabilities(
+                crepe_primary_ttr_logs,
+                crepe_primary_rtt_logs,
+                crepe_stable_ttr_logs,
+                crepe_stable_rtt_logs,
+                crepe_stabilizing_marginal_log_prob(
+                    crepe_path_times[0], crepe_path_states[0]
+                ),
+                crepe_stabilizing_marginal_log_prob(
+                    crepe_path_times[-1], crepe_path_states[-1]
                 ),
             )
 
-        if not torch.isfinite(crepe_result.samples).all():
-            raise ValueError("CREPE returned non-finite samples")
-        if not torch.isfinite(crepe_result.acceptance_rate).all():
-            raise ValueError("CREPE returned non-finite acceptance rates")
-        crepe_attempted_by_edge = crepe_result.attempt_count.sum(dim=1)
-        crepe_accepted_by_edge = crepe_result.acceptance_count.sum(dim=1)
-        crepe_acceptance_by_edge = crepe_accepted_by_edge / crepe_attempted_by_edge.clamp(min=1)
-        crepe_attempted_edge_mask = crepe_attempted_by_edge > 0
-        crepe_attempted_acceptance = crepe_acceptance_by_edge[crepe_attempted_edge_mask]
-        crepe_duplicate_fraction = 0.0
-        if crepe_result.samples.shape[0] > 1:
-            crepe_duplicate_fraction = float(
-                (crepe_result.samples[1:] == crepe_result.samples[:-1])
-                .all(dim=-1)
-                .to(torch.float32)
-                .mean()
-                .item()
+        def crepe_summarize_path(crepe_path_times, crepe_path_states):
+            crepe_model_rne = crepe_path_log_rne(
+                crepe_path_times,
+                crepe_path_states,
+                crepe_model_ttr_drift,
+                crepe_model_rtt_drift,
             )
-        crepe_total_attempted = int(crepe_result.attempt_count.sum().item())
-        crepe_total_accepted = int(crepe_result.acceptance_count.sum().item())
-        crepe_bottleneck_rates = torch.where(
-            crepe_attempted_edge_mask,
-            crepe_acceptance_by_edge,
-            torch.full_like(crepe_acceptance_by_edge, torch.inf),
-        )
-        crepe_diagnostic_values = {
-            "config_signature": crepe_config_signature,
-            "acceptance_rate_mean": crepe_total_accepted / max(crepe_total_attempted, 1),
-            "cold_edge_acceptance_rate": float(crepe_acceptance_by_edge[0].item()),
-            "minimum_edge_acceptance_rate": float(crepe_attempted_acceptance.min().item()),
-            "bottleneck_edge": int(crepe_bottleneck_rates.argmin().item()),
-            "chains_without_cold_acceptance_fraction": float(
-                (crepe_result.acceptance_count[0] == 0).to(torch.float32).mean().item()
+            crepe_proposal_rne = crepe_path_log_rne(
+                crepe_path_times,
+                crepe_path_states,
+                crepe_proposal_ttr_drift,
+                crepe_proposal_rtt_drift,
+            )
+            crepe_target_ratio = crepe.TargetLogRatio.reward_tilt(
+                crepe_model_rne,
+                crepe_log_reward(crepe_path_times[0], crepe_path_states[0]),
+                crepe_log_reward(crepe_path_times[-1], crepe_path_states[-1]),
+            )
+            return crepe_target_ratio.detach(), crepe_proposal_rne.detach()
+
+        def crepe_edge_grid(crepe_grid_t0, crepe_grid_t1):
+            _ = crepe_grid_t1
+            crepe_grid_start = torch.argmin(
+                (crepe_fine_times - crepe_grid_t0).abs()
+            )
+            crepe_grid_offsets = torch.arange(
+                crepe_edge_substeps + 1, device=crepe_fine_times.device
+            )
+            return crepe_fine_times[crepe_grid_start + crepe_grid_offsets]
+
+        def crepe_target_to_reference_path_fn(
+            crepe_path_t0, crepe_path_t1, crepe_path_lower
+        ):
+            crepe_path_times = crepe_edge_grid(crepe_path_t0, crepe_path_t1)
+            crepe_path_values = [crepe_path_lower.detach()]
+            crepe_path_current = crepe_path_lower.detach()
+            for crepe_path_idx in range(crepe_path_times.numel() - 1):
+                crepe_path_now = crepe_path_times[crepe_path_idx]
+                crepe_path_next = crepe_path_times[crepe_path_idx + 1]
+                crepe_path_dt = crepe_path_next - crepe_path_now
+                crepe_path_current = (
+                    crepe_path_current
+                    + crepe_path_dt
+                    * crepe_proposal_ttr_drift(crepe_path_now, crepe_path_current)
+                    + crepe_path_dt.sqrt()
+                    * score_model.prob_path.g(crepe_path_now)
+                    * torch.randn_like(crepe_path_current)
+                ).detach()
+                crepe_path_values.append(crepe_path_current)
+            crepe_path_states = torch.stack(crepe_path_values)
+            crepe_target_ratio, crepe_proposal_rne = crepe_summarize_path(
+                crepe_path_times, crepe_path_states
+            )
+            return crepe_path_current, crepe_target_ratio, crepe_proposal_rne
+
+        def crepe_reference_to_target_path_fn(
+            crepe_path_t0, crepe_path_t1, crepe_path_upper
+        ):
+            crepe_path_times = crepe_edge_grid(crepe_path_t0, crepe_path_t1)
+            crepe_reverse_values = [crepe_path_upper.detach()]
+            crepe_path_current = crepe_path_upper.detach()
+            for crepe_path_idx in range(crepe_path_times.numel() - 1, 0, -1):
+                crepe_path_now = crepe_path_times[crepe_path_idx]
+                crepe_path_next = crepe_path_times[crepe_path_idx - 1]
+                crepe_path_dt = crepe_path_now - crepe_path_next
+                crepe_path_current = (
+                    crepe_path_current
+                    - crepe_path_dt
+                    * crepe_proposal_rtt_drift(crepe_path_now, crepe_path_current)
+                    + crepe_path_dt.sqrt()
+                    * score_model.prob_path.g(crepe_path_now)
+                    * torch.randn_like(crepe_path_current)
+                ).detach()
+                crepe_reverse_values.append(crepe_path_current)
+            crepe_path_states = torch.stack(crepe_reverse_values[::-1])
+            crepe_target_ratio, crepe_proposal_rne = crepe_summarize_path(
+                crepe_path_times, crepe_path_states
+            )
+            return crepe_path_current, crepe_target_ratio, crepe_proposal_rne
+
+        def crepe_reference_sample(crepe_reference_time):
+            crepe_reference_index = torch.randint(
+                reference_data.shape[0], (), device=reference_data.device
+            )
+            crepe_reference_clean = reference_data[crepe_reference_index]
+            return (
+                score_model.prob_path.alpha(crepe_reference_time)
+                * crepe_reference_clean
+                + score_model.prob_path.beta(crepe_reference_time)
+                * torch.randn_like(crepe_reference_clean)
+            )
+
+        def crepe_init_path_fn(crepe_init_times):
+            if crepe_initialization.value == "independent marginals":
+                crepe_init_indices = torch.randint(
+                    reference_data.shape[0],
+                    (crepe_init_times.numel(),),
+                    device=reference_data.device,
+                )
+                crepe_init_clean = reference_data[crepe_init_indices]
+                return (
+                    score_model.prob_path.alpha(crepe_init_times)[:, None]
+                    * crepe_init_clean
+                    + score_model.prob_path.beta(crepe_init_times)[:, None]
+                    * torch.randn_like(crepe_init_clean)
+                )
+            if crepe_initialization.value == "shared clean ancestor":
+                crepe_init_index = torch.randint(
+                    reference_data.shape[0], (), device=reference_data.device
+                )
+                crepe_init_clean = reference_data[crepe_init_index]
+                return (
+                    score_model.prob_path.alpha(crepe_init_times)[:, None]
+                    * crepe_init_clean
+                    + score_model.prob_path.beta(crepe_init_times)[:, None]
+                    * torch.randn(
+                        crepe_init_times.numel(),
+                        crepe_init_clean.numel(),
+                        device=reference_data.device,
+                        dtype=reference_data.dtype,
+                    )
+                )
+
+            crepe_init_current = crepe_reference_sample(crepe_init_times[-1])
+            crepe_init_reverse = [crepe_init_current]
+            for crepe_init_idx in range(crepe_fine_times.numel() - 1, 0, -1):
+                crepe_init_now = crepe_fine_times[crepe_init_idx]
+                crepe_init_next = crepe_fine_times[crepe_init_idx - 1]
+                crepe_init_dt = crepe_init_now - crepe_init_next
+                crepe_init_current = (
+                    crepe_init_current
+                    - crepe_init_dt
+                    * crepe_proposal_rtt_drift(crepe_init_now, crepe_init_current[None])[0]
+                    + crepe_init_dt.sqrt()
+                    * score_model.prob_path.g(crepe_init_now)
+                    * torch.randn_like(crepe_init_current)
+                ).detach()
+                if (crepe_init_idx - 1) % crepe_edge_substeps == 0:
+                    crepe_init_reverse.append(crepe_init_current)
+            return torch.stack(crepe_init_reverse[::-1])
+
+        def crepe_local_exploration_fn(crepe_local_time, crepe_local_state):
+            crepe_local_index = torch.argmin(
+                (crepe_fine_times - crepe_local_time).abs()
+            )
+            crepe_local_index = crepe_local_index.clamp(0, crepe_fine_times.numel() - 2)
+            crepe_local_dt = (
+                crepe_fine_times[crepe_local_index + 1]
+                - crepe_fine_times[crepe_local_index]
+            )
+            crepe_local_result = crepe_local_state.detach()
+            for crepe_local_idx in range(int(crepe_local_steps.value)):
+                crepe_local_target_score = score_model._score_particles(
+                    crepe_local_time, crepe_local_result
+                ) + crepe_reward_gradient(crepe_local_time, crepe_local_result)
+                crepe_local_h = (
+                    0.5
+                    * score_model.prob_path.g(crepe_local_time).square()
+                    * crepe_local_dt
+                    * float(crepe_local_scale.value)
+                )
+                crepe_local_result = (
+                    crepe_local_result
+                    + crepe_local_h * crepe_local_target_score
+                    + (2.0 * crepe_local_h).sqrt()
+                    * torch.randn_like(crepe_local_result)
+                ).detach()
+            return crepe_local_result
+
+        crepe_sampler = crepe.CREPE(
+            init_path_fn=crepe_init_path_fn,
+            target_to_reference_path_fn=crepe_target_to_reference_path_fn,
+            reference_to_target_path_fn=crepe_reference_to_target_path_fn,
+            local_exploration_fn=(
+                crepe_local_exploration_fn
+                if crepe_local_exploration.value
+                else None
             ),
-            "duplicate_fraction": crepe_duplicate_fraction,
-            "accepted": crepe_total_accepted,
-            "attempted": crepe_total_attempted,
-            "iteration_count": crepe_iteration_count,
-            "full_sweep_equivalents": crepe_iteration_count / 2,
-            "saved_iterations": int(crepe_result.samples.shape[0]),
-            "chain_count": int(crepe_result.samples.shape[1]),
-            "replica_count": int(crepe_times.numel()),
-            "minimum_time_step": float((crepe_times[1:] - crepe_times[:-1]).min().item()),
-            "maximum_time_step": float((crepe_times[1:] - crepe_times[:-1]).max().item()),
-            "acceptance_rate_by_edge": crepe_acceptance_by_edge.cpu().tolist(),
-            "accepted_by_edge": crepe_accepted_by_edge.cpu().tolist(),
-            "attempted_by_edge": crepe_attempted_by_edge.cpu().tolist(),
-        }
-        set_crepe_samples(crepe_result.samples)
-        set_crepe_diagnostics(crepe_diagnostic_values)
+            refresh_reference_fn=(
+                crepe_reference_sample if crepe_refresh_reference.value else None
+            ),
+        )
+        crepe_iteration_count = int(crepe_burn_in.value) + (
+            int(crepe_num_samples.value) - 1
+        ) * int(crepe_thinning.value) + 1
+        crepe_result = crepe_sampler.run(
+            crepe_replica_times,
+            crepe_iteration_count,
+            batch_size=int(batch_size.value),
+            should_save_sample_fn=functools.partial(
+                crepe.SaveSampleFn.burn_in_and_thin,
+                burn_in=int(crepe_burn_in.value),
+                thin=int(crepe_thinning.value),
+            ),
+        )
+
+        crepe_output_samples = crepe_result.samples.detach()
+        if crepe_min_time.item() > 0.0:
+            crepe_output_shape = crepe_output_samples.shape
+            crepe_continuation = crepe_output_samples.reshape(-1, 1)
+            crepe_continuation_times = torch.linspace(
+                crepe_min_time,
+                0.0,
+                int(crepe_continuation_steps.value) + 1,
+                device=reference_data.device,
+                dtype=reference_data.dtype,
+            )
+            for crepe_cont_idx in range(crepe_continuation_times.numel() - 1):
+                crepe_cont_now = crepe_continuation_times[crepe_cont_idx]
+                crepe_cont_next = crepe_continuation_times[crepe_cont_idx + 1]
+                crepe_cont_dt = crepe_cont_now - crepe_cont_next
+                crepe_continuation = (
+                    crepe_continuation
+                    - crepe_cont_dt
+                    * crepe_proposal_rtt_drift(crepe_cont_now, crepe_continuation)
+                    + crepe_cont_dt.sqrt()
+                    * score_model.prob_path.g(crepe_cont_now)
+                    * torch.randn_like(crepe_continuation)
+                ).detach()
+            crepe_output_samples = crepe_continuation.reshape(crepe_output_shape)
+
+        crepe_attempted = crepe_result.attempt_count > 0
+        crepe_acceptance_mean = float(
+            crepe_result.acceptance_rate[crepe_attempted].mean().item()
+        )
+        set_crepe_samples(crepe_output_samples)
+        set_crepe_diagnostics(
+            {
+                "config_signature": crepe_config_signature,
+                "acceptance_rate_mean": crepe_acceptance_mean,
+                "acceptance_rate": crepe_result.acceptance_rate.detach().cpu(),
+                "acceptance_count": crepe_result.acceptance_count.detach().cpu(),
+                "attempt_count": crepe_result.attempt_count.detach().cpu(),
+                "replica_times": crepe_replica_times.detach().cpu(),
+                "fine_times": crepe_fine_times.detach().cpu(),
+                "replica_count": int(crepe_replica_times.numel()),
+                "edge_count": int(crepe_replica_times.numel() - 1),
+                "substeps": crepe_edge_substeps,
+                "iteration_count": crepe_iteration_count,
+                "retained_batches": int(crepe_output_samples.shape[0]),
+                "batch_size": int(crepe_output_samples.shape[1]),
+                "initialization": crepe_initialization.value,
+                "rne_method": crepe_rne_method.value,
+                "time_spacing": crepe_time_spacing.value,
+                "time_min": float(crepe_replica_times[0].item()),
+                "time_max": float(crepe_replica_times[-1].item()),
+                "karras_rho": float(crepe_karras_rho.value),
+                "reward_at_target": crepe_reward_ceiling,
+                "reward_at_reference": crepe_reward_floor,
+                "reward_power": crepe_reward_exponent,
+                "inverse_temperature": crepe_reward_beta,
+                "target_to_reference_score_scale": crepe_ttr_score,
+                "reference_to_target_score_scale": crepe_rtt_score,
+                "target_to_reference_reward_scale": crepe_ttr_reward,
+                "reference_to_target_reward_scale": crepe_rtt_reward,
+                "local_exploration": bool(crepe_local_exploration.value),
+                "reference_refresh": bool(crepe_refresh_reference.value),
+            }
+        )
     return
 
 
@@ -1082,11 +1466,30 @@ def _(mean_array, std_array, torch, weight_array):
 def _(
     batch_size,
     crepe_burn_in,
+    crepe_continuation_steps,
+    crepe_gradient_clip,
+    crepe_initialization,
     crepe_inverse_temp,
+    crepe_karras_rho,
+    crepe_local_exploration,
+    crepe_local_scale,
+    crepe_local_steps,
     crepe_num_samples,
     crepe_refresh_reference,
+    crepe_replica_count,
     crepe_reward_power,
+    crepe_reward_reference,
+    crepe_reward_target,
+    crepe_rne_method,
+    crepe_rtt_reward_scale,
+    crepe_rtt_score_scale,
+    crepe_substeps,
     crepe_thinning,
+    crepe_time_max,
+    crepe_time_min,
+    crepe_time_spacing,
+    crepe_ttr_reward_scale,
+    crepe_ttr_score_scale,
     device,
     epsilon_alpha,
     epsilon_beta,
@@ -1117,7 +1520,26 @@ def _(
         int(crepe_thinning.value),
         float(crepe_inverse_temp.value),
         float(crepe_reward_power.value),
+        float(crepe_reward_reference.value),
+        float(crepe_reward_target.value),
         bool(crepe_refresh_reference.value),
+        int(crepe_replica_count.value),
+        int(crepe_substeps.value),
+        float(crepe_time_min.value),
+        float(crepe_time_max.value),
+        crepe_time_spacing.value,
+        float(crepe_karras_rho.value),
+        int(crepe_continuation_steps.value),
+        float(crepe_ttr_score_scale.value),
+        float(crepe_rtt_score_scale.value),
+        float(crepe_ttr_reward_scale.value),
+        float(crepe_rtt_reward_scale.value),
+        float(crepe_gradient_clip.value),
+        crepe_initialization.value,
+        crepe_rne_method.value,
+        bool(crepe_local_exploration.value),
+        int(crepe_local_steps.value),
+        float(crepe_local_scale.value),
     )
     return (crepe_config_signature,)
 
@@ -1227,6 +1649,97 @@ def _(
 
     timesteps = score_model.prob_path.linspace_time(cfg.sampling_time_step_count, device=reference_data.device)
     return reference_data, score_model, timesteps
+
+
+@app.cell
+def _(
+    crepe_karras_rho,
+    crepe_replica_count,
+    crepe_substeps,
+    crepe_time_max,
+    crepe_time_min,
+    crepe_time_spacing,
+    reference_data,
+    score_model,
+    torch,
+):
+    crepe_ladder_min = float(crepe_time_min.value)
+    crepe_ladder_max = float(crepe_time_max.value)
+    if not 0.0 <= crepe_ladder_min < crepe_ladder_max <= 1.0:
+        raise ValueError("CREPE requires 0 <= time_min < time_max <= 1")
+    crepe_ladder_replica_count = int(crepe_replica_count.value)
+    crepe_ladder_substeps = int(crepe_substeps.value)
+    crepe_ladder_point_count = (
+        crepe_ladder_replica_count - 1
+    ) * crepe_ladder_substeps + 1
+    crepe_ladder_ramp = torch.linspace(
+        0.0,
+        1.0,
+        crepe_ladder_point_count,
+        device=reference_data.device,
+        dtype=reference_data.dtype,
+    )
+    if crepe_time_spacing.value == "linear":
+        crepe_fine_times = crepe_ladder_min + (
+            crepe_ladder_max - crepe_ladder_min
+        ) * crepe_ladder_ramp
+    else:
+        crepe_ladder_rho = float(crepe_karras_rho.value)
+        crepe_ladder_min_tensor = reference_data.new_tensor(crepe_ladder_min)
+        crepe_ladder_max_tensor = reference_data.new_tensor(crepe_ladder_max)
+
+        def crepe_effective_sigma(crepe_sigma_time):
+            return (
+                score_model.prob_path.beta(crepe_sigma_time)
+                / score_model.prob_path.alpha(crepe_sigma_time)
+            )
+
+        crepe_ladder_sigma_min = crepe_effective_sigma(crepe_ladder_min_tensor)
+        crepe_ladder_sigma_max = crepe_effective_sigma(crepe_ladder_max_tensor)
+        crepe_ladder_sigma_grid = (
+            crepe_ladder_sigma_min.pow(1.0 / crepe_ladder_rho)
+            + (
+                crepe_ladder_sigma_max.pow(1.0 / crepe_ladder_rho)
+                - crepe_ladder_sigma_min.pow(1.0 / crepe_ladder_rho)
+            )
+            * crepe_ladder_ramp
+        ).pow(crepe_ladder_rho)
+
+        crepe_ladder_time_lower = torch.full_like(
+            crepe_ladder_sigma_grid, crepe_ladder_min
+        )
+        crepe_ladder_time_upper = torch.full_like(
+            crepe_ladder_sigma_grid, crepe_ladder_max
+        )
+        for crepe_ladder_bisection_idx in range(48):
+            crepe_ladder_time_midpoint = (
+                crepe_ladder_time_lower + crepe_ladder_time_upper
+            ) / 2
+            crepe_ladder_midpoint_sigma = crepe_effective_sigma(
+                crepe_ladder_time_midpoint
+            )
+            crepe_ladder_time_lower = torch.where(
+                crepe_ladder_midpoint_sigma < crepe_ladder_sigma_grid,
+                crepe_ladder_time_midpoint,
+                crepe_ladder_time_lower,
+            )
+            crepe_ladder_time_upper = torch.where(
+                crepe_ladder_midpoint_sigma < crepe_ladder_sigma_grid,
+                crepe_ladder_time_upper,
+                crepe_ladder_time_midpoint,
+            )
+        crepe_ladder_interior_times = (
+            crepe_ladder_time_lower + crepe_ladder_time_upper
+        )[1:-1] / 2
+        crepe_fine_times = torch.cat(
+            (
+                crepe_ladder_min_tensor[None],
+                crepe_ladder_interior_times,
+                crepe_ladder_max_tensor[None],
+            )
+        )
+    crepe_replica_times = crepe_fine_times[::crepe_ladder_substeps]
+    return crepe_fine_times, crepe_replica_times
 
 
 @app.cell
