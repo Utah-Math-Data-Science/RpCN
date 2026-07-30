@@ -643,18 +643,26 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     crepe_final,
+    crepe_inverse_temp,
     das_final,
+    das_inverse_temperature,
     fk_final,
+    fk_inverse_temperature,
     hist_bin_edges,
     hist_range,
+    means,
     mh_final,
+    mh_inverse_temp,
     mo,
     np,
     pl,
     reward_fn,
     rpcn_final,
+    rpcn_inverse_temp_max,
+    stds,
     torch,
     unsteered_samples,
+    weights,
 ):
     has_samples_stats = not (unsteered_samples is None and fk_final is None and das_final is None and rpcn_final is None and crepe_final is None and mh_final is None)
     stats_bin_count = len(hist_bin_edges) - 1
@@ -692,29 +700,99 @@ def _(
             .sort("method", descending=True)
         )
 
+        stats_kl_eps = 1e-8
+
+        def stats_histogram_probability(stats_values):
+            stats_counts, _ = np.histogram(stats_values, bins=hist_bin_edges)
+            stats_probability = stats_counts.astype(np.float64) + stats_kl_eps
+            return stats_probability / stats_probability.sum()
+
+        def stats_discrete_kl(stats_p, stats_q):
+            stats_positive_p = stats_p > 0
+            return float(
+                np.sum(
+                    stats_p[stats_positive_p]
+                    * (
+                        np.log(stats_p[stats_positive_p])
+                        - np.log(stats_q[stats_positive_p])
+                    )
+                )
+            )
+
+        stats_method_names = summary["method"].to_list()
+        stats_method_probabilities = {
+            stats_method_name: stats_histogram_probability(
+                stats_df.filter(pl.col("method") == stats_method_name)["x"].to_numpy()
+            )
+            for stats_method_name in stats_method_names
+        }
+
         kl_by_method = {}
         if mh_final is not None:
-            eps = 1e-8
-            mh_x = mh_final[:, 0].cpu().numpy()
-            mh_counts, _ = np.histogram(mh_x, bins=hist_bin_edges)
-            p_mh = (mh_counts.astype(np.float64) + eps)
-            p_mh = p_mh / p_mh.sum()
-
-            for stats_method_name in summary["method"].to_list():
-                if stats_method_name == "MH":
-                    kl_by_method[stats_method_name] = 0.0
-                    continue
-                method_x = stats_df.filter(pl.col("method") == stats_method_name)["x"].to_numpy()
-                method_counts, _ = np.histogram(method_x, bins=hist_bin_edges)
-                p_method = (method_counts.astype(np.float64) + eps)
-                p_method = p_method / p_method.sum()
-                kl_by_method[stats_method_name] = float(np.sum(p_mh * (np.log(p_mh) - np.log(p_method))))
+            stats_mh_probability = stats_method_probabilities["MH"]
+            for stats_method_name in stats_method_names:
+                kl_by_method[stats_method_name] = stats_discrete_kl(
+                    stats_mh_probability,
+                    stats_method_probabilities[stats_method_name],
+                )
         else:
-            for stats_method_name in summary["method"].to_list():
+            for stats_method_name in stats_method_names:
                 kl_by_method[stats_method_name] = None
 
         summary = summary.with_columns(
-            pl.Series("kl_to_mh", [kl_by_method[m] for m in summary["method"].to_list()])
+            pl.Series("kl_to_mh", [kl_by_method[m] for m in stats_method_names])
+        )
+
+        stats_edges = torch.as_tensor(hist_bin_edges, dtype=torch.float64)
+        stats_standardized_edges = (
+            stats_edges[:, None] - means.to(dtype=torch.float64)[None, :]
+        ) / stds.to(dtype=torch.float64)[None, :]
+        stats_component_cdf = 0.5 * (
+            1.0 + torch.erf(stats_standardized_edges / np.sqrt(2.0))
+        )
+        stats_base_cdf = (
+            stats_component_cdf * weights.to(dtype=torch.float64)[None, :]
+        ).sum(dim=1)
+        stats_base_probability = (
+            stats_base_cdf[1:] - stats_base_cdf[:-1]
+        ).clamp_min(1e-300).cpu().numpy()
+        stats_base_probability /= stats_base_probability.sum()
+
+        stats_beta_by_method = {
+            "Unsteered": 0.0,
+            "FK": float(fk_inverse_temperature.value),
+            "DAS": float(das_inverse_temperature.value),
+            "RpCN": float(rpcn_inverse_temp_max.value),
+            "CREPE": float(crepe_inverse_temp.value),
+            "MH": float(mh_inverse_temp.value),
+        }
+        stats_kl_to_untilted = {}
+        stats_objective = {}
+        for stats_method_name in stats_method_names:
+            stats_untilted_kl = stats_discrete_kl(
+                stats_method_probabilities[stats_method_name],
+                stats_base_probability,
+            )
+            stats_kl_to_untilted[stats_method_name] = stats_untilted_kl
+            stats_method_beta = stats_beta_by_method[stats_method_name]
+            stats_reward_mean = summary.filter(
+                pl.col("method") == stats_method_name
+            )["reward_mean"].item()
+            stats_objective[stats_method_name] = (
+                stats_reward_mean - stats_untilted_kl / stats_method_beta
+                if stats_method_beta > 0.0
+                else None
+            )
+
+        summary = summary.with_columns(
+            pl.Series(
+                "reward_minus_kl_over_beta",
+                [stats_objective[m] for m in stats_method_names],
+            ),
+            pl.Series(
+                "kl_to_untilted",
+                [stats_kl_to_untilted[m] for m in stats_method_names],
+            ),
         )
 
         stats_view = mo.vstack(
