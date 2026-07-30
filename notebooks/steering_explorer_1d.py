@@ -158,18 +158,60 @@ def _(mo, pl, reward_values, sns, x_grid):
         y="reward",
         kind="line",
         height=3.5,
-        aspect=10 / 3.5,
+        # aspect=10 / 3.5,
         color="tab:red",
         linewidth=2.0,
-    )
+    ).set(xlim=(-5, 5))
     reward_ax = reward_plot.axes.flat[0]
-    reward_ax.set_title("Reward Preview")
+    # reward_ax.set_title("Reward Preview")
     reward_ax.set_xlabel("x")
     reward_ax.set_ylabel("reward")
     reward_ax.grid(alpha=0.2)
     reward_plot.figure.tight_layout()
     reward_view = mo.vstack([mo.md("## Reward Preview"), mo.as_html(reward_plot.figure)])
     reward_view
+    return
+
+
+@app.cell(hide_code=True)
+def _(gmm_density, mh_inverse_temp, mo, pl, reward_values, sns, torch, x_grid):
+    tilted_reward_values = torch.exp(
+        float(mh_inverse_temp.value) * reward_values
+    )
+    unnormalized_tilted_density = gmm_density * tilted_reward_values
+    tilted_density_df = pl.DataFrame(
+        {
+            "x": x_grid.cpu().numpy().tolist(),
+            "unnormalized_density": (unnormalized_tilted_density / 1e9).cpu().numpy().tolist(),
+        }
+    )
+    tilted_density_plot = sns.relplot(
+        data=tilted_density_df.to_dict(as_series=False),
+        x="x",
+        y="unnormalized_density",
+        kind="line",
+        height=3.5,
+        # aspect=10 / 3.5,
+        color="tab:purple",
+        linewidth=2.0,
+    ).set(xlim=(-5, 5), xlabel='', ylabel='', xticks=[-3.1, 0, 3.1])
+    tilted_density_ax = tilted_density_plot.axes.flat[0]
+    tilted_density_ax.set_title(
+        r"$\propto p(x)\exp(\beta R(x))$"
+        # f"Unnormalized Reward-Tilted GMM (beta={float(mh_inverse_temp.value):g})"
+    )
+    # tilted_density_ax.set_xlabel("x")
+    # tilted_density_ax.set_ylabel("unnormalized density")
+    tilted_density_ax.grid(alpha=0.2)
+    tilted_density_plot.figure.tight_layout()
+    tilted_density_view = mo.vstack(
+        [
+            mo.md("## Unnormalized Reward-Tilted Density"),
+            mo.md(r"$\tilde{p}(x) = p_{\mathrm{GMM}}(x)\exp(\beta r(x))$"),
+            mo.as_html(tilted_density_plot.figure),
+        ]
+    )
+    tilted_density_view
     return
 
 
@@ -282,7 +324,8 @@ def _(
                 legend=False,
             )
             .set(
-                ylim=(0, gmm_density.max() * 1.504),
+                # ylim=(0, gmm_density.max() * 1.504),
+                ylim=(0, 0.8),
             )
             .set_titles('')
         )
@@ -351,7 +394,7 @@ def _(plot_histogram, toy):
 def _(mo):
     seed = mo.ui.number(start=0, stop=100000, value=31, label="seed")
     device = mo.ui.dropdown(options=["cpu", "cuda"], value="cuda", label="device")
-    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=2, label="batch_size")
+    batch_size = mo.ui.number(start=1, stop=4096, step=1, value=1024, label="batch_size")
     n_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="n_steps")
     n_reference = mo.ui.number(start=128, stop=32768, step=128, value=1024, label="n_reference")
 
@@ -379,20 +422,23 @@ def _(mo):
     das_n_particles = mo.ui.number(start=2, stop=128, step=1, value=20, label="das_n_particles")
     das_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="das_inverse_temperature")
     das_proposal_scale = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=1.0, label="das_proposal_scale")
-    das_tempering_gamma = mo.ui.number(start=0.0, stop=1.0, value=0.003, label="das_tempering_gamma")
+    das_tempering_gamma = mo.ui.number(start=0.0, stop=1.0, value=0.001, label="das_tempering_gamma")
     das_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="das_ess_threshold")
 
     rpcn_n_chains = mo.ui.number(start=2, stop=128, step=1, value=4, label="rpcn_n_chains")
-    rpcn_update_count = mo.ui.number(start=1, stop=200, step=1, value=5, label="rpcn_update_count")
+    rpcn_update_count = mo.ui.number(start=1, stop=200, step=1, value=8, label="rpcn_update_count")
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
     rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=25.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
+    rpcn_burn_in_frac = mo.ui.number(start=0, stop=1, step=0.01, value=0.20, label="rpcn_burn_in_frac")
 
     mh_num_chains = mo.ui.number(start=1, stop=256, step=1, value=64, label="mh_num_chains")
     mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
     mh_burn_in = mo.ui.number(start=0, stop=20000, step=50, value=2000, label="mh_burn_in")
     mh_thinning = mo.ui.number(start=1, stop=50, step=1, value=2, label="mh_thinning")
     mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.4, label="mh_proposal_std")
+    mh_global_proposal_std = mo.ui.number(start=0.01, stop=30.0, step=0.01, value=3.0, label="mh_global_proposal_std")
+    mh_global_proposal_probability = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.1, label="mh_global_proposal_probability")
     mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="mh_inverse_temp")
 
     crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=512, label="crepe_num_samples")
@@ -439,7 +485,7 @@ def _(mo):
 
     controls = mo.vstack(
         [
-            mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_inverse_temp, run_mh], justify="start"),
+            mo.hstack([mh_num_chains, mh_num_samples, mh_burn_in, mh_thinning, mh_proposal_std, mh_global_proposal_std, mh_global_proposal_probability, mh_inverse_temp, run_mh], justify="start"),
             mo.md("## Experiment Controls"),
             mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
@@ -447,7 +493,7 @@ def _(mo):
             mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([das_n_particles, das_inverse_temperature, das_proposal_scale, das_tempering_gamma, das_resample_threshold], justify="start"),
             mo.md("DAS uses the paper's exponential schedule `lambda_i=min((1+gamma)^i-1, 1)` and enforces terminal `lambda=1`. Set `das_proposal_scale=1` for the undamped Gaussian proposal; smaller values retain the exact importance correction while improving finite-particle stability for this non-concave reward."),
-            mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_check_every], justify="start"),
+            mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_burn_in_frac, rpcn_check_every], justify="start"),
             mo.hstack([mo.md("### CREPE"), run_crepe]),
             mo.hstack([crepe_num_samples, crepe_burn_in, crepe_thinning, crepe_inverse_temp, crepe_refresh_reference], justify="start"),
             mo.hstack([crepe_replica_count, crepe_substeps, crepe_time_min, crepe_time_max, crepe_time_spacing, crepe_karras_rho, crepe_continuation_steps], justify="start"),
@@ -564,6 +610,8 @@ def _(mo):
         fk_resample_threshold,
         fk_temperature_count,
         mh_burn_in,
+        mh_global_proposal_probability,
+        mh_global_proposal_std,
         mh_inverse_temp,
         mh_num_chains,
         mh_num_samples,
@@ -573,6 +621,7 @@ def _(mo):
         n_reference,
         n_steps,
         rpcn_angle_min,
+        rpcn_burn_in_frac,
         rpcn_check_every,
         rpcn_inverse_temp_max,
         rpcn_n_chains,
@@ -697,15 +746,23 @@ def _(mh_diagnostics, mo):
             status_label = "Good"
             hint = "Acceptance is in a healthy range."
 
+        mh_local_acceptance = mh_diagnostics["local_acceptance_rate"]
+        mh_global_acceptance = mh_diagnostics["global_acceptance_rate"]
         mh_diag_table = [
             {"metric": "acceptance_rate", "value": f"{acceptance_rate:.4f}"},
+            {"metric": "local_acceptance_rate", "value": "disabled" if mh_local_acceptance is None else f"{mh_local_acceptance:.4f}"},
+            {"metric": "global_acceptance_rate", "value": "disabled" if mh_global_acceptance is None else f"{mh_global_acceptance:.4f}"},
             {"metric": "accepted", "value": int(mh_diagnostics["accepted"])},
             {"metric": "proposed", "value": int(mh_diagnostics["proposed"])},
+            {"metric": "global_accepted", "value": int(mh_diagnostics["global_accepted"])},
+            {"metric": "global_proposed", "value": int(mh_diagnostics["global_proposed"])},
             {"metric": "num_chains", "value": int(mh_diagnostics["num_chains"])},
             {"metric": "num_samples_per_chain", "value": int(mh_diagnostics["num_samples"])},
             {"metric": "burn_in", "value": int(mh_diagnostics["burn_in"])},
             {"metric": "thinning", "value": int(mh_diagnostics["thinning"])},
             {"metric": "proposal_std", "value": float(mh_diagnostics["proposal_std"])},
+            {"metric": "global_proposal_std", "value": float(mh_diagnostics["global_proposal_std"])},
+            {"metric": "global_proposal_probability", "value": float(mh_diagnostics["global_proposal_probability"])},
             {"metric": "init_source", "value": mh_diagnostics["init_source"]},
         ]
         mh_diag_view = mo.vstack(
@@ -794,6 +851,7 @@ def _(
     reward_fn,
     rpcn,
     rpcn_angle_min,
+    rpcn_burn_in_frac,
     rpcn_check_every,
     rpcn_inverse_temp_max,
     rpcn_n_chains,
@@ -837,7 +895,7 @@ def _(
 
         def rpcn_update_fn(step_idx, t0, t1, reward):
             _ = (t0, t1, reward)
-            return (step_idx >= 5) and (step_idx % int(rpcn_check_every.value) == 0)
+            return (step_idx >= timesteps.numel() * float(rpcn_burn_in_frac.value)) and (step_idx % int(rpcn_check_every.value) == 0)
 
         with torch.no_grad():
             set_rpcn_samples(
@@ -1403,6 +1461,8 @@ def _(
     gmm_sample,
     metropolis_hastings_sample,
     mh_burn_in,
+    mh_global_proposal_probability,
+    mh_global_proposal_std,
     mh_inverse_temp,
     mh_num_chains,
     mh_num_samples,
@@ -1433,6 +1493,8 @@ def _(
             dim=1,
             burn_in=int(mh_burn_in.value),
             proposal_std=float(mh_proposal_std.value),
+            global_proposal_std=float(mh_global_proposal_std.value),
+            global_proposal_probability=float(mh_global_proposal_probability.value),
             thinning=int(mh_thinning.value),
             initial_x=gmm_sample(int(mh_num_chains.value), selected_device_mh),
             device=selected_device_obj,
@@ -1445,6 +1507,8 @@ def _(
                 "burn_in": int(mh_burn_in.value),
                 "thinning": int(mh_thinning.value),
                 "proposal_std": float(mh_proposal_std.value),
+                "global_proposal_std": float(mh_global_proposal_std.value),
+                "global_proposal_probability": float(mh_global_proposal_probability.value),
                 "init_source": "gmm_sample",
             }
         )
@@ -1847,7 +1911,7 @@ def _(
             reward_fn=reward_fn,
             propose_fn=propose_step,
             resample_fn=adaptive_resample_safe,
-            potential=fk_steering.Potential.DIFFERENCE,
+            potential=fk_steering.Potential.MAX,
             intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,
             inverse_temperature=fk_inverse_temperatures,
             kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},
