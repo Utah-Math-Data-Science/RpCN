@@ -40,7 +40,6 @@ def _():
         rpcn,
         sns,
         torch,
-        toy,
     )
 
 
@@ -380,13 +379,13 @@ def _(
     else:
         comparison_view = mo.md("Run one or more samplers to generate samples.")
     comparison_view
-    return (plot_histogram,)
+    return
 
 
 @app.cell
-def _(plot_histogram, toy):
-    if plot_histogram is not None:
-        toy.plots.save_all_subfigures(plot_histogram, 'Histogram')
+def _():
+    # if plot_histogram is not None:
+    #     toy.plots.save_all_subfigures(plot_histogram, 'Histogram')
     return
 
 
@@ -441,8 +440,8 @@ def _(mo):
     mh_global_proposal_probability = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.1, label="mh_global_proposal_probability")
     mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="mh_inverse_temp")
 
-    crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=512, label="crepe_num_samples")
-    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=1, value=50, label="crepe_burn_in")
+    crepe_num_samples = mo.ui.number(start=1, stop=1000, step=1, value=1, label="crepe_num_samples")
+    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=1, value=49, label="crepe_burn_in")
     crepe_thinning = mo.ui.number(start=1, stop=1000, step=1, value=1, label="crepe_thinning")
     crepe_inverse_temp = mo.ui.number(start=0.0, step=0.05, value=25.0, label="crepe_inverse_temperature")
     crepe_reward_power = mo.ui.number(start=0.05, stop=10.0, step=0.05, value=1.0, label="crepe_reward_schedule_power")
@@ -450,17 +449,17 @@ def _(mo):
     crepe_reward_target = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=1.0, label="crepe_reward_at_target")
     crepe_refresh_reference = mo.ui.checkbox(value=True, label="crepe_refresh_reference")
 
-    crepe_replica_count = mo.ui.number(start=2, stop=1000, step=1, value=51, label="crepe_replica_count")
-    crepe_substeps = mo.ui.number(start=1, stop=64, step=1, value=1, label="crepe_edge_substeps_K")
-    crepe_time_min = mo.ui.number(start=0.0, stop=0.99, step=0.001, value=0.001, label="crepe_time_min")
+    crepe_replica_count = mo.ui.number(start=2, stop=1000, step=1, value=9, label="crepe_replica_count")
+    crepe_substeps = mo.ui.number(start=1, stop=64, step=1, value=5, label="crepe_edge_substeps_K")
+    crepe_time_min = mo.ui.number(start=0.0, stop=0.99, step=0.001, value=0.02, label="crepe_time_min")
     crepe_time_max = mo.ui.number(start=0.01, stop=1.0, step=0.001, value=1.0, label="crepe_time_max")
     crepe_time_spacing = mo.ui.dropdown(options=["linear", "karras"], value="karras", label="crepe_time_spacing")
     crepe_karras_rho = mo.ui.number(start=0.1, stop=20.0, step=0.1, value=7.0, label="crepe_karras_rho")
-    crepe_continuation_steps = mo.ui.number(start=1, stop=1000, step=1, value=20, label="crepe_continuation_steps")
+    # crepe_continuation_steps = mo.ui.number(start=1, stop=1000, step=1, value=20, label="crepe_continuation_steps")
     crepe_ttr_score_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=0.0, label="crepe_target_to_reference_score_scale")
     crepe_rtt_score_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=1.0, label="crepe_reference_to_target_score_scale")
     crepe_ttr_reward_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=0.0, label="crepe_target_to_reference_reward_gradient_scale")
-    crepe_rtt_reward_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=1.0, label="crepe_reference_to_target_reward_gradient_scale")
+    crepe_rtt_reward_scale = mo.ui.number(start=0.0, stop=5.0, step=0.05, value=0.0, label="crepe_reference_to_target_reward_gradient_scale")
     crepe_gradient_clip = mo.ui.number(start=0.0, stop=10000.0, step=1.0, value=1000.0, label="crepe_reward_gradient_clip")
     crepe_initialization = mo.ui.dropdown(
         options=["denoising path", "independent marginals", "shared clean ancestor"],
@@ -496,7 +495,9 @@ def _(mo):
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_burn_in_frac, rpcn_check_every], justify="start"),
             mo.hstack([mo.md("### CREPE"), run_crepe]),
             mo.hstack([crepe_num_samples, crepe_burn_in, crepe_thinning, crepe_inverse_temp, crepe_refresh_reference], justify="start"),
-            mo.hstack([crepe_replica_count, crepe_substeps, crepe_time_min, crepe_time_max, crepe_time_spacing, crepe_karras_rho, crepe_continuation_steps], justify="start"),
+            mo.hstack([crepe_replica_count, crepe_substeps, crepe_time_min, crepe_time_max, crepe_time_spacing, crepe_karras_rho,
+                       # crepe_continuation_steps,
+                      ], justify="start"),
             mo.hstack([crepe_reward_target, crepe_reward_reference, crepe_reward_power], justify="start"),
             mo.hstack([crepe_ttr_score_scale, crepe_rtt_score_scale, crepe_ttr_reward_scale, crepe_rtt_reward_scale, crepe_gradient_clip], justify="start"),
             mo.hstack([crepe_initialization, crepe_rne_method, crepe_local_exploration, crepe_local_steps, crepe_local_scale], justify="start"),
@@ -572,7 +573,6 @@ def _(mo):
     return (
         batch_size,
         crepe_burn_in,
-        crepe_continuation_steps,
         crepe_gradient_clip,
         crepe_initialization,
         crepe_inverse_temp,
@@ -993,7 +993,6 @@ def _(
     crepe,
     crepe_burn_in,
     crepe_config_signature,
-    crepe_continuation_steps,
     crepe_fine_times,
     crepe_gradient_clip,
     crepe_initialization,
@@ -1013,10 +1012,12 @@ def _(
     crepe_rtt_score_scale,
     crepe_substeps,
     crepe_thinning,
+    crepe_time_min,
     crepe_time_spacing,
     crepe_ttr_reward_scale,
     crepe_ttr_score_scale,
     functools,
+    math,
     reference_data,
     reward_fn,
     run_crepe,
@@ -1467,13 +1468,16 @@ def _(
         )
 
         crepe_output_samples = crepe_result.samples.detach()
+        crepe_continuation_steps = 0
         if crepe_min_time.item() > 0.0:
+            crepe_continuation_steps = math.ceil(crepe_fine_times.numel() * crepe_time_min.value)
             crepe_output_shape = crepe_output_samples.shape
             crepe_continuation = crepe_output_samples.reshape(-1, 1)
             crepe_continuation_times = torch.linspace(
                 crepe_min_time,
                 0.0,
-                int(crepe_continuation_steps.value) + 1,
+                crepe_continuation_steps,
+                # int(crepe_continuation_steps.value) + 1,
                 device=reference_data.device,
                 dtype=reference_data.dtype,
             )
@@ -1608,7 +1612,6 @@ def _(mean_array, std_array, torch, weight_array):
 def _(
     batch_size,
     crepe_burn_in,
-    crepe_continuation_steps,
     crepe_gradient_clip,
     crepe_initialization,
     crepe_inverse_temp,
@@ -1671,7 +1674,7 @@ def _(
         float(crepe_time_max.value),
         crepe_time_spacing.value,
         float(crepe_karras_rho.value),
-        int(crepe_continuation_steps.value),
+        # crepe_continuation_steps,
         float(crepe_ttr_score_scale.value),
         float(crepe_rtt_score_scale.value),
         float(crepe_ttr_reward_scale.value),

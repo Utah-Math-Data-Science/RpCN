@@ -16,6 +16,8 @@ def metropolis_hastings_sample(
     initial_x=None,
     device=None,
     dtype=torch.float32,
+    global_proposal_std=None,
+    global_proposal_probability=0.0,
 ):
     if num_chains <= 0:
         raise ValueError("num_chains must be positive")
@@ -27,6 +29,14 @@ def metropolis_hastings_sample(
         raise ValueError("burn_in must be non-negative")
     if proposal_std <= 0:
         raise ValueError("proposal_std must be positive")
+    if not 0.0 <= global_proposal_probability <= 1.0:
+        raise ValueError("global_proposal_probability must be between zero and one")
+    if global_proposal_probability > 0.0 and (
+        global_proposal_std is None or global_proposal_std <= 0
+    ):
+        raise ValueError(
+            "global_proposal_std must be positive when global proposals are enabled"
+        )
     if thinning <= 0:
         raise ValueError("thinning must be positive")
 
@@ -52,9 +62,27 @@ def metropolis_hastings_sample(
     samples = []
     accepted = 0
     proposed = 0
+    local_accepted = 0
+    local_proposed = 0
+    global_accepted = 0
+    global_proposed = 0
+    use_global_proposals = global_proposal_probability > 0.0
 
     for step_idx in range(total_steps):
-        proposal = x + proposal_std * torch.randn_like(x)
+        if use_global_proposals:
+            global_mask = (
+                torch.rand((num_chains,), device=x.device, dtype=x.dtype)
+                < global_proposal_probability
+            )
+            proposal_scales = torch.where(
+                global_mask,
+                torch.as_tensor(global_proposal_std, device=x.device, dtype=x.dtype),
+                torch.as_tensor(proposal_std, device=x.device, dtype=x.dtype),
+            )
+            proposal = x + proposal_scales[:, None] * torch.randn_like(x)
+        else:
+            global_mask = torch.zeros(num_chains, device=x.device, dtype=torch.bool)
+            proposal = x + proposal_std * torch.randn_like(x)
         logp_proposal = log_target_fn(proposal)
         if logp_proposal.shape != (num_chains,):
             raise ValueError("log_target_fn must return shape [num_chains]")
@@ -68,6 +96,10 @@ def metropolis_hastings_sample(
 
         accepted += int(accept.sum().item())
         proposed += num_chains
+        global_accepted += int((accept & global_mask).sum().item())
+        global_proposed += int(global_mask.sum().item())
+        local_accepted += int((accept & ~global_mask).sum().item())
+        local_proposed += int((~global_mask).sum().item())
 
         if step_idx >= burn_in and ((step_idx - burn_in) % thinning == 0):
             samples.append(x.clone())
@@ -80,6 +112,16 @@ def metropolis_hastings_sample(
         "acceptance_rate": accepted / proposed,
         "accepted": accepted,
         "proposed": proposed,
+        "local_acceptance_rate": (
+            local_accepted / local_proposed if local_proposed else None
+        ),
+        "local_accepted": local_accepted,
+        "local_proposed": local_proposed,
+        "global_acceptance_rate": (
+            global_accepted / global_proposed if global_proposed else None
+        ),
+        "global_accepted": global_accepted,
+        "global_proposed": global_proposed,
     }
     return stacked_samples, diagnostics
 
