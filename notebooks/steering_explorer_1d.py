@@ -436,7 +436,7 @@ def _(mo):
     mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
     mh_burn_in = mo.ui.number(start=0, stop=20000, step=50, value=2000, label="mh_burn_in")
     mh_thinning = mo.ui.number(start=1, stop=50, step=1, value=2, label="mh_thinning")
-    mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.4, label="mh_proposal_std")
+    mh_proposal_std = mo.ui.number(start=0.01, stop=10.0, step=0.01, value=0.14, label="mh_proposal_std")
     mh_global_proposal_std = mo.ui.number(start=0.01, stop=30.0, step=0.01, value=3.0, label="mh_global_proposal_std")
     mh_global_proposal_probability = mo.ui.number(start=0.0, stop=1.0, step=0.01, value=0.1, label="mh_global_proposal_probability")
     mh_inverse_temp = mo.ui.number(start=0.00, step=0.05, value=25.0, label="mh_inverse_temp")
