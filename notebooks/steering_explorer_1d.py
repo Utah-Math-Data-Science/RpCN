@@ -414,6 +414,11 @@ def _(mo):
 
     fk_n_chains = mo.ui.number(start=1, stop=64, step=1, value=20, label="fk_n_chains")
     fk_inverse_temperature = mo.ui.number(start=0.00, step=0.05, value=25.0, label="fk_inverse_temperature")
+    fk_potential = mo.ui.dropdown(
+        options=['difference', 'max', 'sum'],
+        value="max",
+        label="fk_potential",
+    )
     fk_temperature_count = mo.ui.number(start=1, stop=64, step=1, value=1, label="fk_temperature_count")
     fk_resample_threshold = mo.ui.number(start=0.05, stop=0.95, step=0.05, value=0.5, label="fk_ess_threshold")
     fk_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="fk_check_every")
@@ -489,7 +494,7 @@ def _(mo):
             mo.hstack([seed, device, batch_size, n_steps, n_reference, run_unsteered, run_fk, run_das, run_rpcn], justify="start"),
             mo.hstack([epsilon_alpha, epsilon_beta, vmap_chunk_size, sampling_max_score_norm], justify="start"),
             mo.hstack([x_min, x_max, n_grid], justify="start"),
-            mo.hstack([fk_n_chains, fk_inverse_temperature, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
+            mo.hstack([fk_n_chains, fk_inverse_temperature, fk_potential, fk_temperature_count, fk_resample_threshold, fk_check_every], justify="start"),
             mo.hstack([das_n_particles, das_inverse_temperature, das_proposal_scale, das_tempering_gamma, das_resample_threshold], justify="start"),
             mo.md("DAS uses the paper's exponential schedule `lambda_i=min((1+gamma)^i-1, 1)` and enforces terminal `lambda=1`. Set `das_proposal_scale=1` for the undamped Gaussian proposal; smaller values retain the exact importance correction while improving finite-particle stability for this non-concave reward."),
             mo.hstack([rpcn_n_chains, rpcn_update_count, rpcn_angle_min, rpcn_inverse_temp_max, rpcn_burn_in_frac, rpcn_check_every], justify="start"),
@@ -607,6 +612,7 @@ def _(mo):
         fk_check_every,
         fk_inverse_temperature,
         fk_n_chains,
+        fk_potential,
         fk_resample_threshold,
         fk_temperature_count,
         mh_burn_in,
@@ -1932,6 +1938,7 @@ def _(
     fk_check_every,
     fk_inverse_temperature,
     fk_n_chains,
+    fk_potential,
     fk_resample_threshold,
     fk_steering,
     fk_temperature_count,
@@ -1992,7 +1999,7 @@ def _(
             reward_fn=reward_fn,
             propose_fn=propose_step,
             resample_fn=adaptive_resample_safe,
-            potential=fk_steering.Potential.MAX,
+            potential=fk_steering.Potential(fk_potential.value),
             intermediate_reward=fk_steering.IntermediateReward.EXPECTED_SAMPLE,
             inverse_temperature=fk_inverse_temperatures,
             kwargs_intermediate_reward={"expected_sample_fn": score_model.get_tweedie},
