@@ -434,7 +434,7 @@ def _(mo):
     rpcn_angle_min = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.05, label="rpcn_angle_min")
     rpcn_inverse_temp_max = mo.ui.number(start=0.00, step=0.05, value=25.0, label="rpcn_inverse_temp_max")
     rpcn_check_every = mo.ui.number(start=1, stop=100, step=1, value=1, label="rpcn_check_every")
-    rpcn_burn_in_frac = mo.ui.number(start=0, stop=1, step=0.01, value=0.20, label="rpcn_burn_in_frac")
+    rpcn_burn_in_frac = mo.ui.number(start=0, stop=1, step=0.01, value=0.23, label="rpcn_burn_in_frac")
 
     mh_num_chains = mo.ui.number(start=1, stop=256, step=1, value=64, label="mh_num_chains")
     mh_num_samples = mo.ui.number(start=10, stop=10000, step=10, value=2000, label="mh_num_samples")
@@ -456,7 +456,7 @@ def _(mo):
 
     crepe_replica_count = mo.ui.number(start=2, stop=1000, step=1, value=9, label="crepe_replica_count")
     crepe_substeps = mo.ui.number(start=1, stop=64, step=1, value=5, label="crepe_edge_substeps_K")
-    crepe_time_min = mo.ui.number(start=0.0, stop=0.99, step=0.001, value=0.02, label="crepe_time_min")
+    crepe_time_min = mo.ui.number(start=0.0, stop=0.99, step=0.001, value=0.00, label="crepe_time_min")
     crepe_time_max = mo.ui.number(start=0.01, stop=1.0, step=0.001, value=1.0, label="crepe_time_max")
     crepe_time_spacing = mo.ui.dropdown(options=["linear", "karras"], value="karras", label="crepe_time_spacing")
     crepe_karras_rho = mo.ui.number(start=0.1, stop=20.0, step=0.1, value=7.0, label="crepe_karras_rho")
@@ -533,7 +533,7 @@ def _(mo):
             | `crepe_time_max` | Noisiest reference-side time. It must be greater than `time_min` and at most one for this probability path. |
             | `crepe_time_spacing` | `linear` spaces Gaussian-path times uniformly. `karras` spaces the effective EDM noise `sigma_eff(t)=beta(t)/alpha(t)` with the Karras power schedule and then maps those noise levels back to Gaussian-path times. |
             | `crepe_karras_rho` | Exponent in `sigma_i = (sigma_min^(1/rho) + ramp_i * (sigma_max^(1/rho) - sigma_min^(1/rho)))^rho`, where `sigma_min/max = beta(time_min/max) / alpha(time_min/max)`. Larger values allocate relatively more resolution near low effective noise. It is ignored for linear spacing. |
-            | `crepe_continuation_steps` | Number of reference-to-target Euler steps used to continue samples from `time_min` to `t=0`. It only affects runs with `time_min > 0`. |
+            | Continuation steps | Derived automatically so continuation from `time_min` to `t=0` uses intervals no larger than the fine-grid spacing. Linear ladders match diffusion-time spacing; Karras ladders match spacing in `sigma_eff(t)^(1/rho)`. |
 
             **Reward-tilted target**
 
@@ -884,6 +884,7 @@ def _(crepe_diagnostics, crepe_is_stale, mo):
             {"metric": "RNE method", "value": crepe_diagnostics["rne_method"]},
             {"metric": "time_spacing", "value": crepe_diagnostics["time_spacing"]},
             {"metric": "time_range", "value": f"[{crepe_diagnostics['time_min']:.4g}, {crepe_diagnostics['time_max']:.4g}]"},
+            {"metric": "continuation_steps", "value": crepe_diagnostics["continuation_steps"]},
             {"metric": "Karras rho", "value": crepe_diagnostics["karras_rho"]},
             {"metric": "inverse_temperature", "value": crepe_diagnostics["inverse_temperature"]},
             {"metric": "reward schedule target/reference/power", "value": f"{crepe_diagnostics['reward_at_target']}/{crepe_diagnostics['reward_at_reference']}/{crepe_diagnostics['reward_power']}"},
@@ -1018,7 +1019,6 @@ def _(
     crepe_rtt_score_scale,
     crepe_substeps,
     crepe_thinning,
-    crepe_time_min,
     crepe_time_spacing,
     crepe_ttr_reward_scale,
     crepe_ttr_score_scale,
@@ -1476,17 +1476,112 @@ def _(
         crepe_output_samples = crepe_result.samples.detach()
         crepe_continuation_steps = 0
         if crepe_min_time.item() > 0.0:
-            crepe_continuation_steps = math.ceil(crepe_fine_times.numel() * crepe_time_min.value)
+            if crepe_time_spacing.value == "linear":
+                crepe_continuation_interval = (
+                    crepe_fine_times[1] - crepe_fine_times[0]
+                )
+                crepe_continuation_steps = math.ceil(
+                    float(crepe_min_time / crepe_continuation_interval)
+                )
+                crepe_continuation_times = torch.linspace(
+                    crepe_min_time,
+                    0.0,
+                    crepe_continuation_steps + 1,
+                    device=crepe_fine_times.device,
+                    dtype=crepe_fine_times.dtype,
+                )
+            else:
+                crepe_continuation_rho = float(crepe_karras_rho.value)
+
+                def crepe_continuation_effective_sigma(crepe_continuation_time):
+                    return (
+                        score_model.prob_path.beta(crepe_continuation_time)
+                        / score_model.prob_path.alpha(crepe_continuation_time)
+                    )
+
+                crepe_fine_schedule = crepe_continuation_effective_sigma(
+                    crepe_fine_times
+                ).pow(1.0 / crepe_continuation_rho)
+                crepe_continuation_interval = (
+                    crepe_fine_schedule[1] - crepe_fine_schedule[0]
+                )
+                crepe_zero_time = crepe_fine_times.new_zeros(())
+                crepe_zero_schedule = crepe_continuation_effective_sigma(
+                    crepe_zero_time
+                ).pow(1.0 / crepe_continuation_rho)
+                crepe_min_schedule = crepe_fine_schedule[0]
+                crepe_continuation_steps = math.ceil(
+                    float(
+                        (crepe_min_schedule - crepe_zero_schedule)
+                        / crepe_continuation_interval
+                    )
+                )
+                crepe_continuation_schedule = torch.linspace(
+                    crepe_min_schedule,
+                    crepe_zero_schedule,
+                    crepe_continuation_steps + 1,
+                    device=crepe_fine_times.device,
+                    dtype=crepe_fine_times.dtype,
+                )
+                crepe_continuation_sigma = crepe_continuation_schedule.pow(
+                    crepe_continuation_rho
+                )
+
+                crepe_continuation_time_lower = torch.zeros_like(
+                    crepe_continuation_sigma
+                )
+                crepe_continuation_time_upper = torch.full_like(
+                    crepe_continuation_sigma, float(crepe_min_time.item())
+                )
+                for crepe_continuation_bisection_idx in range(48):
+                    crepe_continuation_time_midpoint = (
+                        crepe_continuation_time_lower
+                        + crepe_continuation_time_upper
+                    ) / 2
+                    crepe_continuation_midpoint_sigma = (
+                        crepe_continuation_effective_sigma(
+                            crepe_continuation_time_midpoint
+                        )
+                    )
+                    crepe_continuation_time_lower = torch.where(
+                        crepe_continuation_midpoint_sigma
+                        < crepe_continuation_sigma,
+                        crepe_continuation_time_midpoint,
+                        crepe_continuation_time_lower,
+                    )
+                    crepe_continuation_time_upper = torch.where(
+                        crepe_continuation_midpoint_sigma
+                        < crepe_continuation_sigma,
+                        crepe_continuation_time_upper,
+                        crepe_continuation_time_midpoint,
+                    )
+                crepe_continuation_interior_times = (
+                    crepe_continuation_time_lower
+                    + crepe_continuation_time_upper
+                )[1:-1] / 2
+                crepe_continuation_times = torch.cat(
+                    (
+                        crepe_min_time.reshape(1),
+                        crepe_continuation_interior_times,
+                        crepe_zero_time.reshape(1),
+                    )
+                )
+
+            if crepe_continuation_times.numel() != crepe_continuation_steps + 1:
+                raise ValueError("CREPE continuation has the wrong number of points")
+            if not bool(torch.isfinite(crepe_continuation_times).all()):
+                raise ValueError("CREPE continuation times must be finite")
+            if not bool(
+                (
+                    crepe_continuation_times[:-1]
+                    > crepe_continuation_times[1:]
+                ).all()
+            ):
+                raise ValueError(
+                    "CREPE continuation times must be strictly decreasing"
+                )
             crepe_output_shape = crepe_output_samples.shape
             crepe_continuation = crepe_output_samples.reshape(-1, 1)
-            crepe_continuation_times = torch.linspace(
-                crepe_min_time,
-                0.0,
-                crepe_continuation_steps,
-                # int(crepe_continuation_steps.value) + 1,
-                device=reference_data.device,
-                dtype=reference_data.dtype,
-            )
             for crepe_cont_idx in range(crepe_continuation_times.numel() - 1):
                 crepe_cont_now = crepe_continuation_times[crepe_cont_idx]
                 crepe_cont_next = crepe_continuation_times[crepe_cont_idx + 1]
@@ -1526,6 +1621,7 @@ def _(
                 "time_spacing": crepe_time_spacing.value,
                 "time_min": float(crepe_replica_times[0].item()),
                 "time_max": float(crepe_replica_times[-1].item()),
+                "continuation_steps": crepe_continuation_steps,
                 "karras_rho": float(crepe_karras_rho.value),
                 "reward_at_target": crepe_reward_ceiling,
                 "reward_at_reference": crepe_reward_floor,
