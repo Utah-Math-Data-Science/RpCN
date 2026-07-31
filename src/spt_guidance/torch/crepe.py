@@ -1,3 +1,21 @@
+"""Generic PyTorch implementation of CREPE.
+
+Direction terminology is explicit throughout this module:
+
+``target-to-reference``
+    Increasing diffusion time from the less-noisy target side to the
+    more-noisy reference side. The CREPE paper calls this the APT forward
+    proposal; for an SDE, it is the forward/noising direction.
+``reference-to-target``
+    Decreasing diffusion time from the more-noisy reference side to the
+    less-noisy target side. The paper calls this the APT backward proposal;
+    for an SDE, it is the backward/denoising direction.
+
+All target log-density ratios and path log RNEs are reported in increasing-time
+(target-to-reference) orientation, regardless of the direction in which a path
+was generated.
+"""
+
 from typing import NamedTuple
 
 import torch
@@ -75,47 +93,59 @@ class SaveSampleFn:
 
 
 class PathLogRatio:
-    """Utilities for computing path log Radon-Nikodym estimators."""
+    """Utilities for path log RNEs in target-to-reference orientation."""
 
     @staticmethod
-    def from_transition_log_probabilities(forward_log_probability, backward_log_probability):
+    def from_transition_log_probabilities(
+        target_to_reference_log_probability,
+        reference_to_target_log_probability,
+    ):
         r"""Return :math:`\sum_k (\log B_k - \log F_k)` for each batch member.
 
         This is the log form of Equation 3 of He et al. (2026); Equations 22
-        and 25 give the discrete proposal- and model-process forms.
+        and 25 give the discrete proposal- and model-process forms. Here
+        :math:`F` is the target-to-reference transition kernel and :math:`B` is
+        the reference-to-target transition kernel. Both are evaluated along a
+        path represented in target-to-reference orientation.
 
         Args
         ----
-        forward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step forward transition log probabilities for paths represented
-            in increasing-time orientation.
-        backward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step backward transition log probabilities evaluated along the
-            same paths and in the same increasing-time orientation.
+        target_to_reference_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step increasing-time/noising transition log probabilities.
+        reference_to_target_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step decreasing-time/denoising transition log probabilities,
+            evaluated along the same target-to-reference-oriented paths.
 
         Returns
         -------
         torch.Tensor[batch_size]
             Path log RNE for each batch member.
         """
-        PathLogRatio._validate_transition_log_probabilities(forward_log_probability, backward_log_probability)
-        return (backward_log_probability - forward_log_probability).sum(dim=0)
+        PathLogRatio._validate_transition_log_probabilities(
+            target_to_reference_log_probability,
+            reference_to_target_log_probability,
+        )
+        return (
+            reference_to_target_log_probability
+            - target_to_reference_log_probability
+        ).sum(dim=0)
 
     @staticmethod
     def from_euler_maruyama(
         times,
         path,
-        forward_drift,
-        backward_drift,
+        target_to_reference_drift,
+        reference_to_target_drift,
         diffusion,
     ):
         r"""Return the exact log RNE of one Euler-Maruyama transition.
 
         ``path`` is represented from the less-noisy endpoint to the more-noisy
-        endpoint. The forward kernel has mean
-        ``path[0] + dt * forward_drift[0]`` and the backward kernel has mean
-        ``path[1] - dt * backward_drift[1]``. This matches a backward SDE drift
-        integrated over a negative time increment.
+        endpoint. The target-to-reference/noising kernel has mean
+        ``path[0] + dt * target_to_reference_drift[0]``. The
+        reference-to-target/denoising kernel has mean
+        ``path[1] - dt * reference_to_target_drift[1]``, matching a denoising
+        SDE drift integrated over a negative time increment.
 
         Args
         ----
@@ -123,10 +153,12 @@ class PathLogRatio:
             Strictly increasing endpoint times.
         path : torch.Tensor[2, batch_size, ...]
             Less-noisy and more-noisy endpoint states.
-        forward_drift : torch.Tensor[2, batch_size, ...]
-            Forward drift at both endpoints. Only the less-noisy value is used.
-        backward_drift : torch.Tensor[2, batch_size, ...]
-            Backward drift at both endpoints. Only the more-noisy value is used.
+        target_to_reference_drift : torch.Tensor[2, batch_size, ...]
+            Increasing-time/noising drift at both endpoints. Only the
+            less-noisy value is used.
+        reference_to_target_drift : torch.Tensor[2, batch_size, ...]
+            Decreasing-time/denoising drift at both endpoints. Only the
+            more-noisy value is used.
         diffusion : torch.Tensor
             Diffusion coefficients at both endpoints, with the same broadcasting
             rules as :meth:`from_ito_integrals`.
@@ -134,53 +166,64 @@ class PathLogRatio:
         Returns
         -------
         torch.Tensor[batch_size]
-            ``log backward transition - log forward transition``.
+            ``log reference-to-target transition - log target-to-reference
+            transition``.
         """
-        PathLogRatio._validate_sde_path(times, path, forward_drift, backward_drift)
+        PathLogRatio._validate_sde_path(
+            times,
+            path,
+            target_to_reference_drift,
+            reference_to_target_drift,
+        )
         diffusion = PathLogRatio._broadcast_diffusion(diffusion, path)
         time_delta = times[1] - times[0]
-        forward_variance = time_delta * diffusion[0].square()
-        backward_variance = time_delta * diffusion[1].square()
-        forward_residual = path[1] - (path[0] + time_delta * forward_drift[0])
-        backward_residual = path[0] - (path[1] - time_delta * backward_drift[1])
+        target_to_reference_variance = time_delta * diffusion[0].square()
+        reference_to_target_variance = time_delta * diffusion[1].square()
+        target_to_reference_residual = path[1] - (
+            path[0] + time_delta * target_to_reference_drift[0]
+        )
+        reference_to_target_residual = path[0] - (
+            path[1] - time_delta * reference_to_target_drift[1]
+        )
 
         log_two_pi = torch.log(path.new_tensor(2 * torch.pi))
-        forward_log_probability = -0.5 * (
-            forward_residual.square() / forward_variance
+        target_to_reference_log_probability = -0.5 * (
+            target_to_reference_residual.square() / target_to_reference_variance
             + log_two_pi
-            + forward_variance.log()
+            + target_to_reference_variance.log()
         )
-        backward_log_probability = -0.5 * (
-            backward_residual.square() / backward_variance
+        reference_to_target_log_probability = -0.5 * (
+            reference_to_target_residual.square() / reference_to_target_variance
             + log_two_pi
-            + backward_variance.log()
+            + reference_to_target_variance.log()
         )
         event_dims = tuple(range(1, path[0].ndim))
         if event_dims:
-            forward_log_probability = forward_log_probability.sum(dim=event_dims)
-            backward_log_probability = backward_log_probability.sum(dim=event_dims)
-        return backward_log_probability - forward_log_probability
+            target_to_reference_log_probability = target_to_reference_log_probability.sum(dim=event_dims)
+            reference_to_target_log_probability = reference_to_target_log_probability.sum(dim=event_dims)
+        return reference_to_target_log_probability - target_to_reference_log_probability
 
     @staticmethod
     def from_ito_integrals(
         times,
         path,
-        forward_drift,
-        backward_drift,
+        target_to_reference_drift,
+        reference_to_target_drift,
         diffusion,
     ):
         r"""Estimate the SDE log RNE over one adjacent-replica interval.
 
         This discretizes Equations 15--17 of He et al. (2026). ``times`` has
         shape ``(2,)`` and is ordered from less noisy to more noisy. ``path``,
-        ``forward_drift``, and ``backward_drift`` have shape
+        ``target_to_reference_drift``, and ``reference_to_target_drift`` have shape
         ``(2, batch_size, ...)``. ``diffusion`` contains one scalar coefficient
         per time, optionally per batch member, and is broadcast across event
         dimensions.
 
-        The forward Ito integral uses the less-noisy endpoint, the backward Ito
-        integral uses the more-noisy endpoint, and the ordinary time integral
-        uses a one-step trapezoidal rule.
+        The target-to-reference/noising Ito integral uses the less-noisy
+        endpoint. The reference-to-target/denoising Ito integral uses the
+        more-noisy endpoint. The ordinary time integral uses a one-step
+        trapezoidal rule.
 
         Args
         ----
@@ -188,10 +231,10 @@ class PathLogRatio:
             The less-noisy and more-noisy diffusion times, in that order.
         path : torch.Tensor[2, batch_size, ...]
             Path states at the less-noisy and more-noisy endpoints.
-        forward_drift : torch.Tensor[2, batch_size, ...]
-            Forward-process drift evaluated at both path endpoints.
-        backward_drift : torch.Tensor[2, batch_size, ...]
-            Backward-process drift evaluated at both path endpoints.
+        target_to_reference_drift : torch.Tensor[2, batch_size, ...]
+            Increasing-time/noising drift evaluated at both path endpoints.
+        reference_to_target_drift : torch.Tensor[2, batch_size, ...]
+            Decreasing-time/denoising drift evaluated at both path endpoints.
         diffusion : torch.Tensor
             Scalar diffusion coefficients at both endpoints. The leading axis
             has length two; an optional batch axis has length one or
@@ -202,117 +245,153 @@ class PathLogRatio:
         torch.Tensor[batch_size]
             Two-endpoint path log RNE for each batch member.
         """
-        PathLogRatio._validate_sde_path(times, path, forward_drift, backward_drift)
+        PathLogRatio._validate_sde_path(
+            times,
+            path,
+            target_to_reference_drift,
+            reference_to_target_drift,
+        )
 
         diffusion = PathLogRatio._broadcast_diffusion(diffusion, path)
         time_delta = times[1] - times[0]
         path_delta = path[1] - path[0]
         diffusion_squared = diffusion.square()
 
-        backward_ito = backward_drift[1] * path_delta / diffusion_squared[1]
-        forward_ito = forward_drift[0] * path_delta / diffusion_squared[0]
-        drift_energy_less_noisy = (forward_drift[0].square() - backward_drift[0].square()) / diffusion_squared[0]
-        drift_energy_more_noisy = (forward_drift[1].square() - backward_drift[1].square()) / diffusion_squared[1]
+        reference_to_target_ito = reference_to_target_drift[1] * path_delta / diffusion_squared[1]
+        target_to_reference_ito = target_to_reference_drift[0] * path_delta / diffusion_squared[0]
+        drift_energy_less_noisy = (
+            target_to_reference_drift[0].square()
+            - reference_to_target_drift[0].square()
+        ) / diffusion_squared[0]
+        drift_energy_more_noisy = (
+            target_to_reference_drift[1].square()
+            - reference_to_target_drift[1].square()
+        ) / diffusion_squared[1]
 
         event_dims = tuple(range(1, path_delta.ndim))
         if event_dims:
-            backward_ito = backward_ito.sum(dim=event_dims)
-            forward_ito = forward_ito.sum(dim=event_dims)
+            reference_to_target_ito = reference_to_target_ito.sum(dim=event_dims)
+            target_to_reference_ito = target_to_reference_ito.sum(dim=event_dims)
             drift_energy_less_noisy = drift_energy_less_noisy.sum(dim=event_dims)
             drift_energy_more_noisy = drift_energy_more_noisy.sum(dim=event_dims)
 
         drift_energy = time_delta * (drift_energy_less_noisy + drift_energy_more_noisy) / 4
-        return backward_ito - forward_ito + drift_energy
+        return reference_to_target_ito - target_to_reference_ito + drift_energy
 
     @staticmethod
     def from_reference_stabilized_transition_log_probabilities(
-        forward_log_probability, backward_log_probability,
-        reference_forward_log_probability, reference_backward_log_probability,
-        reference_log_probability_less_noisy, reference_log_probability_more_noisy,
+        target_to_reference_log_probability,
+        reference_to_target_log_probability,
+        stabilizing_target_to_reference_log_probability,
+        stabilizing_reference_to_target_log_probability,
+        stabilizing_log_probability_less_noisy,
+        stabilizing_log_probability_more_noisy,
     ):
         """Return the Equation 34 reference-stabilized log RNE.
 
         The reference endpoint correction uses the identity in Equation 30 of
-        He et al. (2026).
+        He et al. (2026). ``stabilizing_*`` quantities belong to the tractable
+        reference process used for numerical stabilization, not to the
+        reference-side endpoint of the CREPE ladder.
 
         Args
         ----
-        forward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step forward transition log probabilities for the process whose
-            log RNE is being computed.
-        backward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step backward transition log probabilities for that process.
-        reference_forward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step forward transition log probabilities for the reference
-            process, evaluated along the same paths.
-        reference_backward_log_probability : torch.Tensor[step_count, batch_size]
-            Per-step backward transition log probabilities for the reference
-            process, evaluated along the same paths.
-        reference_log_probability_less_noisy : torch.Tensor[batch_size]
-            Reference marginal log probability of each less-noisy endpoint.
-        reference_log_probability_more_noisy : torch.Tensor[batch_size]
-            Reference marginal log probability of each more-noisy endpoint.
+        target_to_reference_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step increasing-time/noising transition log probabilities for
+            the process whose log RNE is being computed.
+        reference_to_target_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step decreasing-time/denoising transition log probabilities for
+            that process.
+        stabilizing_target_to_reference_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step increasing-time/noising transition log probabilities for
+            the tractable stabilizing process, evaluated along the same paths.
+        stabilizing_reference_to_target_log_probability : torch.Tensor[step_count, batch_size]
+            Per-step decreasing-time/denoising transition log probabilities for
+            the tractable stabilizing process, evaluated along the same paths.
+        stabilizing_log_probability_less_noisy : torch.Tensor[batch_size]
+            Stabilizing-process marginal log probability at each less-noisy
+            endpoint.
+        stabilizing_log_probability_more_noisy : torch.Tensor[batch_size]
+            Stabilizing-process marginal log probability at each more-noisy
+            endpoint.
 
         Returns
         -------
         torch.Tensor[batch_size]
             Reference-stabilized path log RNE for each batch member.
         """
-        PathLogRatio._validate_transition_log_probabilities(forward_log_probability, backward_log_probability)
-        PathLogRatio._validate_transition_log_probabilities(reference_forward_log_probability, reference_backward_log_probability)
-        if reference_forward_log_probability.shape != forward_log_probability.shape:
-            raise ValueError('reference and proposal log probabilities must have the same shape.')
-        expected_endpoint_shape = forward_log_probability.shape[1:]
-        if reference_log_probability_less_noisy.shape != expected_endpoint_shape:
-            raise ValueError('less-noisy reference log probability must have shape (batch_size,).')
-        if reference_log_probability_more_noisy.shape != expected_endpoint_shape:
-            raise ValueError('more-noisy reference log probability must have shape (batch_size,).')
+        PathLogRatio._validate_transition_log_probabilities(
+            target_to_reference_log_probability,
+            reference_to_target_log_probability,
+        )
+        PathLogRatio._validate_transition_log_probabilities(
+            stabilizing_target_to_reference_log_probability,
+            stabilizing_reference_to_target_log_probability,
+        )
+        if stabilizing_target_to_reference_log_probability.shape != target_to_reference_log_probability.shape:
+            raise ValueError('stabilizing and primary-process log probabilities must have the same shape.')
+        expected_endpoint_shape = target_to_reference_log_probability.shape[1:]
+        if stabilizing_log_probability_less_noisy.shape != expected_endpoint_shape:
+            raise ValueError('less-noisy stabilizing log probability must have shape (batch_size,).')
+        if stabilizing_log_probability_more_noisy.shape != expected_endpoint_shape:
+            raise ValueError('more-noisy stabilizing log probability must have shape (batch_size,).')
         endpoint_logs = (
-            reference_log_probability_less_noisy,
-            reference_log_probability_more_noisy,
+            stabilizing_log_probability_less_noisy,
+            stabilizing_log_probability_more_noisy,
         )
         if not all(torch.is_floating_point(value) for value in endpoint_logs):
-            raise ValueError('reference endpoint log probabilities must have floating-point dtypes.')
+            raise ValueError('stabilizing endpoint log probabilities must have floating-point dtypes.')
 
         transition_log_ratio = (
-            backward_log_probability - reference_backward_log_probability
-            + reference_forward_log_probability - forward_log_probability
+            reference_to_target_log_probability
+            - stabilizing_reference_to_target_log_probability
+            + stabilizing_target_to_reference_log_probability
+            - target_to_reference_log_probability
         ).sum(dim=0)
         return (
             transition_log_ratio
-            + reference_log_probability_less_noisy - reference_log_probability_more_noisy
+            + stabilizing_log_probability_less_noisy
+            - stabilizing_log_probability_more_noisy
         )
 
     @staticmethod
-    def _validate_transition_log_probabilities(forward, backward):
-        if forward.ndim != 2:
+    def _validate_transition_log_probabilities(
+        target_to_reference,
+        reference_to_target,
+    ):
+        if target_to_reference.ndim != 2:
             raise ValueError('transition log probabilities must have shape (step_count, batch_size).')
-        if forward.shape != backward.shape:
-            raise ValueError('forward and backward log probabilities must have the same shape.')
-        if forward.shape[0] < 1:
+        if target_to_reference.shape != reference_to_target.shape:
+            raise ValueError('target-to-reference and reference-to-target log probabilities must have the same shape.')
+        if target_to_reference.shape[0] < 1:
             raise ValueError('transition log probabilities must contain at least one step.')
-        if not torch.is_floating_point(forward) or not torch.is_floating_point(backward):
+        if not torch.is_floating_point(target_to_reference) or not torch.is_floating_point(reference_to_target):
             raise ValueError('transition log probabilities must have floating-point dtypes.')
-        if forward.device != backward.device:
-            raise ValueError('forward and backward log probabilities must be on the same device.')
+        if target_to_reference.device != reference_to_target.device:
+            raise ValueError('target-to-reference and reference-to-target log probabilities must be on the same device.')
 
     @staticmethod
-    def _validate_sde_path(times, path, forward_drift, backward_drift):
+    def _validate_sde_path(
+        times,
+        path,
+        target_to_reference_drift,
+        reference_to_target_drift,
+    ):
         if times.ndim != 1 or times.shape[0] != 2:
             raise ValueError('times must have shape (2,).')
         if path.ndim < 2 or path.shape[0] != 2:
             raise ValueError('path must have shape (2, batch_size, ...).')
-        if forward_drift.shape != path.shape:
-            raise ValueError('forward_drift must have the shape of path.')
-        if backward_drift.shape != path.shape:
-            raise ValueError('backward_drift must have the shape of path.')
+        if target_to_reference_drift.shape != path.shape:
+            raise ValueError('target_to_reference_drift must have the shape of path.')
+        if reference_to_target_drift.shape != path.shape:
+            raise ValueError('reference_to_target_drift must have the shape of path.')
         if times.device != path.device:
             raise ValueError('times and path must be on the same device.')
-        if forward_drift.device != path.device or backward_drift.device != path.device:
+        if target_to_reference_drift.device != path.device or reference_to_target_drift.device != path.device:
             raise ValueError('drifts and path must be on the same device.')
         if not torch.is_floating_point(times) or not torch.is_floating_point(path):
             raise ValueError('times and path must have floating-point dtypes.')
-        if not torch.is_floating_point(forward_drift) or not torch.is_floating_point(backward_drift):
+        if not torch.is_floating_point(target_to_reference_drift) or not torch.is_floating_point(reference_to_target_drift):
             raise ValueError('drifts must have floating-point dtypes.')
 
     @staticmethod
@@ -432,10 +511,12 @@ class CREPE:
     ``CREPE: Controlling diffusion with REPlica Exchange`` (He et al., 2026).
     Replica ``m`` targets the diffusion marginal :math:`\pi_{t_m}` for a
     strictly increasing ladder :math:`t_0 < \cdots < t_M`. Communication
-    proposes a forward path from :math:`t_m` to :math:`t_{m+1}` and an
-    independent backward path in the opposite direction. Smaller times are
-    less noisy, so ``t0`` is the less-noisy endpoint and ``t1`` is the
-    more-noisy endpoint of every path callback.
+    proposes a target-to-reference path from :math:`t_m` to :math:`t_{m+1}`
+    and an independent reference-to-target path in the opposite direction.
+    The paper calls these the APT forward and backward proposals,
+    respectively. Smaller times are less noisy, so ``t0`` is the less-noisy
+    target-side endpoint and ``t1`` is the more-noisy reference-side endpoint
+    of every path callback.
 
     Each path callback returns ``(proposed, log_target_ratio,
     log_proposal_rne)``. Both log ratios must describe the path in increasing
@@ -460,19 +541,22 @@ class CREPE:
     ------------
     init_path_fn : Callable[times: torch.Tensor[replica_count]]
         Returns one initialized replica ladder with shape
-        ``(replica_count, ...)``, not a batch. It will commonly run one reverse
-        diffusion trajectory and retain its states at ``times``.
-    forward_path_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
-        Generates a path from the less-noisy ``param`` at ``t0`` to the
-        more-noisy time ``t1`` and returns its proposed endpoint, target
-        log-density ratio, and proposal log RNE. The proposed endpoint has shape
+        ``(replica_count, ...)``, not a batch. It will commonly run one
+        reference-to-target/denoising diffusion trajectory and retain its states
+        at ``times``.
+    target_to_reference_path_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
+        Generates an increasing-time/noising path from the less-noisy,
+        target-side ``param`` at ``t0`` to the more-noisy, reference-side time
+        ``t1``. Returns its proposed endpoint, target log-density ratio, and
+        proposal log RNE. The proposed endpoint has shape ``(batch_size, ...)``
+        and both log-ratio outputs have shape ``(batch_size,)``.
+    reference_to_target_path_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
+        Generates a decreasing-time/denoising path from the more-noisy,
+        reference-side ``param`` at ``t1`` to the less-noisy, target-side time
+        ``t0``. Returns the proposed endpoint and the same increasing-time
+        target log-density ratio and proposal log RNE as
+        ``target_to_reference_path_fn``. The proposed endpoint has shape
         ``(batch_size, ...)`` and both log-ratio outputs have shape
-        ``(batch_size,)``.
-    backward_path_fn : Callable[t0: scalar, t1: scalar, param: torch.Tensor[batch_size, ...]]
-        Generates a path backward from the more-noisy ``param`` at ``t1`` to
-        the less-noisy time ``t0``. Returns the proposed endpoint and the same
-        increasing-time log ratios as ``forward_path_fn``. The proposed endpoint has
-        shape ``(batch_size, ...)`` and both log-ratio outputs have shape
         ``(batch_size,)``.
     local_exploration_fn : Callable[time: scalar, param: torch.Tensor[batch_size, ...]], optional
         Applies one local exploration transition at a replica level after each
@@ -495,14 +579,22 @@ class CREPE:
         self,
         *,
         init_path_fn,
-        forward_path_fn,
-        backward_path_fn,
+        target_to_reference_path_fn,
+        reference_to_target_path_fn,
         local_exploration_fn=None,
         refresh_reference_fn=None,
     ):
         self.init_path_fn = torch.vmap(init_path_fn, out_dims=1, randomness='different')
-        self.forward_path_fn = torch.vmap(forward_path_fn, in_dims=(0, 0, 0), randomness='different')
-        self.backward_path_fn = torch.vmap(backward_path_fn, in_dims=(0, 0, 0), randomness='different')
+        self.target_to_reference_path_fn = torch.vmap(
+            target_to_reference_path_fn,
+            in_dims=(0, 0, 0),
+            randomness='different',
+        )
+        self.reference_to_target_path_fn = torch.vmap(
+            reference_to_target_path_fn,
+            in_dims=(0, 0, 0),
+            randomness='different',
+        )
         self.local_exploration_fn = (
             None if local_exploration_fn is None
             else torch.vmap(local_exploration_fn, in_dims=(0, 0), randomness='different')
@@ -528,9 +620,9 @@ class CREPE:
             Strictly increasing diffusion times, ordered from the least-noisy
             target replica to the most-noisy reference replica.
         iteration_count : int
-            Number of checkerboard communication iterations. Iteration one
-            updates edges ``(0, 1), (2, 3), ...`` and iteration two updates
-            ``(1, 2), (3, 4), ...``.
+            Number of checkerboard communication iterations. Zero-based
+            iteration 0 updates edges ``(0, 1), (2, 3), ...`` and iteration 1
+            updates ``(1, 2), (3, 4), ...``.
 
         Keyword Args
         ------------
@@ -577,12 +669,37 @@ class CREPE:
                 t0 = times[time_edges - 1]
                 t1 = times[time_edges]
 
-                proposed_more_noisy, forward_target, forward_rne = self.forward_path_fn(t0, t1, less_noisy)
-                proposed_less_noisy, backward_target, backward_rne = self.backward_path_fn(t0, t1, more_noisy)
-                self._validate_path_outputs('forward_path_fn', proposed_more_noisy, forward_target, forward_rne, more_noisy)
-                self._validate_path_outputs('backward_path_fn', proposed_less_noisy, backward_target, backward_rne, less_noisy)
+                (
+                    proposed_more_noisy,
+                    target_to_reference_target_log_ratio,
+                    target_to_reference_proposal_log_rne,
+                ) = self.target_to_reference_path_fn(t0, t1, less_noisy)
+                (
+                    proposed_less_noisy,
+                    reference_to_target_target_log_ratio,
+                    reference_to_target_proposal_log_rne,
+                ) = self.reference_to_target_path_fn(t0, t1, more_noisy)
+                self._validate_path_outputs(
+                    'target_to_reference_path_fn',
+                    proposed_more_noisy,
+                    target_to_reference_target_log_ratio,
+                    target_to_reference_proposal_log_rne,
+                    more_noisy,
+                )
+                self._validate_path_outputs(
+                    'reference_to_target_path_fn',
+                    proposed_less_noisy,
+                    reference_to_target_target_log_ratio,
+                    reference_to_target_proposal_log_rne,
+                    less_noisy,
+                )
 
-                log_acceptance = self.log_acceptance_ratio(forward_target, forward_rne, backward_target, backward_rne)
+                log_acceptance = self.log_acceptance_ratio(
+                    target_to_reference_target_log_ratio,
+                    target_to_reference_proposal_log_rne,
+                    reference_to_target_target_log_ratio,
+                    reference_to_target_proposal_log_rne,
+                )
                 accept = torch.rand_like(log_acceptance).log() < log_acceptance.clamp(max=0)
                 mask = accept.reshape(*accept.shape, *([1] * (replicas.ndim - accept.ndim)))
                 replicas = replicas.index_copy(0, time_edges - 1, torch.where(mask, proposed_less_noisy, less_noisy))
@@ -632,28 +749,39 @@ class CREPE:
         )
 
     @staticmethod
-    def log_acceptance_ratio(forward_target, forward_rne, backward_target, backward_rne):
+    def log_acceptance_ratio(
+        target_to_reference_target_log_ratio,
+        target_to_reference_proposal_log_rne,
+        reference_to_target_target_log_ratio,
+        reference_to_target_proposal_log_rne,
+    ):
         """Return the Equation 13 CREPE path-space Metropolis-Hastings log ratio.
 
         Args
         ----
-        forward_target : torch.Tensor
-            Target log-density ratio for each forward-generated path.
-        forward_rne : torch.Tensor
-            Proposal log RNE for each forward-generated path.
-        backward_target : torch.Tensor
-            Target log-density ratio for each backward-generated path, reported
-            in increasing-time orientation.
-        backward_rne : torch.Tensor
-            Proposal log RNE for each backward-generated path, reported in
-            increasing-time orientation.
+        target_to_reference_target_log_ratio : torch.Tensor
+            Target log-density ratio for each target-to-reference-generated
+            path.
+        target_to_reference_proposal_log_rne : torch.Tensor
+            Proposal log RNE for each target-to-reference-generated path.
+        reference_to_target_target_log_ratio : torch.Tensor
+            Target log-density ratio for each reference-to-target-generated
+            path, reported in increasing-time orientation.
+        reference_to_target_proposal_log_rne : torch.Tensor
+            Proposal log RNE for each reference-to-target-generated path,
+            reported in increasing-time orientation.
 
         Returns
         -------
         torch.Tensor
             Path-space Metropolis-Hastings log ratio with the input shape.
         """
-        return forward_target - backward_target + forward_rne - backward_rne
+        return (
+            target_to_reference_target_log_ratio
+            - reference_to_target_target_log_ratio
+            + target_to_reference_proposal_log_rne
+            - reference_to_target_proposal_log_rne
+        )
 
     def _initialize(self, times, batch_size):
         batched_times = times.expand(batch_size, -1)
