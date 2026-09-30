@@ -68,14 +68,13 @@ class KernelPreconditionedCrankNicolson(spt.Kernel):
         return accept
 
     @staticmethod
-    def parallel_tempering_swap_probability(
+    def log_acceptance_parallel_tempering(
         reward_hot, inverse_temperature_hot,
         reward_cold, inverse_temperature_cold,
     ):
         delta_reward = reward_cold - reward_hot
         delta_inverse_temperature = inverse_temperature_cold - inverse_temperature_hot
-        swap_probability = torch.clip(torch.exp(-delta_inverse_temperature * delta_reward), max=1)
-        return swap_probability
+        return torch.clip(-delta_inverse_temperature * delta_reward, max=0)
 
 
 class ResidualMCMCSteering:
@@ -209,11 +208,11 @@ class ResidualMCMCSteering:
                     )
                     if pcn_should_replica_exchange_fn(time_step, t0, t1, pcn_update, reward_with_unit_temperature):
                         for k in range(self.chain_count - 1):
-                            swap_probability = self.kernel.parallel_tempering_swap_probability(
+                            log_swap_probability = self.kernel.log_acceptance_parallel_tempering(
                                 reward_hot=reward_with_unit_temperature[k], inverse_temperature_hot=self.inverse_temperature[k],
                                 reward_cold=reward_with_unit_temperature[k + 1], inverse_temperature_cold=self.inverse_temperature[k + 1],
                             )
-                            swap = torch.bernoulli(swap_probability).to(torch.bool)
+                            swap = torch.rand_like(log_swap_probability).log() < log_swap_probability
                             sample_noise, reward_with_unit_temperature = self.swap_chain(swap, sample_noise, k, reward_with_unit_temperature)
                             expected_next, _ = self.swap_chain(swap, expected_next, k)
             batch = expected_next + sample_noise
