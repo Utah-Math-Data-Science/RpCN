@@ -72,14 +72,13 @@ class KernelPreconditionedCrankNicolson(spt.Kernel):
 
     @staticmethod
     @jax.jit
-    def parallel_tempering_swap_probability(
+    def log_acceptance_parallel_tempering(
         reward_hot, inverse_temperature_hot,
         reward_cold, inverse_temperature_cold,
     ):
         delta_reward = reward_cold - reward_hot
         delta_inverse_temperature = inverse_temperature_cold - inverse_temperature_hot
-        swap_probability = jnp.clip(jnp.exp(-delta_inverse_temperature * delta_reward), max=1)
-        return swap_probability
+        return jnp.clip(-delta_inverse_temperature * delta_reward, max=0)
 
 
 class ResidualMCMCSteering:
@@ -291,12 +290,12 @@ class ResidualMCMCSteering:
 
     @partial(jax.jit, static_argnames=['self'])
     def swap_chain(self, key, param, reward_with_unit_temperature, k):
-        swap_probability = self.kernel.parallel_tempering_swap_probability(
+        log_swap_probability = self.kernel.log_acceptance_parallel_tempering(
             reward_hot=reward_with_unit_temperature[k], inverse_temperature_hot=self.inverse_temperature[k],
             reward_cold=reward_with_unit_temperature[k + 1], inverse_temperature_cold=self.inverse_temperature[k + 1],
         )
         key_chain_swap, _ = jax.random.split(key)
-        swap = jax.random.bernoulli(key_chain_swap, swap_probability).astype(jnp.bool)
+        swap = jnp.log(jax.random.uniform(key_chain_swap, log_swap_probability.shape)) < log_swap_probability
         reward_temp_1_kp1 = jnp.where(swap, reward_with_unit_temperature[k], reward_with_unit_temperature[k + 1])
         reward_temp_1_k = jnp.where(swap, reward_with_unit_temperature[k + 1], reward_with_unit_temperature[k])
         reward_with_unit_temperature = reward_with_unit_temperature.at[k].set(reward_temp_1_k)
