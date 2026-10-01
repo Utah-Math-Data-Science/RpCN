@@ -7,6 +7,9 @@ import json
 import argparse
 import csv
 import os
+import time 
+
+
 
 def save_rewards_to_csv(csv_path, rewards):
     """
@@ -78,6 +81,7 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         print(f'Generating reward aligned samples for prompt: {args.img_id}')
+        start = time.time()
         final_samples = rpcn.run(
             # key,  # PRNG key if using Jax
             image_class.scheduler.timesteps.to(image_class.device),  # sampling time interval discretization
@@ -86,7 +90,9 @@ if __name__ == "__main__":
             pcn_update_count=args.pCN_ct,  # number of pcn steps to take per update
             batch_size=image_class.batch_size,  # number of target samples to generate at once
         )
-
+        end =time.time()
+        
+        print(f'Total time: {end-start}')
 
         img_array = image_class.pipe.decode_latents(final_samples[-1].detach())
         decoded_images = tensors_to_pil(img_array)
