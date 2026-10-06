@@ -16,6 +16,7 @@ dependencies = [
     "jax>=0.8.2 ; sys_platform != 'linux'",
     "jax[cuda12]>=0.8.2 ; sys_platform == 'linux'",
     "lightning>=2.6.0",
+    "marimo>=0.25.1",
     "ml-collections>=1.1.0",
     "optax>=0.2.6",
     "orbax-checkpoint>=0.11.31",
