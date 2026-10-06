@@ -37,7 +37,8 @@ def save_all_subfigures(plot, plot_name, format='pdf', renaming=None, metadata_d
             save_name = f'{plot_name}.{"__".join(variable_names)}.{format}'
         else:
             save_name = f'{plot_name}.{format}'
-        pp.savefig(save_name, format=format, bbox_inches='tight', pad_inches=.01)
+        # pp.fig.set_layout_engine(layout="constrained",  h_pad=0.00, w_pad=0.00)
+        pp.savefig(save_name, format=format)
 
 
 def get_logged_metrics_file_paths(connection, conf_rows, file_path_format='~/out/rpcn-user-defined-events-reviews/runs/{}/metrics.csv'):

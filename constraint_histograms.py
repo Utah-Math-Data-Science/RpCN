@@ -33,7 +33,7 @@ with app.setup:
 
 @app.cell
 def _():
-    SAVE_DIR = Path('~/Overleaf/RpCN/imgs/dynamical_systems/ConstraintHistogram').expanduser()
+    SAVE_DIR = Path('~/Overleaf/RpCN/imgs/dynamical_systems').expanduser()
     SAVE_DIR
     return (SAVE_DIR,)
 
@@ -72,8 +72,10 @@ def _(dataset_constraint_values):
 
 @app.cell
 def _(duckdb_conn):
-    def alt_ids_to_logged_metrics(alt_ids):
+    def alt_ids_to_logged_metrics(alt_ids, has_constraint_values=True):
         logged_metrics = userfm.plots.get_logged_metrics(duckdb_conn, alt_ids).pl()
+        if not has_constraint_values:
+            return logged_metrics
         return duckdb_conn.sql("""
         select
             *
@@ -104,6 +106,7 @@ def _(duckdb_conn):
         join Dataset on TrainingAndEvaluation.Dataset = Dataset.id
         join DynamicalSystem on Dataset.id = DynamicalSystem.id
         where true
+        and log_constraint_values
         and chain_count in (2, 4, 6, 8)
         and pcn_update_count in (1, 2, 4, 8)
         """,
@@ -113,8 +116,37 @@ def _(duckdb_conn):
 
 
 @app.cell
-def _(alt_ids_to_logged_metrics, exp_rows_rpcn):
+def _(duckdb_conn):
+    exp_rows_fk = mo.sql(
+        f"""
+        select
+            alt_id,
+            FeynmanKac.*,
+            Dataset.sa_inheritance as dataset_name,
+        from Conf
+        join TrainingAndEvaluation on Conf.id = TrainingAndEvaluation.id
+        join Steering on Steering.id = TrainingAndEvaluation.Steering
+        join FeynmanKac on Steering.id = FeynmanKac.id
+        join Dataset on TrainingAndEvaluation.Dataset = Dataset.id
+        join DynamicalSystem on Dataset.id = DynamicalSystem.id
+        where true
+        and symmetric_binary_reward
+        and not log_constraint_values
+        and tilt in (select tilt from SweepDynamicalSystem)
+        and chain_count = 1
+        and ensemble_size in (2, 4, 6, 8)
+        and potential in ('DIFFERENCE', 'MAX', 'SUM')
+        order by dataset_name, ensemble_size, potential
+        """,
+        engine=duckdb_conn
+    )
+    return (exp_rows_fk,)
+
+
+@app.cell
+def _(alt_ids_to_logged_metrics, exp_rows_fk, exp_rows_rpcn):
     to_plot = alt_ids_to_logged_metrics(exp_rows_rpcn)
+    to_plot_fk = alt_ids_to_logged_metrics(exp_rows_fk, has_constraint_values=False).join(exp_rows_fk, on='alt_id').sort('alt_id')
     return (to_plot,)
 
 
@@ -166,10 +198,10 @@ def _(duckdb_conn):
         select
             *
         from (
-            pivot (select * from to_plot where dataset_name = 'Lorenz63')
+            pivot to_plot
             on pcn_update_count
-            using mean(cast(constraint_value > 0 as float))
-            group by chain_count
+            using mean(satisfactory_sample_count) / 500
+            group by dataset_name, chain_count
             order by chain_count desc
         )
         """,
@@ -179,40 +211,91 @@ def _(duckdb_conn):
 
 
 @app.cell
+def _(duckdb_conn):
+    pivoted_fk = mo.sql(
+        f"""
+        select
+            *
+        from (
+            pivot to_plot_fk
+            on case potential
+            	when 'DIFFERENCE' then 'DIFF'
+            	else potential
+            end
+            using mean(satisfactory_sample_count) / 500
+            group by dataset_name, ensemble_size
+            order by ensemble_size desc
+        )
+        """,
+        engine=duckdb_conn
+    )
+    return (pivoted_fk,)
+
+
+@app.cell
 def _(pivoted):
-    # pivoted_pd = pivoted.to_pandas().set_index("dataset_name")
-    # pivoted_pd.index = pivoted_pd.index.rename("Dataset")
     pivoted_pd = pivoted.to_pandas().set_index("chain_count")
-    pivoted_pd.columns = pivoted_pd.columns.astype(int).rename("$N$")
+    pivoted_pd.columns = pivoted_pd.columns.rename("$M$")
     pivoted_pd = pivoted_pd.sort_index(axis=1)
     pivoted_pd
     return (pivoted_pd,)
 
 
 @app.cell
+def _(pivoted_fk):
+    pivoted_pd_fk = pivoted_fk.to_pandas().set_index("ensemble_size")
+    pivoted_pd_fk.columns = pivoted_pd_fk.columns.rename("Potential")
+    pivoted_pd_fk = pivoted_pd_fk.sort_index(axis=1)
+    pivoted_pd_fk
+    return (pivoted_pd_fk,)
+
+
+@app.cell
 def _(SAVE_DIR, pivoted_pd):
-    _fig_width = page_width / 3
-    _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 1.0))
-    (
-        sns.heatmap(
-            data=pivoted_pd,
-            vmin=0,
-            # vmax=1,
-            annot=True,
-            ax=_ax,
-            fmt='.2f',
-            cmap='viridis',
-            cbar_kws=dict(shrink=.85, aspect=7),
+    _fig_width = page_width / 4
+    for _dataset_name in pivoted_pd['dataset_name'].unique():
+        _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 1.0))
+        _fig.set_layout_engine(layout="constrained",  h_pad=0.01, w_pad=0.01)
+        (
+            sns.heatmap(
+                data=pivoted_pd[pivoted_pd['dataset_name'] == _dataset_name].drop(columns='dataset_name'),
+                vmin=0,
+                vmax=1,
+                annot=True,
+                ax=_ax,
+                fmt='.2f',
+                cbar=False,
+                cmap='viridis',
+                cbar_kws=dict(shrink=.85, aspect=7),
+            )
+            .set(ylabel='$K+1$')
         )
-        .set(ylabel='KL')
-    )
-    _ax.xaxis.tick_top()
-    xticklabels = _ax.get_xticklabels()
-    xticklabels[0].set_text(f'$N$={xticklabels[0].get_text()}')
-    _ax.set_xticklabels(xticklabels)
-    _ax.xaxis.set_label_text('')
-    _ax.xaxis.set_label_position('top')
-    _ax.get_figure().savefig(SAVE_DIR/'Heatmap.TV.USMC.pdf', format='pdf', bbox_inches='tight', pad_inches=.00)
+        _ax.get_figure().savefig(SAVE_DIR/'ablation'/f'Heatmap.SR.RpCN.{_dataset_name}.pdf', format='pdf')
+    _ax
+    return
+
+
+@app.cell
+def _(SAVE_DIR, pivoted_pd_fk):
+    _fig_width = page_width / 4
+    for _dataset_name in pivoted_pd_fk['dataset_name'].unique():
+        _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 1.0))
+        _fig.set_layout_engine(layout="constrained",  h_pad=0.01, w_pad=0.01)
+        (
+            sns.heatmap(
+                data=pivoted_pd_fk[pivoted_pd_fk['dataset_name'] == _dataset_name].drop(columns='dataset_name'),
+                vmin=0,
+                vmax=1,
+                annot=True,
+                ax=_ax,
+                fmt='.2f',
+                cbar=False,
+                cmap='viridis',
+                cbar_kws=dict(shrink=.85, aspect=7),
+            )
+            .set(ylabel='Ens. size')
+        )
+        _ax.get_figure().savefig(SAVE_DIR/'ablation'/f'Heatmap.SR.FKSteering.{_dataset_name}.pdf', format='pdf')
     _ax
     return
 
@@ -227,7 +310,7 @@ def _(
     get_kl_divergences,
 ):
     # _fig_width = page_width * (1 - 1 / 2.45) / 2
-    _fig_width = (page_width - 20*pt) / 4
+    _fig_width = page_width / 4
     # _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 3.0))
     _exp_rows = pl.DataFrame([
         dict(dataset_name='Lorenz63', model='FKSteering', alt_id='4574bsrr'),
@@ -306,6 +389,7 @@ def _(
         _plot.despine(top=False, right=False)
         _plot.figure.set_figwidth(_fig_width * len(_to_plot_filtered['alt_id'].unique()))#/ len(dataset_constraint_values['dataset_name'].unique()))
         _plot.figure.set_figheight(_fig_width / golden_ratio / 1)
+        # _plot.fig.set_layout_engine(layout="constrained",  h_pad=0.00, w_pad=0.00)
         # h_pad, w_pad = .2, .5
         # w_pad_pt = w_pad*plt.rcParams['axes.labelsize']*pt
         # h_pad_pt = h_pad*plt.rcParams['axes.labelsize']*pt
@@ -313,7 +397,7 @@ def _(
         # _plot.tight_layout(h_pad=h_pad, w_pad=w_pad)
         # _plot.figure.subplots_adjust(left=0.18)
         _plots.append(_plot)
-        userfm.plots.save_all_subfigures(_plot, SAVE_DIR/_dataset_name/f'NiceHistogram')
+        userfm.plots.save_all_subfigures(_plot, SAVE_DIR/'ConstraintHistogram'/_dataset_name/f'NiceHistogram')
         # userfm.plots.save_all_subfigures(_plot, f'Histogram.{_dataset_name}')
     mo.hstack(_plots)
     return (histogram_kl_divergences,)
