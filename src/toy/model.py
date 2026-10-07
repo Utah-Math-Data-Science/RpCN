@@ -340,20 +340,14 @@ class EnsembleScoreModel:
         beta_t = self.prob_path.beta(t)
         return (latents + beta_t.square() * score) / alpha_t
 
-    def sample(self, time_step, training_data):
-        path_time = self.prob_path.linspace_time(self.cfg.sampling_time_step_count, device=training_data.device)
+    def sample(self, time_step, initial_data):
+        path_time = self.prob_path.linspace_time(self.cfg.sampling_time_step_count, device=initial_data.device)
         minus_time_step_size = path_time[1] - path_time[0]
         minus_time_step_size_abs_sqrt = minus_time_step_size.abs().sqrt()
-        ensemblet = self.prob_path.sample_noise(path_time[0], training_data)
+        ensemblet = self.prob_path.sample_noise(path_time[0], initial_data)
         for time_step, t_now_and_next in enumerate(path_time.unfold(0, 2, 1)):
             t_now = t_now_and_next[0]
-            means = self.prob_path.mean(t_now, training_data)
-            std = self.prob_path.std(t_now, training_data)
-            score = torch.vmap(
-                lambda member: self.score(t_now, member, means, std),
-                chunk_size=self.cfg.vmap_chunk_size,
-            )(ensemblet)
-            score = score.clamp(min=-self.cfg.sampling_max_score_norm, max=self.cfg.sampling_max_score_norm)
+            score = self._score_particles(t_now, ensemblet)
             g = self.prob_path.g(t_now)
             state_drift = ensemblet + minus_time_step_size * (self.prob_path.f(t_now, ensemblet) - g.square() * score)
             noise = torch.randn(
