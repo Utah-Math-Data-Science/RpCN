@@ -52,9 +52,9 @@ class VarianceExploding(ProbabilityPath):
 
     def t(self, i):
         i = i.to(torch.float64)
-        sigma_max_2 = self.sigma_max**2
-        t = sigma_max_2 * (
-            (self.sigma_min**2 / sigma_max_2)**i
+        sigma_min_2 = self.sigma_min**2
+        t = sigma_min_2 * (
+            (self.sigma_max**2 / sigma_min_2)**i
         )
         return t.float()
 

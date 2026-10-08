@@ -1,7 +1,36 @@
+from functools import partial
+
 from einops import reduce
 import torch
 import torch.distributions
 from torch.distributions.utils import _sum_rightmost
+
+
+class Euler:
+    @staticmethod
+    def stochastic(noise_level, noise_level_next):
+        if noise_level_next == 0:
+            return torch.zeros_like(noise_level_next)
+        return noise_level.square() - noise_level_next.square()
+
+    @classmethod
+    @torch.no_grad()
+    def step(cls, denoiser, noise_level, noise_level_next, x, noise_sampler=None):
+        """Take one reverse-VE-SDE Euler step in normalized coordinates.
+
+        ``x`` is distributed as ``x_0 + noise_level * eps``.  ``denoiser`` must
+        be callable as ``denoiser(noise_level, x)`` and return an estimate of
+        ``x_0``.  With ``noise_sampler=None`` the step is deterministic.  To
+        sample the reverse SDE, pass a callable such as ``torch.randn``;
+        it receives ``x.shape`` and must return noise with the same shape.
+        """
+        denoised = denoiser(noise_level, x)
+        if noise_level_next == 0:
+            return denoised
+        variance_step = cls.stochastic(noise_level, noise_level_next)
+        score = (denoised - x) / noise_level.square()
+        noise = 0 if noise_sampler is None else noise_sampler(x.shape)
+        return x + variance_step * score + variance_step.sqrt() * noise
 
 
 @torch.no_grad()
@@ -284,12 +313,7 @@ class Bao2024EnsembleScoreMatching(GaussianPath):
         return noise
 
 
-class EnsembleScoreModel:
-    def __init__(self, cfg, prob_path):
-        self.cfg = cfg
-        self.prob_path = prob_path
-        self.training_data = None
-
+class EnsembleDenoiser:
     @staticmethod
     def log_prob_to_weight_safe(log_prob, failed_to_sum_to_one_threshold=1e-9):
         weights = (log_prob - log_prob.max()).exp()
@@ -298,63 +322,62 @@ class EnsembleScoreModel:
         weights /= weights_sum
         return weights
 
-    def score(self, t, xt, means, std):
-        conditional_prob_path = Independent(Normal(loc=means, scale=std, validate_args=False), 1)
-        log_conditional_probs = conditional_prob_path.log_prob_unnormalized(xt)
-        weights = self.log_prob_to_weight_safe(log_conditional_probs)
-        conditional_scores = -(xt - means) / std.square()
-        return reduce(weights[:, None] * conditional_scores, 'member dim -> dim', 'sum')
+    @classmethod
+    def denoise(cls, training_samples, noise_level, particle):
+        conditional_prob_path = Independent(
+            Normal(loc=training_samples, scale=noise_level, validate_args=False),
+            1,
+        )
+        log_conditional_probs = conditional_prob_path.log_prob_unnormalized(particle)
+        weights = cls.log_prob_to_weight_safe(log_conditional_probs)
+        return reduce(weights[:, None] * training_samples, 'member ... -> ...', 'sum')
 
-    def set_training_data(self, training_data):
-        self.training_data = training_data
+    # @classmethod
+    # @torch.no_grad()
+    # def forward(cls, prob_path, training_samples, noise_level, particles, vmap_chunk_size=None):
+    #     """Return the ensemble posterior mean in normalized EDM coordinates."""
+    #     return torch.vmap(
+    #         lambda particle: cls._denoise_particle(training_samples, noise_level, particle),
+    #         chunk_size=vmap_chunk_size,
+    #     )(particles)
 
-    def _score_particles(self, t, particles):
-        if self.training_data is None:
-            raise ValueError("training_data is not set. Call set_training_data first.")
+    @staticmethod
+    def next_fn(denoiser, prob_path, t0, t1, particles, noise_sampler=None):
+        normalized_next = Euler.step(
+            denoiser,
+            prob_path.noise_level(t0), prob_path.noise_level(t1),
+            particles / prob_path.scale(t0),
+            noise_sampler=noise_sampler,
+        )
+        return normalized_next * prob_path.scale(t1)
 
-        means = self.prob_path.mean(t, self.training_data)
-        std = self.prob_path.std(t, self.training_data)
-        score = torch.vmap(
-            lambda member: self.score(t, member, means, std),
-            chunk_size=self.cfg.vmap_chunk_size,
-        )(particles)
-        return score.clamp(min=-self.cfg.sampling_max_score_norm, max=self.cfg.sampling_max_score_norm)
+    @staticmethod
+    def tweedie(denoiser, prob_path, t, particles):
+        return denoiser(prob_path.noise_level(t), particles / prob_path.scale(t))
 
-    def expected_next_fn(self, t0, t1, latents):
-        dt = t1 - t0
-        score = self._score_particles(t0, latents)
-        g = self.prob_path.g(t0)
-        drift = self.prob_path.f(t0, latents) - g.square() * score
-        return latents + dt * drift
-
-    def std_fn(self, t0, t1=None):
+    @staticmethod
+    def std_fn(prob_path, t0, t1=None):
+        noise_level = prob_path.noise_level(t0)
         if t1 is None:
-            return torch.tensor(1.0, device=self.training_data.device, dtype=self.training_data.dtype)
-        dt = t1 - t0
-        return dt.abs().sqrt() * self.prob_path.g(t0)
+            return noise_level * prob_path.scale(t0)
+        noise_level_next = prob_path.noise_level(t1)
+        if noise_level_next == 0:
+            return torch.zeros_like(noise_level_next)
+        variance_step = Euler.stochastic(noise_level, noise_level_next)
+        return variance_step.sqrt() * prob_path.scale(t1)
 
-    @torch.no_grad()
-    def get_tweedie(self, t, latents):
-        score = self._score_particles(t, latents)
-        alpha_t = self.prob_path.alpha(t)
-        beta_t = self.prob_path.beta(t)
-        return (latents + beta_t.square() * score) / alpha_t
-
-    def sample(self, time_step, initial_data):
-        path_time = self.prob_path.linspace_time(self.cfg.sampling_time_step_count, device=initial_data.device)
-        minus_time_step_size = path_time[1] - path_time[0]
-        minus_time_step_size_abs_sqrt = minus_time_step_size.abs().sqrt()
-        ensemblet = self.prob_path.sample_noise(path_time[0], initial_data)
-        for time_step, t_now_and_next in enumerate(path_time.unfold(0, 2, 1)):
-            t_now = t_now_and_next[0]
-            score = self._score_particles(t_now, ensemblet)
-            g = self.prob_path.g(t_now)
-            state_drift = ensemblet + minus_time_step_size * (self.prob_path.f(t_now, ensemblet) - g.square() * score)
-            noise = torch.randn(
-                ensemblet.shape,
-                device=ensemblet.device,
-                dtype=ensemblet.dtype,
+    @classmethod
+    def sample(cls, denoiser, prob_path, training_samples, solver, count, i0, i1, steps, generator=None):
+        device, dtype = training_samples.device, training_samples.dtype
+        i = torch.linspace(i0, i1, steps, device=device, dtype=dtype)
+        t = prob_path.t(i)
+        noise_levels = prob_path.noise_level(t)
+        x = noise_levels[0] * torch.randn((count, *training_samples.shape[1:]), device=device, dtype=dtype, generator=generator)
+        for noise_level, noise_level_next in noise_levels.unfold(0, 2, 1):
+            x = solver(
+                denoiser,
+                noise_level, noise_level_next,
+                x,
+                noise_sampler=partial(torch.randn, device=device, dtype=dtype, generator=generator)
             )
-            ensemblet = state_drift + minus_time_step_size_abs_sqrt * g * noise
-            ensemble = ensemblet
-        return ensemble
+        return denoiser(noise_levels[-1], x)
