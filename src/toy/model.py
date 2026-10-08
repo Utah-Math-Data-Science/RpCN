@@ -323,23 +323,25 @@ class EnsembleDenoiser:
         return weights
 
     @classmethod
-    def denoise(cls, training_samples, noise_level, particle):
+    def denoise(
+        cls,
+        training_samples,
+        noise_level, particle,
+        smoothing_std=0.0, smoothing_samples=1,
+        generator=None,
+    ):
         conditional_prob_path = Independent(
             Normal(loc=training_samples, scale=noise_level, validate_args=False),
             1,
         )
-        log_conditional_probs = conditional_prob_path.log_prob_unnormalized(particle)
-        weights = cls.log_prob_to_weight_safe(log_conditional_probs)
+        if smoothing_std > 0:
+            perturbed = particle + smoothing_std * torch.randn((smoothing_samples, *particle.shape), device=particle.device, dtype=particle.dtype, generator=generator)
+            log_conditional_probs = conditional_prob_path.log_prob_unnormalized(perturbed[:, None])
+            weights = torch.vmap(cls.log_prob_to_weight_safe)(log_conditional_probs).mean(0)
+        else:
+            log_conditional_probs = conditional_prob_path.log_prob_unnormalized(particle)
+            weights = cls.log_prob_to_weight_safe(log_conditional_probs)
         return reduce(weights[:, None] * training_samples, 'member ... -> ...', 'sum')
-
-    # @classmethod
-    # @torch.no_grad()
-    # def forward(cls, prob_path, training_samples, noise_level, particles, vmap_chunk_size=None):
-    #     """Return the ensemble posterior mean in normalized EDM coordinates."""
-    #     return torch.vmap(
-    #         lambda particle: cls._denoise_particle(training_samples, noise_level, particle),
-    #         chunk_size=vmap_chunk_size,
-    #     )(particles)
 
     @staticmethod
     def next_fn(denoiser, prob_path, t0, t1, particles, noise_sampler=None):
