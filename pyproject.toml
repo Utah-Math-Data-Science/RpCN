@@ -2,7 +2,8 @@
 name = "ttg"
 version = "0.1.0"
 description = "Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN"
-readme = "README.md"
+readme = "README.rst"
+licence = { file = "LICENCE" }
 authors = [
     { name = "Taos Transue", email = "spacechips@rocketmail.com" }
 ]
@@ -20,8 +21,8 @@ torch = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
