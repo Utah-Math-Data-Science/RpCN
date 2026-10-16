@@ -32,6 +32,79 @@ Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN in one
 the Array API standard (2025.12). It runs on JAX, PyTorch (through `array-api-compat`) and `array_api_strict`.
 The specification is `../impl.md`.
 
+Examples
+--------
+
+Every method calls your model through one ``evaluate`` function. Build it from a noise-prediction network
+``eps_net(x [B, *D], t [B]) -> eps`` and a reward ``reward(x0 [B, *D]) -> [B]``, both PyTorch callables
+(``make_evaluate_jax`` and ``JaxBackend`` are the JAX equivalents):
+
+.. code:: python
+
+   from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature,
+                    FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep, ReverseSDE,
+                    VPLinear, constant, crepe, das_lambda, ladder, level_lambda, make_evaluate_torch, smc, tilt,
+                    x0_from_eps)
+   from ttg.backend import TorchBackend
+
+   bk = TorchBackend()
+   xp = bk.xp                                        # array_api_compat.torch
+   sch = VPLinear()
+   D = (3, 32, 32)                                   # event shape of one sample
+   I, N = 4, 16                                      # independent instances x particles
+   evaluate = make_evaluate_torch(eps_net, lambda x, t, eps, s: (x0_from_eps(x, t, eps, s), eps), sch, reward)
+
+   u = xp.linspace(1.0, 0.0, 100, dtype=xp.float32)  # schedule coordinate, noise (1) to data (0)
+   P = PosteriorStep(sch)
+   start = sch.prior((I, N), D, xp=xp, dtype=xp.float32)
+   key = bk.key(0)
+
+**FK steering**
+
+.. code:: python
+
+   fk = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=P,
+            potential=FKDiff(constant(10.0)), policy=Every(5), final_needs={Feature.X0}, key=key)
+   x0, log_w = fk.final.x0, fk.log_w                 # [I, N, *D] samples, [I, N] log-weights
+
+**DAS**
+
+.. code:: python
+
+   lam = das_lambda(sch.time(u), gamma=0.008, alpha_kl=0.01)
+   das = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=Guided(P, tilt(lam)),
+             potential=FKDiff(lam), policy=ESSBelow(0.5), final_needs={Feature.X0}, key=key)
+
+**RpCN** — the particle axis is a temperature ladder :math:`0 = \beta_0 < \dots < \beta_K = \beta`;
+there is no resampling.
+
+.. code:: python
+
+   K, beta = 3, 10.0
+   betas = xp.linspace(0.0, beta, K + 1, dtype=xp.float32)
+   P = DDIMStep(sch, eta=1.0)
+   rpcn = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, bk=bk, evaluate=evaluate, schedule=sch,
+              target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
+              move=PCN(n_steps=20, step=constant(0.95), pairs=EvenOdd()), move_at=lambda k: k % 20 == 0,
+              final_needs={Feature.X0}, key=key)
+   coldest = rpcn.final.x0[:, K]                     # [I, *D]: the beta_K = beta replica
+
+**CREPE** — replica exchange across noise levels :math:`0 = u_0 < \dots < u_M = 1`.
+
+.. code:: python
+
+   u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)
+   lam = level_lambda(sch.time(xp.asarray(u_levels, dtype=xp.float32)), beta=10.0, rho=1.0)
+   B_P = EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD)
+   cfg = CREPEConfig(u_levels=u_levels, K=10, F_P=Noising(sch), F_Q=Noising(sch), B_P=B_P,
+                     B_Q=Guided(B_P, tilt(lam)), lam=lam,
+                     local_move=LangevinMove(Guided(Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), tilt(lam, 0.5))),
+                     local_levels=(0, 1, 2, 3))
+   samples, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
+                             dtype=xp.float32, key=key)   # samples: [100, period, I, 1, *D]
+
+The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
+
 ## Commands
 
 ```sh
