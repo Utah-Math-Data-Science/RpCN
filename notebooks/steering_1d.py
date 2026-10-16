@@ -54,10 +54,6 @@ def _():
 
     # Denoiser
     sm_n_training_samples = mo.ui.number(start=128, stop=32768, step=128, value=9984, label="sm_n_training_samples")
-    # sm_epsilon_alpha = mo.ui.number(start=1e-6, stop=0.2, step=1e-4, value=1e-3, label="SM epsilon_alpha")
-    # sm_epsilon_beta = mo.ui.number(start=1e-8, stop=0.2, step=1e-5, value=1e-5, label="SM epsilon_beta")
-    # sm_vmap_chunk_size = mo.ui.number(start=8, stop=100_000, step=8, value=100_000, label="SM vmap_chunk_size")
-    # sm_max_score_norm = mo.ui.number(start=1.0, stop=1000.0, step=1.0, value=100.0, label='SM max score norm')
     sm_n_sampling_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="sm_n_sampling_steps")
 
 
