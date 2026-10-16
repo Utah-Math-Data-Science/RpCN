@@ -1,14 +1,40 @@
 [project]
-name = "spt-guidance"
+name = "ttg"
 version = "0.1.0"
-description = "Official Residual preconditioned Crank-Nicolson library. Also, includes other an unofficial Feynmann-Kac (FK) steering and other test-time guidance methods."
-readme = "README.rst"
-licence = { file = "LICENCE" }
+description = "Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN"
+readme = "README.md"
 authors = [
+    { name = "Taos Transue", email = "spacechips@rocketmail.com" }
 ]
-requires-python = ">=3.9"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "array-api-compat>=1.14",
+]
+
+[project.optional-dependencies]
+jax = [
+    "jax>=0.4.26",
+]
+torch = [
+    "torch>=2.0",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "array-api-strict>=2.5",
+    "hypothesis>=6.100",
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: statistical tests (section 18.4); run with -m slow"]
+addopts = "-m 'not slow'"
+filterwarnings = [
+    "ignore:Could not determine whether module array_api_compat.torch",   # expected (§18.1)
+    "ignore:CUDA initialization",
+]
