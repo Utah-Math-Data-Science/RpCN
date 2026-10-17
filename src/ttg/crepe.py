@@ -370,7 +370,7 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
 
     def block(R, key, emitting):                                     # emitting: static
         outs = []
-        for n, kk in zip(range(L), bk.split(key, L)):
+        for n, kk in enumerate(bk.split(key, L)):
             k_x, k_l, k_r = bk.split(kk, 3)
             R = replica_exchange(R, cfg.pairs, xchg, sweep=n, key=k_x, bk=bk)
             if cfg.local_move is not None:                           # static
