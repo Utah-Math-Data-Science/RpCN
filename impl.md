@@ -1278,13 +1278,15 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
     return stack_levels(levels)                                      # [I, M+1, ...]
 ```
 
-**The sweep loop.** The scan body covers $L = \operatorname{lcm}(\texttt{cfg.pairs.period}, \texttt{thin})$ sweeps, so its static structure is fixed and the pair-schedule parity lines up across blocks. It emits after every `thin`-th sweep.
+**The sweep loop.** A block is $L = \operatorname{lcm}(\texttt{cfg.pairs.period}, \texttt{thin})$ sweeps, so the scan body's static structure is fixed and the pair-schedule parity lines up across blocks. `crepe` first runs `burn_in` blocks that emit nothing, then `n_blocks` blocks that emit after every `thin`-th sweep: two scans, because whether a block emits must be static.
 
 ```python
-def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None, thin=1):
+def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None, thin=1,
+          burn_in=0):
     # emit: Record [I, 1, ...] -> any pytree of arrays (e.g. r.x0, (r.x0, r.reward), or a projected Record)
     # R0: replicas from an earlier call (its returned R) to continue from; None starts with crepe_init
     # thin: emit after every thin-th sweep only (static int >= 1); the sweeps in between still run
+    # burn_in: blocks (L sweeps each) run first with nothing emitted or stored (static int >= 0)
     xp = bk.xp
     k_init, k_run = bk.split(key, 2)                                 # same split whether or not R0 is given
     if R0 is None:                                                   # static
@@ -1297,7 +1299,7 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     xchg = PathExchange(cfg, evaluate, schedule)
     top_used = lambda n: any(cfg.M in p for rnd in cfg.pairs.rounds(cfg.M + 1, n) for p in rnd)   # static
     L = math.lcm(cfg.pairs.period, thin)                             # static: sweeps per scan body
-    def body(R, key):
+    def block(R, key, emitting):                                     # emitting: static
         outs = []
         for n, kk in zip(range(L), bk.split(key, L)):
             k_x, k_l, k_r = bk.split(kk, 3)
@@ -1311,14 +1313,18 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
                 top = top_replica(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule,
                                   dtype=dtype, device=device, key=k_r)
                 R = put_levels(R, [cfg.M], top)
-            if (n + 1) % thin == 0:                                  # static
+            if emitting and (n + 1) % thin == 0:                     # static
                 outs.append(emit(take_levels(R, [0])))               # e.g. lambda r: r.x0
-        return R, tree_map(lambda *a: xp.stack(a), *outs)           # any pytree, not just an array
-    R, samples = bk.scan(body, R, bk.split(k_run, n_blocks))
+        return R, (tree_map(lambda *a: xp.stack(a), *outs) if emitting else None)   # any pytree
+    k_burn, k_samp = bk.split(k_run, 2)
+    if burn_in > 0:                                                  # static
+        R, _ = bk.scan(lambda R, k: block(R, k, False), R, bk.split(k_burn, burn_in))
+    R, samples = bk.scan(lambda R, k: block(R, k, True), R, bk.split(k_samp, n_blocks))
     return samples, R      # samples: every leaf [n_blocks, L // thin, I, 1, ...]; R: [I, M+1, ...]
 ```
 
-- **Sweeps run:** `n_blocks * L`, of which `n_blocks * L // thin` are emitted. With the default `thin=1`, $L$ is the pair schedule's period and nothing changes.
+- **Sweeps run:** `(burn_in + n_blocks) * L`, of which `n_blocks * L // thin` are emitted. The burn-in sweeps cost the same evaluations as any other sweep but store nothing. With the defaults (`thin=1`, `burn_in=0`), $L$ is the pair schedule's period and nothing changes.
+- **Burn-in with continuation:** a run continued from `R0` usually needs `burn_in=0`, because its replicas are already past burn-in.
 - **Choosing `thin`:** emit a cheap scalar first (e.g. `lambda r: r.reward`), estimate its integrated autocorrelation time $\tau_{\text{int}}$ in sweeps, and set `thin` to about $2\tau_{\text{int}}$. Kept samples are then close to independent. That matters for `crepe_finish`: every kept sample costs `n_tail` evaluations there, and correlated particles make its effective sample size, and therefore its resampling decisions, overstate the information in the ensemble.
 - **When not to thin:** for plain averages over CREPE's own samples, thinning only discards information. Use it to cut memory or downstream cost.
 
@@ -1336,13 +1342,12 @@ Otherwise the top level is approximately, not exactly, at its target. The approx
 def finish_needs(cfg):          # what emit must keep for crepe_finish (emit = lambda r: r.project(finish_needs(cfg)))
     return cfg.B_P.requires | cfg.B_Q.requires | {Feature.REWARD}
 
-def pool_samples(samples, burn_in=0):
-    # leaves [n_blocks, E, I, 1, ...] (E = emits per block) -> [I, n_blocks * E - burn_in, ...]:
-    # one instance per chain; its particles are that chain's emitted samples in order, minus the first burn_in
+def pool_samples(samples):
+    # leaves [n_blocks, E, I, 1, ...] (E = emits per block) -> [I, n_blocks * E, ...]:
+    # one instance per chain; its particles are that chain's emitted samples in order (burn-in is crepe's job)
     def pool(a):
         nb, E, I = a.shape[0], a.shape[1], a.shape[2]
-        a = xp.reshape(a, (nb * E, I) + tuple(a.shape[4:]))[burn_in:]   # level axis (size 1) dropped
-        return xp.moveaxis(a, 0, 1)
+        return xp.moveaxis(xp.reshape(a, (nb * E, I) + tuple(a.shape[4:])), 0, 1)   # level axis (size 1) dropped
     return tree_map(pool, samples)
 
 def tail_grid(cfg, n_tail, *, xp, dtype, device=None):   # [n_tail + 1], exactly u_levels[0] down to exactly 0
@@ -1388,6 +1393,7 @@ These counts are asserted by the tests.
 | `crepe_init` | $I(1 + M K)$ |
 | CREPE sweep $n$ | $I\,(2K P_n + \lvert\text{local levels}\rvert + R_n)$ |
 | `crepe` with `R0` given | no `crepe_init` rows; sweeps as above |
+| `crepe` with `burn_in` $= b$ | $b L$ sweeps before sampling, each counted as above |
 | `crepe_finish`, start `[I, N]` | $I N \cdot$ `n_tail` |
 
 For a CREPE sweep:
@@ -1612,7 +1618,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | X2 | with $F^Q = F^P$ and $B^Q = B^P$: it reduces to endpoint tilts; with $F^Q = F^P$ only: to the $B$-only formula of §16 |
 | X3 | the replica invariant (fixed level times, exactly `replica_needs`) holds after any number of blocks |
 | X4 | evaluation counts per sweep match §17 for both `EvenOdd` and `SequentialSweep` |
-| X5 | `emit` may return any pytree: with `emit = lambda r: r.project(finish_needs(cfg))`, `samples` is a `Record` whose leaves have leading axes `[n_blocks, L // thin, I, 1]` with $L = \operatorname{lcm}(\text{period}, \text{thin})$. With a counting `emit`, the run makes `n_blocks * L` sweeps (counts per §17) and emits `n_blocks * L // thin` times, after sweeps `thin, 2 thin, ...`. `pool_samples(samples, b)` has leading axes `[I, n_blocks * L // thin - b]`, keeps every chain's samples in emit order, and never mixes chains within an instance |
+| X5 | `emit` may return any pytree: with `emit = lambda r: r.project(finish_needs(cfg))`, `samples` is a `Record` whose leaves have leading axes `[n_blocks, L // thin, I, 1]` with $L = \operatorname{lcm}(\text{period}, \text{thin})$. With a counting `emit`, the run makes `n_blocks * L` sweeps (counts per §17) and emits `n_blocks * L // thin` times, after sweeps `thin, 2 thin, ...`. With `burn_in=b`, the run makes `(b + n_blocks) * L` sweeps, `emit` is first called after sweep `b L + thin`, and `samples` keeps the same shape. `pool_samples(samples)` has leading axes `[I, n_blocks * L // thin]`, keeps every chain's samples in emit order, and never mixes chains within an instance |
 | X6 | `crepe(..., R0=R)` makes no `crepe_init` evaluations (counts per §17), keeps the replica invariant, raises `PartialRecord` if `R0` lacks `replica_needs`, and with `n_blocks = 0` returns `R0.project(cfg.replica_needs)` unchanged |
 | X7 | `crepe_finish` raises `ValueError` when `u_levels[0] == 0`. With `exact=False`, its `log_w` is identically 0, and it equals `smc(start, tail_grid(...), target=proposal=cfg.B_Q, potential=Zero(), policy=Never())` for the same key. With `exact=True` and `Never()`, its `log_w` equals, along a replayed tail, $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}} + \sum [\log B^P - \log B^Q]$; `tail_grid` starts at exactly `u_levels[0]` and ends at exactly 0 |
 
@@ -1683,7 +1689,7 @@ These are seeded and marked `slow`. On the Gaussian toy, FK, DAS, FK + pCN, RpCN
 | DAS | `Guided(P, tilt(lam))` proposal, `FKDiff(lam)`, `ESSBelow(0.5)`, `lam = das_lambda(t_grid, gamma=0.008, alpha_kl=0.5)`; $N = 256$, $I = 16$ |
 | FK + pCN | as FK with `FKDiff`, plus `PCN(n_steps=2, step=constant(0.3))` and `move_at=lambda k: k % 5 == 0` |
 | RpCN | $K = 3$, `betas = linspace(0, 2, 4)`, `step_sizes = (0.95, 0.95, 0.95, 0.95)`, `PCN(n_steps=20, step=ladder(step_sizes), pairs=EvenOdd())` at **every** step, `Never()`; $I = 2^{12}$; the estimate uses rung $K$ only. RpCN is exact only as mixing becomes complete, so its bound adds $0.02$ for that bias: $4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2} + 0.02$ |
-| CREPE | `u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)`, $K = 10$, `level_lambda(..., beta=2.0, rho=1.0)` (so $\lambda = 2$ at level 0 and $0$ at the top), the default kernels of §16, `Langevin(h=lambda t: 0.01 * sch.std(t)**2)` on levels 0–3, `EvenOdd()`; $I = 2^{10}$ chains, 400 blocks, the first 100 discarded, level-0 samples pooled. **Reference:** the plain sampler using `cfg.B_P` on CREPE's own grid (the `fine_grid`s of every gap concatenated, from level $M$ down to level 0), reweighted by $e^{\lambda_0 \hat r}$ at level 0, where $\lambda_0 = 2$ |
-| CREPE + finish | as the CREPE row, but `u_levels = (0.25, 0.5, 0.75, 1.0)` (so $u_0 > 0$), `emit = lambda r: r.project(finish_needs(cfg))`, `thin=4` (so $L = 4$; 400 blocks give 400 emits), then `crepe_finish(pool_samples(samples, 100), cfg, n_tail=10, exact=True)` with its default `ESSBelow(0.5)`; the estimate is the self-normalised `log_w` average of the final `x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's grid from level $M$ down to level 0, then on `tail_grid(cfg, 10)` down to $u = 0$, reweighted by $e^{2 \hat r}$ at the end. `exact=False` has no statistical test: it is approximate by design |
+| CREPE | `u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)`, $K = 10$, `level_lambda(..., beta=2.0, rho=1.0)` (so $\lambda = 2$ at level 0 and $0$ at the top), the default kernels of §16, `Langevin(h=lambda t: 0.01 * sch.std(t)**2)` on levels 0–3, `EvenOdd()`; $I = 2^{10}$ chains, `burn_in=100`, `n_blocks=300`, level-0 samples pooled. **Reference:** the plain sampler using `cfg.B_P` on CREPE's own grid (the `fine_grid`s of every gap concatenated, from level $M$ down to level 0), reweighted by $e^{\lambda_0 \hat r}$ at level 0, where $\lambda_0 = 2$ |
+| CREPE + finish | as the CREPE row, but `u_levels = (0.25, 0.5, 0.75, 1.0)` (so $u_0 > 0$), `emit = lambda r: r.project(finish_needs(cfg))`, `thin=4`, `burn_in=100`, `n_blocks=300` (so $L = 4$ and 300 emits per chain), then `crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True)` with its default `ESSBelow(0.5)`; the estimate is the self-normalised `log_w` average of the final `x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's grid from level $M$ down to level 0, then on `tail_grid(cfg, 10)` down to $u = 0$, reweighted by $e^{2 \hat r}$ at the end. `exact=False` has no statistical test: it is approximate by design |
 | pass condition | $\lvert \bar m - \bar m_{\text{ref}} \rvert \le 4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2}$ for both coordinates, with each standard error taken from the spread across the 8 seeds |
 | sanity check | for each tested $\lambda$, the same tolerance must **fail** for $\lambda = 0$ against that $\lambda$'s reference, so the test can detect a missing tilt |
