@@ -207,7 +207,7 @@ def _(
     sm_n_training_samples,
 ):
     prob_path = toy.prob_path.EDM(data_std=gmm.stddev, sigma_min=1e-3, sigma_max=10)
-    def get_denoiser(smoothing_std=0.16, vmap_chunk_size=None):
+    def get_denoiser(smoothing_std=0.0, vmap_chunk_size=None):
         # Batched over (noise level, particle), the `network(x [B, *D], t [B])` shape ttg expects.
         return torch.vmap(
             partial(EnsembleDenoiser.denoise, training_samples, smoothing_std=smoothing_std, generator=torch.Generator(device=device).manual_seed(rng_seed_denoiser)),
