@@ -87,8 +87,9 @@ def piecewise_linear(knots, values):     # knots: 1-D increasing
     def lam(t):
         xp = namespace(t, knots, values)
         kn, va = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
-        j = xp.clip(xp.searchsorted(kn, xp.reshape(t, (-1,))), 1, kn.shape[0] - 1)
-        j = xp.reshape(j, t.shape)                   # searchsorted wants a 1-D sorted first argument
+        # searchsorted(kn, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
+        j = xp.sum(xp.astype(kn < t[..., None], xp.int64), axis=-1)
+        j = xp.clip(j, 1, kn.shape[0] - 1)
         k0, k1, v0, v1 = take1d(kn, j - 1), take1d(kn, j), take1d(va, j - 1), take1d(va, j)
         return v0 + (t - k0) / (k1 - k0) * (v1 - v0)
     return lam
