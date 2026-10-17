@@ -45,7 +45,7 @@ All code below is **pseudocode in Python syntax**. It is meant to pin down inter
 | stage | modules | done when these pass |
 |---|---|---|
 | 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K13, C1–C2, N2–N3 |
-| 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P5, R1–R4, E1–E4, N1, N4 |
+| 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P5, R1–R5, E1–E4, N1, N4 |
 | 3 | `moves.py`, `exchange.py` (FK + pCN, RpCN) | M1–M7, E5, §17 counts with moves |
 | 4 | `crepe.py` | X1–X4 |
 | 5 | statistical tests (§18.4) | all five methods pass; the $\lambda = 0$ sanity check fails as intended |
@@ -110,7 +110,7 @@ ttg/
   guidance.py    guidance scales: tilt, normalized
   lam.py         constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
   potentials.py  TiltDifference (default increment); Zero, FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum
-  resample.py    ess, systematic, masked_resample; policies Never, Every, ESSBelow
+  resample.py    ess, systematic, categorical, masked_resample; policies Never, Every, ESSBelow
   moves.py       MoveContext, rescore, tilt_delta, PCN, LangevinMove
   exchange.py    PairSchedule (SequentialSweep, EvenOdd), Exchange (StateSwap), replica_exchange
   smc.py         smc()
@@ -214,7 +214,14 @@ def take_rows(a, idx):                           # a [I, N, ...], idx [I, N] -> 
     return unflatten_leading(xp.take(flat, flat_idx, axis=0), (I, N))
 
 def take_levels(tree, levels):                   # static list of positions on axis 1
-    return tree_map(lambda a: xp.take(a, xp.asarray(levels, device=device(a)), axis=1), tree)
+    runs = []                                    # maximal runs of consecutive levels, as (start, stop)
+    for m in levels:
+        if runs and runs[-1][1] == m: runs[-1] = (runs[-1][0], m + 1)
+        else: runs.append((m, m + 1))
+    def take(a):                                 # slices, not an index array: no host-to-device copy (a GPU sync)
+        parts = [a[:, lo:hi, ...] for lo, hi in runs]
+        return parts[0] if len(parts) == 1 else xp.concat(parts, axis=1)
+    return tree_map(take, tree)
 
 def put_levels(tree, levels, sub):               # no functional index-set in the standard:
     def put(a, b):                               # rebuild axis 1 statically
@@ -239,10 +246,9 @@ def lead_shape(start):                           # Gaussian -> var.shape; Point 
 
 **Array-API gaps to check per backend:**
 - `cumulative_sum`;
-- `searchsorted` (1-D sorted first argument only);
 - `take` with `axis`.
 
-Systematic resampling avoids `searchsorted` on 2-D arrays (§10).
+Nothing uses `searchsorted` (some backends accept only a 1-D sorted first argument and contiguous needles). Sorted lookups count instead: the index of `v` in sorted `a` (side `"left"`) is `sum(a < v)` over `a`'s axis. Systematic and categorical resampling (§10) and `piecewise_linear` (§8) all do this.
 
 ## 5. Schedule
 
@@ -641,8 +647,9 @@ def tabulated(knots, values):   # exact at the knots; nearest-knot lookup (only 
 def piecewise_linear(knots, values):     # knots: 1-D increasing
     def lam(t):
         kn, va = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
-        j = xp.clip(xp.searchsorted(kn, xp.reshape(t, (-1,))), 1, kn.shape[0] - 1)
-        j = xp.reshape(j, t.shape)                   # searchsorted wants a 1-D needle-free API; flatten t
+        # searchsorted(kn, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
+        j = xp.sum(xp.astype(kn < t[..., None], xp.int64), axis=-1)
+        j = xp.clip(j, 1, kn.shape[0] - 1)
         k0, k1, v0, v1 = take1d(kn, j - 1), take1d(kn, j), take1d(va, j - 1), take1d(va, j)
         return v0 + (t - k0) / (k1 - k0) * (v1 - v0)
     return lam
@@ -808,13 +815,22 @@ def ess(log_w):                                   # [I, N] -> [I]
     lw = log_w - logsumexp(log_w, axis=1, keepdims=True)
     return xp.exp(-logsumexp(2 * lw, axis=1))
 
+def _cdf(log_w):                                  # [I, N] -> [I, N]
+    return xp.cumulative_sum(xp.exp(log_w - logsumexp(log_w, axis=1, keepdims=True)), axis=1)
+
 def systematic(bk, log_w, key):                   # [I, N] -> idx [I, N]
     I, N = log_w.shape
-    w = xp.exp(log_w - logsumexp(log_w, axis=1, keepdims=True))
-    cdf = xp.cumulative_sum(w, axis=1)
-    u = (bk.uniform(key, (I, 1), w.dtype, device=device(w)) + xp.arange(N, dtype=w.dtype, device=device(w))[None, :]) / N
+    cdf = _cdf(log_w)
+    u = (bk.uniform(key, (I, 1), cdf.dtype, device=device(log_w)) + xp.arange(N, dtype=cdf.dtype, device=device(log_w))[None, :]) / N
     idx = xp.sum(xp.astype(cdf[:, None, :] < u[:, :, None], xp.int64), axis=2)   # O(N^2); avoids 2-D searchsorted
-    return xp.minimum(idx, N - 1)
+    return xp.clip(idx, max=N - 1)
+
+def categorical(bk, log_w, key):                  # [I, N] -> idx [I]: one draw per instance, by CDF inversion
+    I, N = log_w.shape
+    cdf = _cdf(log_w)
+    u = bk.uniform(key, (I, 1), cdf.dtype, device=device(log_w))
+    idx = xp.sum(xp.astype(cdf < u, xp.int64), axis=1)
+    return xp.clip(idx, max=N - 1)
 
 def masked_resample(bk, tree, log_w, do, key):    # do: [I] bool
     I, N = log_w.shape
@@ -837,6 +853,8 @@ class ESSBelow:
     frac: float
     def should_resample(self, log_w, k): return ess(log_w) < self.frac * log_w.shape[1]
 ```
+
+**Picking one particle.** To select a single particle per instance (e.g. from an `smc` run's final `log_w`), use `categorical`. A fixed column of `systematic` is not such a draw: column $j$ always falls in the $j$-th $1/N$ stratum of the CDF.
 
 **Ladders and resampling.** When axis 1 is a temperature ladder (RpCN), positions have different targets, so resampling along it is invalid. Use `Never()`.
 
@@ -938,13 +956,18 @@ class EvenOdd:                  # deterministic even-odd (DEO): all pairs of one
 class Exchange(Protocol):
     def propose(self, ladder, lo, hi, key, bk) -> tuple[Tree, Tree, Array]: ...
     # candidates for positions lo and hi (pytrees [I, P, ...]) and log-acceptance [I, P]
+    # Optional, for exchanges that swap whole states (StateSwap): view(ladder) -> Tree, the part of the
+    # ladder the acceptance reads, and log_accept(view, lo, hi) -> [I, P]. Their presence selects the fast path.
 
 def replica_exchange(ladder, pairs: PairSchedule, exchange: Exchange, *, sweep, key, bk):
     # sweep: Python int (static) or traced int scalar (e.g. from the runner's step index)
     n = axis1_size(ladder)
+    whole_states = hasattr(exchange, "log_accept")                      # static: e.g. StateSwap
     def for_residue(res):                                                # res: static int in range(period)
         def run(ladder):
             rounds = [r for r in pairs.rounds(n, res) if r]
+            if whole_states:
+                return _swap_states(ladder, rounds, exchange, key, bk)
             for pr, kk in zip(rounds, bk.split(key, max(len(rounds), 1))):
                 lo, hi = [a for a, _ in pr], [b for _, b in pr]
                 k_p, k_a = bk.split(kk, 2)
@@ -959,16 +982,48 @@ def replica_exchange(ladder, pairs: PairSchedule, exchange: Exchange, *, sweep, 
         return for_residue(sweep % pairs.period)(ladder)
     return bk.switch(sweep % pairs.period, [for_residue(r) for r in range(pairs.period)], ladder)
 
+def _permute(tree, perm):                        # perm [I, n]: position k takes the state at perm[i, k]
+    def take(a):
+        idx = xp.broadcast_to(bcast(perm, a), tuple(perm.shape) + tuple(a.shape[2:]))
+        return xp.take_along_axis(a, idx, axis=1)
+    return tree_map(take, tree)
+
+def _swap_states(ladder, rounds, exchange, key, bk):
+    # Rounds decide acceptance from exchange.view(ladder) alone, tracking a per-row permutation of
+    # ladder positions; the whole ladder is permuted once at the end. Same draws and result as the generic path.
+    view = exchange.view(ladder)
+    lv = leaves(view)[0]
+    n = lv.shape[1]
+    perm = xp.broadcast_to(xp.arange(n, device=device(lv))[None, :], (lv.shape[0], n))
+    for pr, kk in zip(rounds, bk.split(key, max(len(rounds), 1))):
+        lo, hi = [a for a, _ in pr], [b for _, b in pr]
+        _, k_a = bk.split(kk, 2)                                         # k_p unused, as in StateSwap.propose
+        log_a = exchange.log_accept(_permute(view, perm), lo, hi)
+        u = bk.uniform(k_a, log_a.shape, log_a.dtype, device=device(log_a))
+        acc = xp.log(u) < log_a                                          # [I, P]
+        p_lo, p_hi = take_levels(perm, lo), take_levels(perm, hi)
+        perm = put_levels(put_levels(perm, lo, xp.where(acc, p_hi, p_lo)), hi, xp.where(acc, p_lo, p_hi))
+    return _permute(ladder, perm) if rounds else ladder
+
+def _swap_perm(n, lo, hi):
+    perm = list(range(n))
+    for a, b in zip(lo, hi): perm[a], perm[b] = b, a
+    return perm
+
 @dataclass(frozen=True)
 class StateSwap:                # plain parallel tempering: exchange states; 0 evaluations
     potential: Potential
     def propose(self, ctx, lo, hi, key, bk):
-        perm = list(range(axis1_size(ctx)))
-        for a, b in zip(lo, hi): perm[a], perm[b] = b, a
-        swapped = take_levels(ctx, perm)                           # rec, st, st_prev, ref move together
-        d = self.potential.log_tilt(swapped.st) - self.potential.log_tilt(ctx.st)   # [I, n]
-        return take_levels(swapped, lo), take_levels(swapped, hi), take_levels(d, lo) + take_levels(d, hi)
+        swapped = take_levels(ctx, _swap_perm(axis1_size(ctx), lo, hi))   # rec, st, st_prev, ref move together
+        return take_levels(swapped, lo), take_levels(swapped, hi), self.log_accept(ctx.st, lo, hi)
+    def view(self, ctx): return ctx.st                                    # all that log_accept reads
+    def log_accept(self, st, lo, hi):                                     # [I, P]
+        swapped = take_levels(st, _swap_perm(axis1_size(st), lo, hi))
+        d = self.potential.log_tilt(swapped) - self.potential.log_tilt(st)    # [I, n], lambda at each position
+        return take_levels(d, lo) + take_levels(d, hi)
 ```
+
+**Whole-state fast path.** For an exchange with `view` and `log_accept`, `replica_exchange` never moves the full ladder (records, `st_prev`, `ref`, ...) inside a round. It permutes only the small `view` to score each round, and applies the accumulated permutation to the ladder once. It must consume the same keys as the generic path (`propose`'s `k_p` is split off and ignored), so both paths give identical results. `propose` stays the reference definition.
 
 For `FKDiff(ladder(betas))`, `StateSwap`'s log-acceptance is
 
@@ -1433,6 +1488,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | R2 | `do = False` gives an identical tree and identical `log_w` |
 | R3 | alignment: a tree with fields $a$ and $b = f(a)$ still satisfies $b = f(a)$ after resampling; `None` leaves stay `None` |
 | R4 | `ess` lies in $[1, N]$; it equals $N$ for uniform weights and $1$ for a one-hot |
+| R5 | `categorical` returns `[I]` indices in $[0, N)$, always $j$ for a one-hot at $j$; with $I = 20000$ rows of unnormalised weights $\propto (0.1, 0.2, 0.3, 0.4)$, each frequency is within $5$ standard errors of its weight |
 
 **Moves and replica exchange:**
 
