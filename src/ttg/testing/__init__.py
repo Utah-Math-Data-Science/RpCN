@@ -19,25 +19,75 @@ TINY32 = 2.0 ** -126                     # smallest normal float32: the underflo
 
 
 class CountingNetwork:                    # contract C1
+    """Wrap a raw network ``net(x, t)`` and count its calls.
+
+    Parameters
+    ----------
+    net : Callable[[array, array], array]
+        The network to wrap.
+
+    Attributes
+    ----------
+    calls : int
+        Number of calls so far.
+    """
+
     def __init__(self, net):
         self.net, self.calls = net, 0
 
     def __call__(self, x, t):
+        """Count the call and return ``net(x, t)``."""
         self.calls += 1
         return self.net(x, t)
 
 
 def to_host(a):                           # eager tests only
+    """Copy an array to a NumPy array on the host (torch tensors are detached and moved to CPU first).
+
+    Parameters
+    ----------
+    a : array
+        A concrete (not traced) array from any supported namespace.
+
+    Returns
+    -------
+    numpy.ndarray
+    """
     if array_api_compat.is_torch_array(a):
         a = a.detach().cpu()
     return numpy.from_dlpack(a)
 
 
 class AuditingEvaluate:                   # invariant I1: counts rows, raises on a repeated (x, t)
+    """Wrap an `evaluate` function, count its calls and rows, and raise if any row ``(x, t)`` is evaluated twice.
+
+    Eager only: rows are copied to the host to be compared.
+
+    Parameters
+    ----------
+    evaluate : Callable[[array, array, frozenset], Record]
+        The evaluation function to wrap.
+
+    Attributes
+    ----------
+    rows : int
+        Total number of rows evaluated.
+    calls : int
+        Number of calls.
+    seen : set
+        The ``(x bytes, t)`` pairs evaluated so far.
+
+    Raises
+    ------
+    DuplicateEvaluation
+        On a call containing a row already seen.
+    """
+
     def __init__(self, evaluate):
         self.evaluate, self.rows, self.calls, self.seen = evaluate, 0, 0, set()
 
     def __call__(self, x, t, needs):
+        """Record the rows, raising `DuplicateEvaluation` on a repeat, and return ``evaluate(x, t, needs)``."""
         for xi, ti in zip(to_host(x), to_host(t)):
             key = (xi.tobytes(), float(ti))
             if key in self.seen:
@@ -49,6 +99,25 @@ class AuditingEvaluate:                   # invariant I1: counts rows, raises on
 
 
 def index_of(t_grid, t):                  # eager tests only: the k with t_grid[k, ...] == t (all rows agree)
+    """Find the step index of a time on a grid.
+
+    Parameters
+    ----------
+    t_grid : array
+        Times per step, shape ``[S, ...]``.
+    t : array
+        Times, broadcastable against ``t_grid[k]``.
+
+    Returns
+    -------
+    int
+        The unique `k` with ``t_grid[k, ...] == t`` in every entry.
+
+    Raises
+    ------
+    AssertionError
+        If no step, or more than one, matches.
+    """
     xp = namespace(t_grid, t)
     hits = [k for k in range(t_grid.shape[0]) if bool(xp.all(t_grid[k, ...] == t))]
     assert len(hits) == 1, hits
@@ -57,30 +126,92 @@ def index_of(t_grid, t):                  # eager tests only: the k with t_grid[
 
 @dataclass(frozen=True)                   # deliberately NOT a pytree: lives only in eager tests
 class ReplayGaussian(Gaussian):
+    """A `Gaussian` whose `sample` returns a fixed array; densities are those of the Gaussian.
+
+    Not a pytree, so for eager tests only.
+
+    Parameters
+    ----------
+    mean : array
+        Mean, shape ``[*lead, *D]``.
+    var : array
+        Per-row variance, shape ``[*lead]``.
+    forced : array
+        What `sample` returns, shape ``[*lead, *D]``.
+    """
+
     forced: Array = None
 
     def sample(self, key, bk):
+        """Return `forced`, ignoring `key` and `bk`."""
         return self.forced
 
 
 @dataclass(frozen=True)
 class ReplayKernel:                       # proposal double: follows a given path, densities from `base`
+    """Proposal double that follows a given path, with the densities of `base`.
+
+    At step `k` it samples ``path[k]``. Eager tests only.
+
+    Parameters
+    ----------
+    base : Kernel
+        Kernel providing the means, variances and `requires`.
+    path : array
+        Points to return, shape ``[S, I, N, *D]``.
+    t_grid : array
+        Times of the steps, shape ``[S, I, N]``; the target time `t` of `at` selects the step.
+    """
+
     base: Any
     path: Array                           # [S, I, N, *D]
     t_grid: Array                         # [S, I, N]
 
     @property
     def requires(self):
+        """The features `base` requires."""
         return self.base.requires
 
     def at(self, rec, t):
+        """Return `base`'s Gaussian from `rec` to time `t`, with `sample` fixed to the path point at `t`.
+
+        Parameters
+        ----------
+        rec : Record
+            Current point and its features, leading axes ``[I, N]``.
+        t : array
+            Target times, shape ``[I, N]``; must equal one row of `t_grid`.
+
+        Returns
+        -------
+        ReplayGaussian
+        """
         d = self.base.at(rec, t)
         k = index_of(self.t_grid, t)
         return ReplayGaussian(d.mean, d.var, self.path[k, ...])           # sample() returns path[k]
 
 
 def toy_evaluate(mu, sd, w, sch):
-    """data ~ N(mu, sd^2 I); reward r(x0) = <w, x0>; all exact. mu, w: [*D] arrays; sd: float."""
+    """Exact `evaluate` for a Gaussian toy model: data ~ N(mu, sd^2 I), reward r(x0) = <w, x0>.
+
+    Every feature (x0, eps, score, reward, reward gradient) is computed in closed form from the schedule.
+
+    Parameters
+    ----------
+    mu : array
+        Data mean, shape ``[*D]``.
+    sd : float
+        Data standard deviation.
+    w : array
+        Reward weights, shape ``[*D]``.
+    sch : Schedule
+        Noise schedule.
+
+    Returns
+    -------
+    Callable[[array, array, frozenset], Record]
+        ``evaluate(x [B, *D], t [B], needs)``, returning exactly the requested features.
+    """
     def evaluate(x, t, needs):
         xp = namespace(x, t)
         m, s = bcast(sch.mean(t), x), bcast(sch.std(t), x)
@@ -99,7 +230,22 @@ def toy_evaluate(mu, sd, w, sch):
 
 
 def toy_eps_network(mu, sd, sch):
-    """The toy model's exact eps prediction, as a raw network(x, t) for the builders."""
+    """Return the toy model's exact eps prediction, as a raw ``network(x, t)`` for the evaluate builders.
+
+    Parameters
+    ----------
+    mu : array
+        Data mean, shape ``[*D]``.
+    sd : float
+        Data standard deviation.
+    sch : Schedule
+        Noise schedule.
+
+    Returns
+    -------
+    Callable[[array, array], array]
+        ``net(x [B, *D], t [B]) -> eps [B, *D]``.
+    """
     def net(x, t):
         m, s = bcast(sch.mean(t), x), bcast(sch.std(t), x)
         v = m**2 * sd**2 + s**2
@@ -108,7 +254,20 @@ def toy_eps_network(mu, sd, sch):
 
 
 def oracle(f, *args):
-    """Run f on float64 copies of float32 inputs."""
+    """Run `f` on float64 copies of float32 inputs: a higher-precision reference for precision tests.
+
+    Parameters
+    ----------
+    f : Callable
+        Function to call.
+    *args : pytree
+        Arguments; float32 array leaves are cast to float64, everything else is passed through.
+
+    Returns
+    -------
+    Any
+        ``f(*args)`` on the upcast arguments.
+    """
     def up(a):
         if hasattr(a, "dtype") and hasattr(a, "shape"):
             xp = namespace(a)

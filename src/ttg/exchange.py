@@ -12,34 +12,109 @@ Array = Any
 
 
 class PairSchedule(Protocol):
+    """Protocol for which adjacent ladder pairs to propose swapping, in which rounds.
+
+    Attributes
+    ----------
+    period : int
+        Rounds depend on `sweep` only through ``sweep % period``.
+    """
+
     period: int                                              # rounds depend on `sweep` only via sweep % period
-    def rounds(self, n: int, sweep: int) -> tuple[tuple[tuple[int, int], ...], ...]: ...
+
+    def rounds(self, n: int, sweep: int) -> tuple[tuple[tuple[int, int], ...], ...]:
+        """Return the rounds of one sweep. Static.
+
+        Parameters
+        ----------
+        n : int
+            Ladder size (axis 1).
+        sweep : int
+            Sweep number, in ``range(period)`` when called by `replica_exchange`.
+
+        Returns
+        -------
+        tuple
+            Rounds in order; each round is a tuple of disjoint adjacent pairs ``(lo, lo + 1)``, proposed together.
+        """
+        ...
     # static; each round is a tuple of disjoint adjacent pairs (lo, lo + 1), proposed together
 
 
 @dataclass(frozen=True)
 class SequentialSweep:          # (0,1), then (1,2), ..., each its own round
+    """Pair schedule: ``(0, 1)``, then ``(1, 2)``, ..., each its own round. Period 1."""
+
     period = 1
 
     def rounds(self, n, sweep):
+        """``n - 1`` rounds of one pair each. See `PairSchedule.rounds`."""
         return tuple(((k, k + 1),) for k in range(n - 1))
 
 
 @dataclass(frozen=True)
 class EvenOdd:                  # deterministic even-odd (DEO): all pairs of one parity at once, alternating
+    """Pair schedule, deterministic even-odd: all pairs of one parity at once, alternating parity. Period 2."""
+
     period = 2
 
     def rounds(self, n, sweep):
+        """One round: the pairs ``(m - 1, m)`` with ``m % 2 == sweep % 2``. See `PairSchedule.rounds`."""
         return (tuple((m - 1, m) for m in range(1, n) if m % 2 == sweep % 2),)
 
 
 class Exchange(Protocol):
-    def propose(self, ladder, lo, hi, key, bk) -> tuple[Tree, Tree, Array]: ...
+    """Protocol for how a set of ladder pairs proposes a swap."""
+
+    def propose(self, ladder, lo, hi, key, bk) -> tuple[Tree, Tree, Array]:
+        """Propose new contents for positions `lo` and `hi`.
+
+        Parameters
+        ----------
+        ladder : pytree
+            Arrays whose axis 1 is the ladder.
+        lo, hi : list of int
+            P pair positions, ``hi[p] = lo[p] + 1``.
+        key : key
+            Random key.
+        bk : Backend
+            Randomness, if the proposal needs any.
+
+        Returns
+        -------
+        new_lo, new_hi : pytree
+            Candidates for positions `lo` and `hi`, ``[I, P, ...]``.
+        log_a : array
+            ``[I, P]`` log-acceptance of each pair's proposal.
+        """
+        ...
     # candidates for positions lo and hi (pytrees [I, P, ...]) and log-acceptance [I, P]
 
 
 def replica_exchange(ladder, pairs, exchange, *, sweep, key, bk):
-    """sweep: Python int (static) or traced int scalar (e.g. from the runner's step index)."""
+    """Run one replica-exchange sweep along axis 1 of `ladder`, accepting each pair independently.
+
+    Parameters
+    ----------
+    ladder : pytree
+        Arrays whose axis 1 is the ladder (e.g. a `MoveContext` or CREPE's replicas).
+    pairs : PairSchedule
+        Which pairs, in which rounds.
+    exchange : Exchange
+        How a pair proposes.
+    sweep : int or array
+        Python int (static) or traced int scalar (e.g. from the runner's step index); selects the rounds via
+        ``sweep % pairs.period`` (with `bk.switch` if traced).
+    key : key
+        Random key.
+    bk : Backend
+        Uniform draws for acceptance; `switch` on a traced `sweep`.
+
+    Returns
+    -------
+    pytree
+        `ladder` after the sweep.
+    """
     n = axis1_size(ladder)
 
     def for_residue(res):                                                # res: static int in range(period)
@@ -64,9 +139,33 @@ def replica_exchange(ladder, pairs, exchange, *, sweep, key, bk):
 
 @dataclass(frozen=True)
 class StateSwap:                # plain parallel tempering: exchange states; 0 evaluations
+    """Plain parallel tempering: exchange whole states between adjacent positions; no evaluations.
+
+    The log-acceptance is the change in ``potential.log_tilt`` summed over both positions; for
+    ``FKDiff(ladder(betas))`` that is ``(beta_{k+1} - beta_k) (r_hat(x_k) - r_hat(x_{k+1}))``.
+
+    Parameters
+    ----------
+    potential : Potential
+        Read at each row's ladder position, so its state must be lambda-free.
+    """
+
     potential: Any
 
     def propose(self, ctx, lo, hi, key, bk):
+        """Swap ``rec``, ``st``, ``st_prev`` and ``ref`` together. See `Exchange.propose`.
+
+        Parameters
+        ----------
+        ctx : MoveContext
+            ``[I, n, ...]``.
+        lo, hi : list of int
+            Pair positions.
+        key : key
+            Unused.
+        bk : Backend
+            Unused.
+        """
         perm = list(range(axis1_size(ctx)))
         for a, b in zip(lo, hi):
             perm[a], perm[b] = b, a
