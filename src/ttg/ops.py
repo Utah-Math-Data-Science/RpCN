@@ -106,11 +106,16 @@ def take_rows(a, idx):
 
 def take_levels(tree, levels):
     """Select a static list of positions on axis 1."""
-    levels = list(levels)
+    runs = []                                    # maximal runs of consecutive levels, as (start, stop)
+    for m in levels:
+        if runs and runs[-1][1] == m:
+            runs[-1] = (runs[-1][0], m + 1)
+        else:
+            runs.append((m, m + 1))
 
-    def take(a):
-        xp = namespace(a)
-        return xp.take(a, xp.asarray(levels, device=device(a)), axis=1)
+    def take(a):                                 # slices, not an index array: no host-to-device copy (a GPU sync)
+        parts = [a[:, lo:hi, ...] for lo, hi in runs]
+        return parts[0] if len(parts) == 1 else namespace(a).concat(parts, axis=1)
 
     return tree_map(take, tree)
 

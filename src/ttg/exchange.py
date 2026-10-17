@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .ops import axis1_size, device, namespace, put_levels, take_levels, tree_where
+from .ops import axis1_size, bcast, device, leaves, namespace, put_levels, take_levels, tree_map, tree_where
 
 Tree = Any
 Array = Any
@@ -116,10 +116,13 @@ def replica_exchange(ladder, pairs, exchange, *, sweep, key, bk):
         `ladder` after the sweep.
     """
     n = axis1_size(ladder)
+    whole_states = hasattr(exchange, "log_accept")                      # static: e.g. StateSwap
 
     def for_residue(res):                                                # res: static int in range(period)
         def run(ladder):
             rounds = [r for r in pairs.rounds(n, res) if r]
+            if whole_states:
+                return _swap_states(ladder, rounds, exchange, key, bk)
             for pr, kk in zip(rounds, bk.split(key, max(len(rounds), 1))):
                 lo, hi = [a for a, _ in pr], [b for _, b in pr]
                 k_p, k_a = bk.split(kk, 2)
@@ -135,6 +138,37 @@ def replica_exchange(ladder, pairs, exchange, *, sweep, key, bk):
     if isinstance(sweep, int):                                           # static: no dispatch
         return for_residue(sweep % pairs.period)(ladder)
     return bk.switch(sweep % pairs.period, [for_residue(r) for r in range(pairs.period)], ladder)
+
+
+def _permute(tree, perm):                        # perm [I, n]: position k takes the state at perm[i, k]
+    def take(a):
+        xp = namespace(a, perm)
+        idx = xp.broadcast_to(bcast(perm, a), tuple(perm.shape) + tuple(a.shape[2:]))
+        return xp.take_along_axis(a, idx, axis=1)
+
+    return tree_map(take, tree)
+
+
+def _swap_states(ladder, rounds, exchange, key, bk):
+    """`replica_exchange`'s rounds for an exchange that swaps whole states (it has ``view`` and ``log_accept``).
+
+    Each round decides acceptance from ``exchange.view(ladder)`` alone, through a per-row permutation of the
+    ladder positions; the whole ladder is permuted once at the end. Same draws and result as the generic path.
+    """
+    view = exchange.view(ladder)
+    lv = leaves(view)[0]
+    xp = namespace(lv)
+    n = lv.shape[1]
+    perm = xp.broadcast_to(xp.arange(n, device=device(lv))[None, :], (lv.shape[0], n))
+    for pr, kk in zip(rounds, bk.split(key, max(len(rounds), 1))):
+        lo, hi = [a for a, _ in pr], [b for _, b in pr]
+        _, k_a = bk.split(kk, 2)                                         # k_p unused, as in StateSwap.propose
+        log_a = exchange.log_accept(_permute(view, perm), lo, hi)
+        u = bk.uniform(k_a, log_a.shape, log_a.dtype, device=device(log_a))
+        acc = xp.log(u) < log_a                                          # [I, P]
+        p_lo, p_hi = take_levels(perm, lo), take_levels(perm, hi)
+        perm = put_levels(put_levels(perm, lo, xp.where(acc, p_hi, p_lo)), hi, xp.where(acc, p_lo, p_hi))
+    return _permute(ladder, perm) if rounds else ladder
 
 
 @dataclass(frozen=True)
@@ -166,9 +200,25 @@ class StateSwap:                # plain parallel tempering: exchange states; 0 e
         bk : Backend
             Unused.
         """
-        perm = list(range(axis1_size(ctx)))
-        for a, b in zip(lo, hi):
-            perm[a], perm[b] = b, a
-        swapped = take_levels(ctx, perm)                           # rec, st, st_prev, ref move together
-        d = self.potential.log_tilt(swapped.st) - self.potential.log_tilt(ctx.st)   # [I, n]
-        return take_levels(swapped, lo), take_levels(swapped, hi), take_levels(d, lo) + take_levels(d, hi)
+        swapped = take_levels(ctx, _swap_perm(axis1_size(ctx), lo, hi))   # rec, st, st_prev, ref move together
+        return take_levels(swapped, lo), take_levels(swapped, hi), self.log_accept(ctx.st, lo, hi)
+
+    def view(self, ctx):
+        """The part of the ladder `log_accept` reads: the potential state ``ctx.st``."""
+        return ctx.st
+
+    def log_accept(self, st, lo, hi):
+        """``[I, P]`` log-acceptance of swapping positions ``lo[p]`` and ``hi[p]``, from the potential state ``st``.
+
+        Lets `replica_exchange` decide swaps without moving the whole state each round.
+        """
+        swapped = take_levels(st, _swap_perm(axis1_size(st), lo, hi))
+        d = self.potential.log_tilt(swapped) - self.potential.log_tilt(st)    # [I, n], lambda at each position
+        return take_levels(d, lo) + take_levels(d, hi)
+
+
+def _swap_perm(n, lo, hi):
+    perm = list(range(n))
+    for a, b in zip(lo, hi):
+        perm[a], perm[b] = b, a
+    return perm
