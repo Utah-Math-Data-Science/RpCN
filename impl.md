@@ -44,11 +44,11 @@ All code below is **pseudocode in Python syntax**. It is meant to pin down inter
 
 | stage | modules | done when these pass |
 |---|---|---|
-| 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K13, C1–C2, N2–N3 |
-| 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P5, R1–R5, E1–E4, N1, N4 |
+| 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K13, L1, C1–C2, N2–N3 |
+| 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P6, R1–R5, E1–E4, N1, N4 |
 | 3 | `moves.py`, `exchange.py` (FK + pCN, RpCN) | M1–M7, E5, §17 counts with moves |
-| 4 | `crepe.py` | X1–X4 |
-| 5 | statistical tests (§18.4) | all five methods pass; the $\lambda = 0$ sanity check fails as intended |
+| 4 | `crepe.py` | X1–X7 |
+| 5 | statistical tests (§18.4) | every row passes; the $\lambda = 0$ sanity check fails as intended |
 
 **Where to start reading:** §1 (invariants), §4.1 (wiring rules), then each module's section in build order.
 
@@ -104,17 +104,17 @@ ttg/
   ops.py         xp-only helpers: bcast, logsumexp, take_rows, flatten/unflatten, take/put_levels, tree_where
   schedule.py    Schedule protocol; ScheduleDefaults (log_snr, log_snr_diff); VPLinear, EDM, ...
   records.py     Feature, Point, Record
-  evaluate.py    Evaluate contract, conversions, make_evaluate builders (one per backend)
+  evaluate.py    Evaluate contract, conversions, make_evaluate builders (one per backend), on_x0
   kernels.py     Gaussian (log_prob, log_ratio); transition; Noising, PosteriorStep, DDIMStep, EulerMaruyama, Langevin, Guided
   sde.py         Direction (FORWARD, BACKWARD); SDE protocol; ForwardSDE, ReverseSDE; f_coeff, g2_coeff
   guidance.py    guidance scales: tilt, normalized
   lam.py         constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
-  potentials.py  TiltDifference (default increment); Zero, FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum
+  potentials.py  TiltDifference (default increment); Zero, FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Relative
   resample.py    ess, systematic, categorical, masked_resample; policies Never, Every, ESSBelow
   moves.py       MoveContext, rescore, tilt_delta, PCN, LangevinMove
   exchange.py    PairSchedule (SequentialSweep, EvenOdd), Exchange (StateSwap), replica_exchange
   smc.py         smc()
-  crepe.py       CREPEConfig, PathExchange, crepe_init, crepe()
+  crepe.py       CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish
   testing/       CountingNetwork, AuditingEvaluate, ReplayKernel, toy Gaussian model, strategies
 ```
 
@@ -395,7 +395,7 @@ def make_evaluate_jax(network, to_x0_eps, sch, reward):
         want_r = grad or Feature.REWARD in needs
         def fwd(x):
             x0, eps = to_x0_eps(x, t, network(x, t), sch)       # the single forward pass
-            r = reward(x0) if want_r else None
+            r = reward(x0, x, t) if want_r else None
             return (xp.sum(r) if grad else 0.0), (x0, eps, r)
         if grad:
             (_, (x0, eps, r)), g = jax.value_and_grad(fwd, has_aux=True)(x)
@@ -414,7 +414,7 @@ def make_evaluate_torch(network, to_x0_eps, sch, reward):
         with torch.enable_grad() if grad else torch.no_grad():
             xg = x.detach().requires_grad_(grad)
             x0, eps = to_x0_eps(xg, t, network(xg, t), sch)      # the single forward pass
-            r = reward(x0) if want_r else None
+            r = reward(x0, xg, t) if want_r else None
             g = torch.autograd.grad(r.sum(), xg)[0] if grad else None
         det = lambda v: None if v is None else v.detach()
         keep = lambda f, v: det(v) if f in needs else None
@@ -424,7 +424,14 @@ def make_evaluate_torch(network, to_x0_eps, sch, reward):
     return evaluate
 ```
 
-`reward(x0)` maps `[B, *D] -> [B]`. The PyTorch builder detaches everything it returns; JAX values carry no graph. The library never differentiates through a `Record`.
+`reward(x0, x, t)` maps `x0 [B, *D]`, `x [B, *D]`, `t [B]` to `[B]`. Gradients flow through both `x0` (that is, through the network) and `x`, so a reward may use the denoiser's estimate, the noisy state, the time, or any mix. The common case is a reward of the estimate alone; wrap it with
+
+```python
+def on_x0(r):                    # reward of the denoiser's estimate only
+    return lambda x0, x, t: r(x0)
+```
+
+A separate reward model (a classifier, an aesthetic scorer, ...) may be called inside `reward`; contract C1 counts only calls to the diffusion network. The PyTorch builder detaches everything it returns; JAX values carry no graph. The library never differentiates through a `Record`.
 
 **Runner-side helpers:**
 
@@ -644,9 +651,12 @@ def ladder(values):             # value by position on axis 1 (RpCN's beta_k, pC
     return lambda t: xp.broadcast_to(xp.astype(values, t.dtype)[None, :], t.shape)
 def tabulated(knots, values):   # exact at the knots; nearest-knot lookup (only knots are ever visited)
     return lambda t: take1d(xp.astype(values, t.dtype), xp.argmin(xp.abs(t[..., None] - xp.astype(knots, t.dtype)), axis=-1))
-def piecewise_linear(knots, values):     # knots: 1-D increasing
+def piecewise_linear(knots, values, hold=False):   # knots: 1-D increasing
+    # hold=False: extrapolate the end segments linearly; hold=True: constant beyond the end knots
     def lam(t):
         kn, va = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
+        if hold:                                     # static
+            t = xp.clip(t, min=kn[0], max=kn[-1])
         # searchsorted(kn, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
         j = xp.sum(xp.astype(kn < t[..., None], xp.int64), axis=-1)
         j = xp.clip(j, 1, kn.shape[0] - 1)
@@ -661,8 +671,10 @@ def das_lambda(t_grid, gamma, alpha_kl):   # t_grid[0] noisiest; lambda_tilde_k 
 
 def level_lambda(t_levels, beta, rho):     # CREPE: beta at the data end, 0 at the noise end
     M = t_levels.shape[0] - 1
-    return piecewise_linear(t_levels, beta * (1 - xp.arange(M + 1, dtype=t_levels.dtype) / M) ** rho)
+    return piecewise_linear(t_levels, beta * (1 - xp.arange(M + 1, dtype=t_levels.dtype) / M) ** rho, hold=True)
 ```
+
+`level_lambda` **holds** its end values: $\beta$ for every $t$ below level 0 and $0$ above level $M$. Below level 0 is where `crepe_finish` (§16) continues denoising, with the same `cfg.lam` and the same guided kernel `cfg.B_Q`.
 
 ### 8a. Guidance scales
 
@@ -710,6 +722,7 @@ class TiltDifference:                 # mixin: the default increment, for potent
 | `ReverseRatio(P_rev, Q_rev)` | $(\text{sum}, \text{term}, x_{\mathrm{prev}}, t_{\mathrm{prev}})$; left unchanged by `update` when trivial | sum | the latest term |
 | `Sum(*ps)` | tuple of the parts' states | sum | sum of the parts' increments |
 | `Zero()` | zeros of shape `[I, N]` (the shape is what `smc` needs for `log_w`) | that zero array | that zero array |
+| `Relative(p)` | `p`'s state and $C_{\text{start}}$ | `p.log_tilt` minus $C_{\text{start}}$; exactly $0$ at the start point | `p.increment` |
 
 - **`FKMax` and `FKSum`** require $\lambda$ constant in $t$ (it may vary by ladder position), as in FK steering.
 - **Usage limit of `FKMax` and `FKSum`** (put it in both docstrings): they target $e^{\lambda \hat r_0}$ exactly without resampling (`Never()`). With resampling, they are reliable only when $\lambda S \sigma_r$ (max) or $\lambda \tfrac{S^2}{2} \sigma_r$ (sum) is small, where $\sigma_r$ is the spread of the final predicted reward across particles. These bounds are conservative: the effective counts are the steps on which $\hat r$ already differs between particles.
@@ -785,6 +798,20 @@ class Zero:
     def update(self, st, rec, *, last): return st
     def log_tilt(self, st): return st
     def increment(self, prev, st): return st
+
+@pytree
+class RelState:   inner: State; c0: Array
+
+@dataclass(frozen=True)
+class Relative:                       # C - C(start): for runs that start from points already tilted by C(start)
+    inner: Potential
+    @property
+    def requires(self): return self.inner.requires
+    def init(self, rec):
+        st = self.inner.init(rec); return RelState(inner=st, c0=self.inner.log_tilt(st))
+    def update(self, st, rec, *, last): return RelState(inner=self.inner.update(st.inner, rec, last=last), c0=st.c0)
+    def log_tilt(self, st): return self.inner.log_tilt(st.inner) - st.c0       # x - x == 0 exactly at the start
+    def increment(self, prev, st): return self.inner.increment(prev.inner, st.inner)
 
 @dataclass(frozen=True)
 class ReverseRatio:                   # scores the reverse step with the kernels opposite to the run
@@ -1145,6 +1172,7 @@ coldest = out.final.x[:, K]                               # the beta_K = beta re
 
 **Layout.**
 - **Replicas** are one `Record` with axes `[I, M+1, ...]`: $I$ chains, levels $m = 0..M$ at $u_0 < \dots < u_M = 1$.
+- **The lowest level may sit above the data end** ($u_0 > 0$). Level 0 then samples $\propto p_{u_0}\, e^{\lambda(\tau(u_0))\, \hat r}$, and `crepe_finish` (below) carries its samples the rest of the way to $u = 0$.
 - **Replica invariant:** every replica always carries exactly `replica_needs`, and the replica at level $m$ always has $t = \tau(u_m)$.
 
 ```python
@@ -1253,10 +1281,17 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
 **The sweep loop.** The scan body covers `cfg.pairs.period` sweeps, so its static structure is fixed.
 
 ```python
-def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key):
+def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None):
+    # emit: Record [I, 1, ...] -> any pytree of arrays (e.g. r.x0, (r.x0, r.reward), or a projected Record)
+    # R0: replicas from an earlier call (its returned R) to continue from; None starts with crepe_init
     xp = bk.xp
-    k_init, k_run = bk.split(key, 2)
-    R = crepe_init(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule, dtype=dtype, device=device, key=k_init)
+    k_init, k_run = bk.split(key, 2)                                 # same split whether or not R0 is given
+    if R0 is None:                                                   # static
+        R = crepe_init(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule, dtype=dtype, device=device, key=k_init)
+    else:
+        if not R0.provides(cfg.replica_needs):
+            raise PartialRecord(cfg.replica_needs)
+        R = R0.project(cfg.replica_needs)                            # level times are the caller's responsibility
     ev = lambda p: evaluate_rows(evaluate, p, cfg.replica_needs, bk)
     xchg = PathExchange(cfg, evaluate, schedule)
     top_used = lambda n: any(cfg.M in p for rnd in cfg.pairs.rounds(cfg.M + 1, n) for p in rnd)   # static
@@ -1275,16 +1310,58 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
                                   dtype=dtype, device=device, key=k_r)
                 R = put_levels(R, [cfg.M], top)
             outs.append(emit(take_levels(R, [0])))                   # e.g. lambda r: r.x0
-        return R, xp.stack(outs)
+        return R, tree_map(lambda *a: xp.stack(a), *outs)           # any pytree, not just an array
     R, samples = bk.scan(body, R, bk.split(k_run, n_blocks))
-    return samples, R                    # samples: [n_blocks, period, I, 1, ...]
+    return samples, R      # samples: emit's pytree, every leaf [n_blocks, period, I, 1, ...]; R: [I, M+1, ...]
 ```
+
+**Continuing a run.** Pass the returned `R` back as `R0`, with a fresh `key`. The continuation skips `crepe_init` (no initialisation evaluations) and keeps the replica invariant.
 
 **Refreshing the top replica** with a fresh prior draw is exact only if two things hold:
 - `prior` is the exact marginal at $\tau(1)$;
 - $\lambda(\tau(1)) = 0$. `level_lambda` guarantees this.
 
 Otherwise the top level is approximately, not exactly, at its target. The approximation is the same as the one in the prior itself.
+
+**Finishing from $u_0 > 0$.** `crepe_finish` runs one `smc` from the level-0 samples to $u = 0$, over `n_tail` steps.
+
+```python
+def finish_needs(cfg):          # what emit must keep for crepe_finish (emit = lambda r: r.project(finish_needs(cfg)))
+    return cfg.B_P.requires | cfg.B_Q.requires | {Feature.REWARD}
+
+def pool_samples(samples, burn_in=0):   # leaves [n_blocks, period, I, 1, ...] -> [I, (n_blocks - burn_in) * period, ...]
+    def pool(a):
+        a = a[burn_in:]
+        nb, P, I = a.shape[0], a.shape[1], a.shape[2]
+        return xp.moveaxis(xp.reshape(a, (nb * P, I) + tuple(a.shape[4:])), 0, 1)   # level axis (size 1) dropped
+    return tree_map(pool, samples)
+
+def tail_grid(cfg, n_tail, *, xp, dtype, device=None):   # [n_tail + 1], exactly u_levels[0] down to exactly 0
+    u0 = cfg.u_levels[0]
+    return xp.asarray([u0 * (1 - j / n_tail) for j in range(n_tail)] + [0.0], dtype=dtype, device=device)
+
+def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=None,
+                 final_needs=frozenset({Feature.X0}), key) -> SMCResult:
+    """start: level-0 Records with leading axes [I, N] (e.g. pool_samples(samples)), at t = tau(u_levels[0])."""
+    if cfg.u_levels[0] <= 0:
+        raise ValueError("crepe_finish needs u_levels[0] > 0")
+    xp = namespace(start.t)
+    grid = tail_grid(cfg, n_tail, xp=xp, dtype=start.t.dtype, device=device(start.t))
+    if exact:                                                        # static: weighted, exact target
+        target, proposal = cfg.B_P, cfg.B_Q
+        potential = Relative(FKDiff(cfg.lam))
+        policy = ESSBelow(0.5) if policy is None else policy
+    else:                                                            # unweighted guided denoising (CREPE paper's finish)
+        target = proposal = cfg.B_Q
+        potential, policy = Zero(), Never()
+    return smc(start, grid, bk=bk, evaluate=evaluate, schedule=schedule, target=target, proposal=proposal,
+               potential=potential, policy=policy, final_needs=final_needs, key=key)
+```
+
+- **`exact=True`** targets $p_0\, e^{\lambda(\tau(0))\, \hat r}$, the tilted target at $u = 0$ on the path law of `cfg.B_P`. The start samples already carry $e^{\lambda(\tau(u_0))\, \hat r}$, so `Relative` makes the starting weight exactly 0 and the final weight $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}}$ plus the proposal correction $\log B^P - \log B^Q$ along the tail. The result is weighted (`log_w`); with `level_lambda`, $\lambda$ is $\beta$ along the whole tail.
+- **`exact=False`** denoises with the guided kernel `cfg.B_Q` and no weights (`log_w` is identically 0). It is cheaper and approximate: its output is not exactly the tilted target.
+- **Grouping:** `pool_samples` makes each chain one instance and its post-burn-in samples that instance's particles, so `exact=True` resamples within a chain.
+- **Memory:** `emit = lambda r: r.project(finish_needs(cfg))` keeps only what the finish reads. `start_record` then projects to the finish's needs (§6), and nothing is re-evaluated (I1).
 
 ## 17. Exact evaluation counts
 
@@ -1301,6 +1378,8 @@ These counts are asserted by the tests.
 | `PathExchange` round | $2K$ per pair, times $I$ |
 | `crepe_init` | $I(1 + M K)$ |
 | CREPE sweep $n$ | $I\,(2K P_n + \lvert\text{local levels}\rvert + R_n)$ |
+| `crepe` with `R0` given | no `crepe_init` rows; sweeps as above |
+| `crepe_finish`, start `[I, N]` | $I N \cdot$ `n_tail` |
 
 For a CREPE sweep:
 - $P_n$ is the number of pairs in `cfg.pairs.rounds(M+1, n)`;
@@ -1470,6 +1549,8 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | P3 | `ReverseRatio(K, K)` contributes exactly 0 and requires nothing |
 | P4 | $\lambda$-freedom: permuting states along a `ladder` axis and then reading `log_tilt` equals reading each moved state at its new position's $\lambda$ |
 | P5 | `increment(prev, update(prev, rec, last))` equals `log_tilt(new) - log_tilt(prev)` for every potential, at every step including the last; `tilt_delta(p, prev, a, b)` equals `log_tilt(a) - log_tilt(b)` for two updates of the same `prev` |
+| P6 | `Relative(p)`: `log_tilt(init(rec))` is exactly 0 (any backend, any dtype); its increments equal `p`'s; `log_tilt` equals `p.log_tilt(st) - p.log_tilt(p.init(rec0))` (float64) |
+| L1 | `level_lambda` is exactly $\beta$ for every $t \le t_{\text{levels}}[0]$ and exactly $0$ for every $t \ge t_{\text{levels}}[-1]$; `piecewise_linear(..., hold=False)` still extrapolates its end segments linearly |
 
 **Precision** (float32 against the upcast float64 oracle). In every N test, draw scalars (λ included) from the **normal** float32 range: some backends, JAX on CPU among them, flush subnormal numbers to zero. Every bound also adds an **underflow floor**: (number of summed terms) × the smallest normal float32, scaled the same way as the bound (divided by $v$ in N2).
 
@@ -1522,6 +1603,9 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | X2 | with $F^Q = F^P$ and $B^Q = B^P$: it reduces to endpoint tilts; with $F^Q = F^P$ only: to the $B$-only formula of §16 |
 | X3 | the replica invariant (fixed level times, exactly `replica_needs`) holds after any number of blocks |
 | X4 | evaluation counts per sweep match §17 for both `EvenOdd` and `SequentialSweep` |
+| X5 | `emit` may return any pytree: with `emit = lambda r: r.project(finish_needs(cfg))`, `samples` is a `Record` whose leaves have leading axes `[n_blocks, period, I, 1]`; `pool_samples(samples, b)` has leading axes `[I, (n_blocks - b) * period]` and keeps every chain's samples in sweep order |
+| X6 | `crepe(..., R0=R)` makes no `crepe_init` evaluations (counts per §17), keeps the replica invariant, raises `PartialRecord` if `R0` lacks `replica_needs`, and with `n_blocks = 0` returns `R0.project(cfg.replica_needs)` unchanged |
+| X7 | `crepe_finish` raises `ValueError` when `u_levels[0] == 0`. With `exact=False`, its `log_w` is identically 0, and it equals `smc(start, tail_grid(...), target=proposal=cfg.B_Q, potential=Zero(), policy=Never())` for the same key. With `exact=True` and `Never()`, its `log_w` equals, along a replayed tail, $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}} + \sum [\log B^P - \log B^Q]$; `tail_grid` starts at exactly `u_levels[0]` and ends at exactly 0 |
 
 Three worked examples:
 
@@ -1591,5 +1675,6 @@ These are seeded and marked `slow`. On the Gaussian toy, FK, DAS, FK + pCN, RpCN
 | FK + pCN | as FK with `FKDiff`, plus `PCN(n_steps=2, step=constant(0.3))` and `move_at=lambda k: k % 5 == 0` |
 | RpCN | $K = 3$, `betas = linspace(0, 2, 4)`, `step_sizes = (0.95, 0.95, 0.95, 0.95)`, `PCN(n_steps=20, step=ladder(step_sizes), pairs=EvenOdd())` at **every** step, `Never()`; $I = 2^{12}$; the estimate uses rung $K$ only. RpCN is exact only as mixing becomes complete, so its bound adds $0.02$ for that bias: $4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2} + 0.02$ |
 | CREPE | `u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)`, $K = 10$, `level_lambda(..., beta=2.0, rho=1.0)` (so $\lambda = 2$ at level 0 and $0$ at the top), the default kernels of §16, `Langevin(h=lambda t: 0.01 * sch.std(t)**2)` on levels 0–3, `EvenOdd()`; $I = 2^{10}$ chains, 400 blocks, the first 100 discarded, level-0 samples pooled. **Reference:** the plain sampler using `cfg.B_P` on CREPE's own grid (the `fine_grid`s of every gap concatenated, from level $M$ down to level 0), reweighted by $e^{\lambda_0 \hat r}$ at level 0, where $\lambda_0 = 2$ |
+| CREPE + finish | as the CREPE row, but `u_levels = (0.25, 0.5, 0.75, 1.0)` (so $u_0 > 0$), `emit = lambda r: r.project(finish_needs(cfg))`, then `crepe_finish(pool_samples(samples, 100), cfg, n_tail=10, exact=True)` with its default `ESSBelow(0.5)`; the estimate is the self-normalised `log_w` average of the final `x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's grid from level $M$ down to level 0, then on `tail_grid(cfg, 10)` down to $u = 0$, reweighted by $e^{2 \hat r}$ at the end. `exact=False` has no statistical test: it is approximate by design |
 | pass condition | $\lvert \bar m - \bar m_{\text{ref}} \rvert \le 4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2}$ for both coordinates, with each standard error taken from the spread across the 8 seeds |
 | sanity check | for each tested $\lambda$, the same tolerance must **fail** for $\lambda = 0$ against that $\lambda$'s reference, so the test can detect a missing tilt |
