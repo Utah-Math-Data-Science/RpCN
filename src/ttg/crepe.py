@@ -8,18 +8,19 @@ from typing import Any, Callable
 from .evaluate import evaluate_rows, start_record
 from .exchange import EvenOdd, replica_exchange
 from .moves import MoveContext
-from .ops import device, namespace, put_levels, stack_levels, take_levels
-from .potentials import ReverseRatio, Sum, TiltEnds, Zero
-from .records import Feature
-from .resample import Never
-from .smc import smc
+from .ops import device, namespace, put_levels, stack_levels, take_levels, tree_map
+from .potentials import FKDiff, Relative, ReverseRatio, Sum, TiltEnds, Zero
+from .records import Feature, PartialRecord
+from .resample import ESSBelow, Never
+from .smc import SMCResult, smc
 
 
 @dataclass(frozen=True)
 class CREPEConfig:
     """Configuration of CREPE: replicas at noise levels u_0 < ... < u_M = 1, exchanging paths between neighbours.
 
-    Level 0 (u_0, usually 0) is the data end and holds the tilted target; level M is the prior. A path exchange
+    Level 0 (u_0, usually 0) is the data end and holds the tilted target; level M is the prior. If u_0 > 0, level 0
+    samples ``p_{u_0} exp(lambda(tau(u_0)) r_hat)`` and `crepe_finish` carries its samples to u = 0. A path exchange
     between levels m and m+1 runs `K` fine steps across the gap: up (towards noise) with `F_Q` as the proposal
     and `F_P` as the target, and down (towards data) with `B_Q` as the proposal and `B_P` as the target.
 
@@ -280,7 +281,7 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
     return stack_levels(levels)                                      # [I, M+1, ...]
 
 
-def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key):
+def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None):
     """Run CREPE: replica exchange across noise levels, emitting a sample from level 0 after every sweep.
 
     Each sweep proposes path exchanges between adjacent levels (per `cfg.pairs`), accepts or rejects them per
@@ -297,8 +298,9 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
         Event shape.
     n_blocks : int
         Number of scan iterations; each runs ``cfg.pairs.period`` sweeps.
-    emit : Callable[[Record], array]
-        Maps the level-0 replicas (a Record of shape [I, 1, ...]) to the output, e.g. ``lambda r: r.x0``.
+    emit : Callable[[Record], Any]
+        Maps the level-0 replicas (a Record of shape [I, 1, ...]) to any pytree of arrays, e.g. ``lambda r: r.x0``,
+        ``lambda r: (r.x0, r.reward)``, or ``lambda r: r.project(finish_needs(cfg))`` for `crepe_finish`.
         Features it reads must be in ``cfg.out_needs`` (or otherwise in ``cfg.replica_needs``).
     bk : Backend
         Randomness and control flow; ``bk.xp`` creates the arrays.
@@ -311,18 +313,32 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     device : device, optional
         Run device.
     key : backend key
-        Root random key.
+        Root random key. Pass a fresh key when continuing from `R0`.
+    R0 : Record, optional
+        Replicas from an earlier call (its returned `R`) to continue from, skipping `crepe_init`. Must carry
+        ``cfg.replica_needs``; extras are dropped. Level times are the caller's responsibility.
 
     Returns
     -------
-    samples : array
-        Stacked `emit` outputs, shape [n_blocks, period, I, 1, ...].
+    samples : pytree
+        Stacked `emit` outputs: every leaf has shape [n_blocks, period, I, 1, ...].
     R : Record
         The final replicas, shape [I, M+1, *D].
+
+    Raises
+    ------
+    PartialRecord
+        If `R0` lacks features in ``cfg.replica_needs``.
     """
     xp = bk.xp
-    k_init, k_run = bk.split(key, 2)
-    R = crepe_init(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule, dtype=dtype, device=device, key=k_init)
+    k_init, k_run = bk.split(key, 2)                                 # same split whether or not R0 is given
+    if R0 is None:                                                   # static
+        R = crepe_init(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule, dtype=dtype, device=device,
+                       key=k_init)
+    else:
+        if not R0.provides(cfg.replica_needs):
+            raise PartialRecord(cfg.replica_needs)
+        R = R0.project(cfg.replica_needs)                            # level times are the caller's responsibility
     ev = lambda p: evaluate_rows(evaluate, p, cfg.replica_needs, bk)
     xchg = PathExchange(cfg, evaluate, schedule)
 
@@ -344,8 +360,132 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
                                   dtype=dtype, device=device, key=k_r)
                 R = put_levels(R, [cfg.M], top)
             outs.append(emit(take_levels(R, [0])))                   # e.g. lambda r: r.x0
-        return R, xp.stack(outs)
+        return R, tree_map(lambda *a: xp.stack(a), *outs)           # any pytree, not just an array
 
     R, samples = bk.scan(body, R, bk.split(k_run, n_blocks))
     return samples, R
+
+
+# ---- finishing from u_0 > 0 ------------------------------------------------------------------
+
+def finish_needs(cfg):
+    """Features `crepe_finish` reads from its start: use ``emit = lambda r: r.project(finish_needs(cfg))``.
+
+    Parameters
+    ----------
+    cfg : CREPEConfig
+        The configuration.
+
+    Returns
+    -------
+    frozenset of Feature
+        What ``cfg.B_P`` and ``cfg.B_Q`` require, plus REWARD.
+    """
+    return cfg.B_P.requires | cfg.B_Q.requires | {Feature.REWARD}
+
+
+def pool_samples(samples, burn_in=0):
+    """Pool `crepe`'s samples per chain: each chain becomes an instance, its samples that instance's particles.
+
+    Parameters
+    ----------
+    samples : pytree
+        `crepe`'s samples; every leaf has shape [n_blocks, period, I, 1, ...].
+    burn_in : int, optional
+        Number of leading blocks to discard.
+
+    Returns
+    -------
+    pytree
+        Every leaf has shape [I, (n_blocks - burn_in) * period, ...], each chain's samples in sweep order; the
+        level axis (size 1) is dropped.
+    """
+    def pool(a):
+        xp = namespace(a)
+        a = a[burn_in:, ...]
+        nb, P, I = a.shape[0], a.shape[1], a.shape[2]
+        return xp.moveaxis(xp.reshape(a, (nb * P, I) + tuple(a.shape[4:])), 0, 1)
+
+    return tree_map(pool, samples)
+
+
+def tail_grid(cfg, n_tail, *, xp, dtype, device=None):
+    """The finish's grid: from exactly ``u_levels[0]`` down to exactly 0 in `n_tail` equal steps.
+
+    Parameters
+    ----------
+    cfg : CREPEConfig
+        The configuration.
+    n_tail : int
+        Number of steps.
+    xp : namespace
+        Array namespace to create the grid with.
+    dtype : dtype
+        Grid dtype.
+    device : device, optional
+        Grid device.
+
+    Returns
+    -------
+    array
+        Schedule coordinates, shape [n_tail + 1], decreasing.
+    """
+    u0 = cfg.u_levels[0]
+    return xp.asarray([u0 * (1 - j / n_tail) for j in range(n_tail)] + [0.0], dtype=dtype, device=device)
+
+
+def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=None,
+                 final_needs=frozenset({Feature.X0}), key) -> SMCResult:
+    """Carry level-0 samples from ``u_levels[0] > 0`` down to u = 0 with one `smc` run over `n_tail` steps.
+
+    Parameters
+    ----------
+    start : Record
+        Level-0 samples with leading axes [I, N] at t = ``schedule.time(u_levels[0])``, e.g.
+        ``pool_samples(samples, burn_in)`` with ``emit = lambda r: r.project(finish_needs(cfg))``.
+    cfg : CREPEConfig
+        The configuration; ``u_levels[0]`` must be > 0.
+    n_tail : int
+        Number of steps from ``u_levels[0]`` to 0.
+    exact : bool
+        Static. True: weighted run with target ``cfg.B_P``, proposal ``cfg.B_Q`` and potential
+        ``Relative(FKDiff(cfg.lam))``, exact for ``p_0 exp(lambda(tau(0)) r_hat)``. False: unweighted guided
+        denoising with ``cfg.B_Q`` (``log_w`` identically 0); cheaper and approximate.
+    bk : Backend
+        Randomness and control flow.
+    evaluate : Callable[[array, array, frozenset], Record]
+        The model.
+    schedule : Schedule
+        The noise schedule.
+    policy : policy, optional
+        Resampling policy for ``exact=True`` (default ``ESSBelow(0.5)``, within each instance). Ignored for
+        ``exact=False``, which never resamples.
+    final_needs : frozenset of Feature, optional
+        Features the final particles carry. Default ``{Feature.X0}``.
+    key : backend key
+        Random key.
+
+    Returns
+    -------
+    SMCResult
+        The finished particles, [I, N, ...], and their log-weights.
+
+    Raises
+    ------
+    ValueError
+        If ``cfg.u_levels[0] <= 0``.
+    """
+    if cfg.u_levels[0] <= 0:
+        raise ValueError("crepe_finish needs u_levels[0] > 0")
+    xp = namespace(start.t)
+    grid = tail_grid(cfg, n_tail, xp=xp, dtype=start.t.dtype, device=device(start.t))
+    if exact:                                                        # static: weighted, exact target
+        target, proposal = cfg.B_P, cfg.B_Q
+        potential = Relative(FKDiff(cfg.lam))
+        policy = ESSBelow(0.5) if policy is None else policy
+    else:                                                            # unweighted guided denoising
+        target = proposal = cfg.B_Q
+        potential, policy = Zero(), Never()
+    return smc(start, grid, bk=bk, evaluate=evaluate, schedule=schedule, target=target, proposal=proposal,
+               potential=potential, policy=policy, final_needs=final_needs, key=key)
 

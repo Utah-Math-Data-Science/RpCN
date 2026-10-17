@@ -384,6 +384,52 @@ class Zero:
         return st
 
 
+@pytree
+class RelState:
+    """State of `Relative`: the inner potential's state and ``C(start)``, ``[I, N]``."""
+
+    inner: State
+    c0: Array
+
+
+@dataclass(frozen=True)
+class Relative:                       # C - C(start): for runs that start from points already tilted by C(start)
+    """``C - C(start)``: the inner potential relative to its value at the start point.
+
+    For runs whose start points are already distributed with the tilt ``C(start)`` (e.g. `crepe_finish` from
+    tilted level-0 samples): the starting weight is exactly 0, and increments are the inner potential's.
+
+    Parameters
+    ----------
+    inner : Potential
+        The potential to offset.
+    """
+
+    inner: Any
+
+    @property
+    def requires(self):
+        """The inner potential's `requires` (frozenset of Feature)."""
+        return self.inner.requires
+
+    def init(self, rec):
+        """The inner state and its log-tilt at the start. See `Potential.init`."""
+        st = self.inner.init(rec)
+        return RelState(inner=st, c0=self.inner.log_tilt(st))
+
+    def update(self, st, rec, *, last):
+        """Update the inner state; keep ``C(start)``. See `Potential.update`."""
+        return RelState(inner=self.inner.update(st.inner, rec, last=last), c0=st.c0)
+
+    def log_tilt(self, st):
+        """``inner.log_tilt - C(start)``; exactly 0 at the start point. See `Potential.log_tilt`."""
+        return self.inner.log_tilt(st.inner) - st.c0               # x - x == 0 exactly at the start
+
+    def increment(self, prev, st):
+        """The inner potential's increment. See `Potential.increment`."""
+        return self.inner.increment(prev.inner, st.inner)
+
+
 @dataclass(frozen=True)
 class ReverseRatio:                   # scores the reverse step with the kernels opposite to the run
     """Scores the reverse of each step with the kernels opposite to the run's direction.

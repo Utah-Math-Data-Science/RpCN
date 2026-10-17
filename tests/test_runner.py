@@ -9,8 +9,8 @@ from hypothesis import strategies as st
 
 from ttg import (PCN, ESSBelow, Every, Feature, FKDiff, FKMax, FKSum, Gaussian, Guided, Langevin, LangevinMove,
                  Never, PartialRecord, Point, PosteriorStep, Record, ReverseRatio, Sum, TiltEnds, VPLinear, Zero,
-                 constant, evaluate_rows, make_evaluate_jax, make_evaluate_torch, smc, start_record, tilt,
-                 x0_from_eps)
+                 constant, evaluate_rows, make_evaluate_jax, make_evaluate_torch, on_x0, smc, start_record,
+                 tilt, x0_from_eps)
 from ttg.testing import AuditingEvaluate, CountingNetwork, ReplayKernel, toy_eps_network, toy_evaluate
 
 AUTODIFF = [bk for bk in BACKENDS if bk.name in ("jax", "torch")]
@@ -19,7 +19,7 @@ AUTODIFF = [bk for bk in BACKENDS if bk.name in ("jax", "torch")]
 def builder(bk, net, sch, w):
     xp = bk.xp
     to_x0_eps = lambda x, t, eps, sch: (x0_from_eps(x, t, eps, sch), eps)
-    reward = lambda x0: xp.sum(w * x0, axis=tuple(range(1, x0.ndim)))
+    reward = on_x0(lambda x0: xp.sum(w * x0, axis=tuple(range(1, x0.ndim))))
     make = make_evaluate_jax if bk.name == "jax" else make_evaluate_torch
     return make(net, to_x0_eps, sch, reward)
 

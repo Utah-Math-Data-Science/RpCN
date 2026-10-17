@@ -12,8 +12,9 @@ from conftest import BACKENDS, host
 
 from ttg import (PCN, CREPEConfig, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature, FKDiff, FKMax,
                  FKSum, Guided, Langevin, LangevinMove, Never, Noising, PosteriorStep, ReverseSDE, VPLinear, Zero,
-                 constant, crepe, das_lambda, ladder, level_lambda, smc, tilt)
-from ttg.crepe import fine_grid
+                 constant, crepe, crepe_finish, das_lambda, finish_needs, ladder, level_lambda, pool_samples, smc,
+                 tilt)
+from ttg.crepe import fine_grid, tail_grid
 from ttg.testing import toy_evaluate
 
 pytestmark = pytest.mark.slow
@@ -140,16 +141,15 @@ def test_rpcn():
     assert check("RpCN", est, reference(), slack=0.02)          # exact only as mixing becomes complete
 
 
-def crepe_cfg():
+def crepe_cfg(u_levels=(0.0, 0.25, 0.5, 0.75, 1.0)):
     xp, sch, ev, u, P = setup()
-    u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)
     lam = level_lambda(sch.time(xp.asarray(u_levels, dtype=xp.float64)), beta=LAM, rho=1.0)
     noise = Noising(sch)
     B_P = EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD)
     cfg = CREPEConfig(u_levels=u_levels, K=10, F_P=noise, F_Q=noise, B_P=B_P, B_Q=Guided(B_P, tilt(lam)), lam=lam,
                       pairs=EvenOdd(),
                       local_move=LangevinMove(Guided(Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), tilt(lam, 0.5))),
-                      local_levels=(0, 1, 2, 3))
+                      local_levels=tuple(range(len(u_levels) - 1)))
     return cfg
 
 
@@ -166,14 +166,19 @@ def crepe_estimate():
     return over_seeds(lambda key: host(run(key))[100:].reshape(-1, 2).mean(axis=0))
 
 
+def crepe_grid(cfg, xp):
+    """CREPE's own grid: the fine grids of every gap concatenated, u_M down to u_0, [M K + 1]."""
+    gaps = [xp.flip(fine_grid(cfg, m, xp=xp, dtype=xp.float64), axis=0) for m in reversed(range(cfg.M))]
+    return xp.concat([gaps[0]] + [g[1:] for g in gaps[1:]])
+
+
 @needs_fast
 def test_crepe():
     """The reference is the plain sampler with cfg.B_P on CREPE's own grid (the fine grids, level M down to 0),
     reweighted by exp(lambda_0 r_hat) at level 0."""
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg()
-    gaps = [xp.flip(fine_grid(cfg, m, xp=xp, dtype=xp.float64), axis=0) for m in reversed(range(cfg.M))]
-    grid = xp.concat([gaps[0]] + [g[1:] for g in gaps[1:]])     # [M K + 1], u_M down to u_0
+    grid = crepe_grid(cfg, xp)
     lam0 = cfg.lam(sch.time(xp.asarray(cfg.u_levels[0], dtype=xp.float64)))
 
     def run(key):
@@ -184,6 +189,36 @@ def test_crepe():
 
     run = compiled(run)
     assert check("CREPE", crepe_estimate(), over_seeds(lambda key: softmax_mean(*run(key))))
+
+
+@needs_fast
+def test_crepe_finish():
+    """u_0 = 0.25, then crepe_finish(exact=True) to u = 0. The reference is the plain sampler with cfg.B_P on
+    CREPE's grid and then the tail grid, reweighted by exp(2 r_hat) at u = 0."""
+    xp, sch, ev, u, P = setup()
+    cfg = crepe_cfg((0.25, 0.5, 0.75, 1.0))
+
+    def est(key):
+        k_c, k_f = BK.split(key, 2)
+        samples, _ = crepe(cfg, 2**10, (2,), 400, lambda r: r.project(finish_needs(cfg)), bk=BK, evaluate=ev,
+                           schedule=sch, dtype=xp.float64, key=k_c)
+        out = crepe_finish(pool_samples(samples, 100), cfg, n_tail=10, exact=True, bk=BK, evaluate=ev,
+                           schedule=sch, key=k_f)
+        return out.log_w, out.final.x
+
+    est = compiled(est)
+    tail = tail_grid(cfg, 10, xp=xp, dtype=xp.float64)
+    grid = xp.concat([crepe_grid(cfg, xp), tail[1:]])          # u_M down to u_0, then down to 0
+
+    def ref(key):
+        out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, bk=BK, evaluate=ev, schedule=sch,
+                  target=cfg.B_P, proposal=cfg.B_P, potential=Zero(), policy=Never(),
+                  final_needs={Feature.REWARD}, key=key)
+        return LAM * out.final.reward, out.final.x
+
+    ref = compiled(ref)
+    assert check("CREPE + finish", over_seeds(lambda key: softmax_mean(*est(key))),
+                 over_seeds(lambda key: softmax_mean(*ref(key))))
 
 
 @needs_fast

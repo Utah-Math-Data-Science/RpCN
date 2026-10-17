@@ -37,14 +37,16 @@ Examples
 
 Every method calls your model through one ``evaluate`` function. Build it from a noise-prediction network
 ``eps_net(x [B, *D], t [B]) -> eps`` and a reward ``reward(x0 [B, *D]) -> [B]``, both PyTorch callables
-(``make_evaluate_jax`` and ``JaxBackend`` are the JAX equivalents):
+(``make_evaluate_jax`` and ``JaxBackend`` are the JAX equivalents). The builders take
+``reward(x0, x, t) -> [B]``, so a reward may also read the noisy state and time; ``on_x0`` adapts a reward of
+the estimate alone:
 
 .. code:: python
 
    from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature,
                     FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep, ReverseSDE,
-                    VPLinear, constant, crepe, das_lambda, ladder, level_lambda, make_evaluate_torch, smc, tilt,
-                    x0_from_eps)
+                    VPLinear, constant, crepe, crepe_finish, das_lambda, finish_needs, ladder, level_lambda,
+                    make_evaluate_torch, on_x0, pool_samples, smc, tilt, x0_from_eps)
    from ttg.backend import TorchBackend
 
    bk = TorchBackend()
@@ -52,7 +54,8 @@ Every method calls your model through one ``evaluate`` function. Build it from a
    sch = VPLinear()
    D = (3, 32, 32)                                   # event shape of one sample
    I, N = 4, 16                                      # independent instances x particles
-   evaluate = make_evaluate_torch(eps_net, lambda x, t, eps, s: (x0_from_eps(x, t, eps, s), eps), sch, reward)
+   evaluate = make_evaluate_torch(eps_net, lambda x, t, eps, s: (x0_from_eps(x, t, eps, s), eps), sch,
+                                  on_x0(reward))
 
    u = xp.linspace(1.0, 0.0, 100, dtype=xp.float32)  # schedule coordinate, noise (1) to data (0)
    P = PosteriorStep(sch)
@@ -102,6 +105,20 @@ there is no resampling.
                      local_levels=(0, 1, 2, 3))
    samples, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
                              dtype=xp.float32, key=key)   # samples: [100, period, I, 1, *D]
+   more, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
+                          dtype=xp.float32, key=bk.key(1), R0=replicas)   # continue: no re-initialisation
+
+With the lowest level above the data end (:math:`u_0 > 0`), ``crepe_finish`` carries the level-0 samples the
+rest of the way to :math:`u = 0`, weighted (``exact=True``) or as plain guided denoising (``exact=False``):
+
+.. code:: python
+
+   cfg = CREPEConfig(u_levels=(0.25, 0.5, 0.75, 1.0), ...)       # as above, with lam on these levels
+   samples, _ = crepe(cfg, I, D, 100, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=evaluate,
+                      schedule=sch, dtype=xp.float32, key=key)
+   out = crepe_finish(pool_samples(samples, burn_in=20), cfg, n_tail=10, exact=True, bk=bk,
+                      evaluate=evaluate, schedule=sch, key=bk.key(2))
+   x0, log_w = out.final.x0, out.log_w                           # [I, 80 * period, *D], [I, 80 * period]
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
 
@@ -125,17 +142,17 @@ src/ttg/
   ops.py        Array-API helpers and the pure-Python pytree map
   schedule.py   VPLinear, EDM, RectifiedFlow
   records.py    Feature, Point, Record
-  evaluate.py   evaluation contract, conversions, JAX/PyTorch builders, evaluate_rows, start_record
+  evaluate.py   evaluation contract, conversions, JAX/PyTorch builders, on_x0, evaluate_rows, start_record
   kernels.py    Gaussian, transition, Noising, PosteriorStep, DDIMStep, EulerMaruyama, Langevin, Guided
   sde.py        Direction, ForwardSDE, ReverseSDE
   guidance.py   tilt, normalized
   lam.py        constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
-  potentials.py FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Zero
+  potentials.py FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Zero, Relative
   resample.py   ess, systematic, categorical, masked_resample; Never, Every, ESSBelow
   moves.py      MoveContext, PCN, LangevinMove
   exchange.py   SequentialSweep, EvenOdd, StateSwap, replica_exchange
   smc.py        smc()
-  crepe.py      CREPEConfig, PathExchange, crepe_init, crepe()
+  crepe.py      CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish
   testing/      test doubles, the Gaussian toy model, Hypothesis strategies
 tests/          one file per property group of §18.3, plus test_statistical.py (§18.4)
 ```

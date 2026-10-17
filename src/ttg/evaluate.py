@@ -138,6 +138,22 @@ def x0_eps_from_velocity(x, t, v, sch):          # v ~ dm/dt x0 + ds/dt eps
 
 # ---- builders --------------------------------------------------------------------------------
 
+def on_x0(r):                    # reward of the denoiser's estimate only
+    """Adapt a reward of the denoised estimate alone to the builders' ``reward(x0, x, t)`` signature.
+
+    Parameters
+    ----------
+    r : Callable[[array], array]
+        ``r(x0 [B, *D])`` -> [B].
+
+    Returns
+    -------
+    Callable[[array, array, array], array]
+        ``lambda x0, x, t: r(x0)``.
+    """
+    return lambda x0, x, t: r(x0)
+
+
 def _keep(needs, f, v):
     return v if f in needs else None
 
@@ -147,8 +163,8 @@ def make_evaluate_jax(network, to_x0_eps, sch, reward):
 
     The returned ``evaluate(x [B, *D], t [B], needs) -> Record`` honours the evaluation contract: it calls the
     network at most once per call, returns exactly the features in `needs` (all others None), and treats rows
-    independently. `needs` is a static frozenset of `Feature`. REWARD_GRAD is the gradient of the reward of
-    x0_hat with respect to x, through the network (one ``jax.value_and_grad`` over the single forward pass).
+    independently. `needs` is a static frozenset of `Feature`. REWARD_GRAD is the gradient of the reward with
+    respect to x, through both x0_hat (the network) and x (one ``jax.value_and_grad`` over the single forward pass).
 
     Parameters
     ----------
@@ -158,8 +174,9 @@ def make_evaluate_jax(network, to_x0_eps, sch, reward):
         ``to_x0_eps(x, t, out, sch)`` -> (x0, eps), e.g. ``lambda x, t, eps, s: (x0_from_eps(x, t, eps, s), eps)``.
     sch : Schedule
         The noise schedule.
-    reward : Callable[[array], array]
-        ``reward(x0 [B, *D])`` -> [B]; differentiable if REWARD_GRAD is needed.
+    reward : Callable[[array, array, array], array]
+        ``reward(x0 [B, *D], x [B, *D], t [B])`` -> [B]; differentiable if REWARD_GRAD is needed. Wrap a reward
+        of the estimate alone with `on_x0`. It may call a separate reward model; C1 counts only `network`.
 
     Returns
     -------
@@ -175,7 +192,7 @@ def make_evaluate_jax(network, to_x0_eps, sch, reward):
 
         def fwd(x):
             x0, eps = to_x0_eps(x, t, network(x, t), sch)       # the single forward pass
-            r = reward(x0) if want_r else None
+            r = reward(x0, x, t) if want_r else None
             return (jnp.sum(r) if grad else 0.0), (x0, eps, r)
 
         if grad:
@@ -197,7 +214,7 @@ def make_evaluate_torch(network, to_x0_eps, sch, reward):
     As `make_evaluate_jax`: the returned ``evaluate(x [B, *D], t [B], needs) -> Record`` calls the network at
     most once per call, returns exactly the features in `needs` (all others None), and treats rows
     independently. The forward pass runs under ``torch.no_grad()`` unless REWARD_GRAD is needed, in which case
-    the reward of x0_hat is differentiated with respect to x through the network. Everything returned is
+    the reward is differentiated with respect to x, through x0_hat (the network) and x itself. Everything returned is
     detached.
 
     Parameters
@@ -208,8 +225,9 @@ def make_evaluate_torch(network, to_x0_eps, sch, reward):
         ``to_x0_eps(x, t, out, sch)`` -> (x0, eps), e.g. ``lambda x, t, eps, s: (x0_from_eps(x, t, eps, s), eps)``.
     sch : Schedule
         The noise schedule.
-    reward : Callable[[Tensor], Tensor]
-        ``reward(x0 [B, *D])`` -> [B]; differentiable if REWARD_GRAD is needed.
+    reward : Callable[[Tensor, Tensor, Tensor], Tensor]
+        ``reward(x0 [B, *D], x [B, *D], t [B])`` -> [B]; differentiable if REWARD_GRAD is needed. Wrap a reward
+        of the estimate alone with `on_x0`. It may call a separate reward model; C1 counts only `network`.
 
     Returns
     -------
@@ -224,7 +242,7 @@ def make_evaluate_torch(network, to_x0_eps, sch, reward):
         with torch.enable_grad() if grad else torch.no_grad():
             xg = x.detach().requires_grad_(grad)
             x0, eps = to_x0_eps(xg, t, network(xg, t), sch)      # the single forward pass
-            r = reward(x0) if want_r else None
+            r = reward(x0, xg, t) if want_r else None
             g = torch.autograd.grad(r.sum(), xg)[0] if grad else None
 
         def keep(f, v):

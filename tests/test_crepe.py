@@ -1,4 +1,4 @@
-"""X1-X4: CREPE's path exchange, replica invariant and evaluation counts."""
+"""X1-X7: CREPE's path exchange, replica invariant, evaluation counts, continuation and finish."""
 
 import numpy as np
 import pytest
@@ -7,9 +7,10 @@ from helpers import ALL, toy
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ttg import (CREPEConfig, Direction, EulerMaruyama, EvenOdd, ForwardSDE, Guided, Langevin, LangevinMove,
-                 Noising, PathExchange, Point, ReverseSDE, SequentialSweep, VPLinear, crepe, crepe_init,
-                 evaluate_rows, level_lambda, per_row_grid, tilt)
+from ttg import (CREPEConfig, Direction, EulerMaruyama, EvenOdd, Feature, ForwardSDE, Guided, Langevin,
+                 LangevinMove, Never, Noising, PartialRecord, PathExchange, Point, ReverseSDE, SequentialSweep,
+                 VPLinear, Zero, crepe, crepe_finish, crepe_init, evaluate_rows, finish_needs, level_lambda,
+                 per_row_grid, pool_samples, smc, tail_grid, tilt)
 from ttg.ops import steps_first, take_levels
 from ttg.testing import AuditingEvaluate, ReplayKernel
 
@@ -150,3 +151,110 @@ def test_X3_X4_replica_invariant_and_counts(bk, pairs, levels, K, I, n_blocks, s
         for f in ALL:
             assert (getattr(rep, f.value) is not None) == (f in cfg.replica_needs)
     assert tuple(samples.shape) == (n_blocks, cfg.pairs.period, I, 1, 2)
+
+
+def sweep_rows(cfg, I):
+    """§17: evaluated rows per block (period sweeps)."""
+    M, rows = cfg.M, 0
+    for n in range(cfg.pairs.period):
+        P_n = sum(len(r) for r in cfg.pairs.rounds(M + 1, n))
+        R_n = int(any(M in p for r in cfg.pairs.rounds(M + 1, n + 1) for p in r))
+        rows += I * (2 * cfg.K * P_n + len(cfg.local_levels) + R_n)
+    return rows
+
+
+@backends
+@given(levels=u_levels(max_M=2), I=st.integers(1, 2), n_blocks=st.integers(1, 3), seed=st.integers(0, 2**20),
+       data=st.data())
+def test_X5_pytree_emit_and_pool_samples(bk, levels, I, n_blocks, seed, data):
+    xp, sch = bk.xp, VPLinear()
+    ev, _, _ = toy(bk, sch)
+    cfg = make_cfg(bk, sch, levels, 1, local=False)
+    P = cfg.pairs.period
+    with eager(bk):
+        samples, _ = crepe(cfg, I, (2,), n_blocks, lambda r: (r.project(finish_needs(cfg)), r.x), bk=bk,
+                           evaluate=ev, schedule=sch, dtype=xp.float64, key=bk.key(seed))
+    rec, x = samples
+    for f in ALL:
+        assert (getattr(rec, f.value) is not None) == (f in finish_needs(cfg))
+    assert tuple(rec.t.shape) == (n_blocks, P, I, 1) and tuple(rec.x.shape) == (n_blocks, P, I, 1, 2)
+    b = data.draw(st.integers(0, n_blocks - 1))
+    pooled = pool_samples(samples, b)
+    assert tuple(pooled[0].t.shape) == (I, (n_blocks - b) * P)
+    assert tuple(pooled[0].x.shape) == (I, (n_blocks - b) * P, 2)
+    xs = host(x)
+    want = np.stack([xs[blk, p, :, 0] for blk in range(b, n_blocks) for p in range(P)], axis=1)   # sweep order
+    assert np.array_equal(host(pooled[1]), want) and np.array_equal(host(pooled[0].x), want)
+
+
+@backends
+@pytest.mark.parametrize("pairs", [EvenOdd(), SequentialSweep()], ids=lambda p: type(p).__name__)
+@given(levels=u_levels(max_M=2), K=st.integers(1, 2), I=st.integers(1, 2), n_blocks=st.integers(0, 2),
+       seed=st.integers(0, 2**20), local=st.booleans())
+def test_X6_continue_from_replicas(bk, pairs, levels, K, I, n_blocks, seed, local):
+    xp, sch = bk.xp, VPLinear()
+    ev, _, _ = toy(bk, sch)
+    cfg = make_cfg(bk, sch, levels, K, pairs=pairs, local=local)
+    R0 = replicas(bk, sch, ev, cfg, I, seed, ALL)                          # extras beyond replica_needs
+    audit = AuditingEvaluate(ev)
+    with eager(bk):
+        _, R = crepe(cfg, I, (2,), n_blocks, lambda r: r.x, bk=bk, evaluate=audit, schedule=sch,
+                     dtype=xp.float64, key=bk.key(seed + 1), R0=R0)
+    assert audit.rows == n_blocks * sweep_rows(cfg, I)                     # no crepe_init rows
+    t_levels = sch.time(xp.asarray(levels, dtype=xp.float64))
+    assert bool(xp.all(R.t == xp.broadcast_to(t_levels[None, :], (I, cfg.M + 1))))
+    for f in ALL:
+        assert (getattr(R, f.value) is not None) == (f in cfg.replica_needs)
+    if n_blocks == 0:
+        want = R0.project(cfg.replica_needs)
+        for f in ALL:
+            v = getattr(want, f.value)
+            assert v is None or bool(xp.all(getattr(R, f.value) == v))
+        assert bool(xp.all(R.x == R0.x))
+    partial = R0.project(cfg.replica_needs - {Feature.REWARD})
+    with pytest.raises(PartialRecord):
+        crepe(cfg, I, (2,), 1, lambda r: r.x, bk=bk, evaluate=ev, schedule=sch, dtype=xp.float64,
+              key=bk.key(seed), R0=partial)
+
+
+def finish_start(bk, sch, ev, cfg, I, N, seed):
+    xp = bk.xp
+    t0 = xp.broadcast_to(sch.time(xp.asarray(cfg.u_levels[0], dtype=xp.float64)), (I, N))
+    x = bk.normal(bk.key(seed), (I, N, 2), xp.float64)
+    return evaluate_rows(ev, Point(x, t0), finish_needs(cfg), bk)
+
+
+@backends
+@given(n_tail=st.integers(1, 4), I=st.integers(1, 2), N=st.integers(1, 3), seed=st.integers(0, 2**20),
+       u0=st.floats(0.05, 0.6), data=st.data())
+def test_X7_crepe_finish(bk, n_tail, I, N, seed, u0, data):
+    xp, sch = bk.xp, VPLinear()
+    ev, _, _ = toy(bk, sch)
+    levels = (u0, (u0 + 1.0) / 2, 1.0)
+    cfg = make_cfg(bk, sch, levels, 1, local=False)
+    with pytest.raises(ValueError):
+        crepe_finish(None, make_cfg(bk, sch, (0.0, 1.0), 1, local=False), n_tail, exact=True, bk=bk,
+                     evaluate=ev, schedule=sch, key=bk.key(seed))
+    grid = tail_grid(cfg, n_tail, xp=xp, dtype=xp.float64)
+    assert float(grid[0]) == u0 and float(grid[-1]) == 0.0 and grid.shape[0] == n_tail + 1
+    start = finish_start(bk, sch, ev, cfg, I, N, seed)
+    with eager(bk):
+        out = crepe_finish(start, cfg, n_tail, exact=False, bk=bk, evaluate=ev, schedule=sch, key=bk.key(seed + 1))
+        ref = smc(start, grid, bk=bk, evaluate=ev, schedule=sch, target=cfg.B_Q, proposal=cfg.B_Q,
+                  potential=Zero(), policy=Never(), final_needs=frozenset({Feature.X0}), key=bk.key(seed + 1))
+    assert bool(xp.all(out.log_w == 0))
+    assert bool(xp.all(out.final.x == ref.final.x)) and bool(xp.all(out.log_w == ref.log_w))
+
+    # exact=True with Never(), along a replayed tail
+    ts = [xp.broadcast_to(t_, (I, N)) for t_ in sch.time(grid)]
+    t_steps = xp.stack(ts)
+    path = data.draw(xps_for(bk).arrays(xp.float64, (n_tail + 1, I, N, 2), elements=elems()))
+    B_Q = cfg.B_Q
+    rcfg = make_cfg(bk, sch, levels, 1, local=False, B_Q=ReplayKernel(B_Q, path, t_steps))
+    with eager(bk):
+        out = crepe_finish(start, rcfg, n_tail, exact=True, policy=Never(), bk=bk, evaluate=ev, schedule=sch,
+                           key=bk.key(seed + 2))
+    recs = chain(ev, [start.x] + [path[k, ...] for k in range(1, n_tail + 1)], ts, bk)
+    want = ell(cfg, recs[-1]) - ell(cfg, recs[0]) + path_terms(recs, ts, cfg.B_P, B_Q)
+    assert bool(xp.all(out.final.x == path[-1, ...]))
+    assert np.all(np.abs(host(out.log_w - want)) <= 1e-8 * (1 + np.abs(host(want))))

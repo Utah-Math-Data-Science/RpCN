@@ -1,4 +1,4 @@
-"""P1-P5 (potentials), N1 (increments don't see C), N4 (structural: who calls log_tilt)."""
+"""P1-P6 (potentials), N1 (increments don't see C), N4 (structural: who calls log_tilt)."""
 
 import numpy as np
 import pytest
@@ -7,7 +7,7 @@ from helpers import toy
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ttg import (PCN, Direction, EulerMaruyama, FKDiff, ForwardSDE, FKMax, FKSum, Gaussian, Never, Noising, Point, PosteriorStep, Record, ReverseRatio,
+from ttg import (PCN, Direction, EulerMaruyama, FKDiff, ForwardSDE, FKMax, FKSum, Gaussian, Never, Noising, Point, PosteriorStep, Record, Relative, ReverseRatio,
                  SequentialSweep, Sum, TiltEnds, VPLinear, Zero, constant, ladder, smc, tilt_delta)
 from ttg.ops import take_levels
 from ttg.potentials import PathState, TiltState
@@ -121,6 +121,8 @@ ALL_POTENTIALS = {
     "fkmax": lambda: FKMax(constant(0.8)),
     "fksum": lambda: FKSum(constant(0.8)),
     "tiltends": lambda: TiltEnds(constant(0.8)),
+    "relative": lambda: Relative(FKDiff(constant(0.8))),
+    "relative_fkmax": lambda: Relative(FKMax(constant(0.8))),
     # the run below denoises, so its reverse kernels noise
     "reverse_ratio": lambda: ReverseRatio(Noising(VPLinear()), EulerMaruyama(ForwardSDE(VPLinear()), Direction.FORWARD)),
     "sum": lambda: Sum(TiltEnds(constant(0.8)), FKMax(constant(-0.3))),
@@ -148,6 +150,30 @@ def test_P5_increment_is_log_tilt_difference(bk, name, data):
     a, b = pot.update(prev, recs[k], last=last), pot.update(prev, alt, last=last)
     mag = host(xp.abs(pot.log_tilt(a)) + xp.abs(pot.log_tilt(b)))
     assert np.all(np.abs(host(tilt_delta(pot, prev, a, b) - (pot.log_tilt(a) - pot.log_tilt(b)))) <= 1e-9 * (1 + mag))
+
+
+@backends
+@pytest.mark.parametrize("make", [lambda: FKDiff(constant(0.8)), lambda: FKMax(constant(-1.3)),
+                                  lambda: Sum(TiltEnds(constant(0.5)), FKDiff(constant(2.0)))],
+                         ids=["fkdiff", "fkmax", "sum"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@given(data=st.data())
+def test_P6_relative_is_zero_at_start_and_keeps_increments(bk, make, dtype, data):
+    xp = bk.xp
+    I, N = data.draw(leading())
+    S = data.draw(st.integers(2, 5))
+    recs, _ = records(bk, data, I, N, S, dtype=getattr(xp, dtype))
+    inner = make()
+    rel = Relative(inner)
+    assert rel.requires == inner.requires
+    s_rel, s_in = run(rel, recs), run(inner, recs)
+    assert bool(xp.all(rel.log_tilt(s_rel[0]) == 0))                  # exactly, in any dtype
+    for k in range(1, S):
+        assert bool(xp.all(rel.increment(s_rel[k - 1], s_rel[k]) == inner.increment(s_in[k - 1], s_in[k])))
+    if dtype == "float64":
+        c0 = inner.log_tilt(inner.init(recs[0]))
+        for k in range(S):
+            assert close(rel.log_tilt(s_rel[k]), inner.log_tilt(s_in[k]) - c0)
 
 
 # ---- N1 ------------------------------------------------------------------------------------------

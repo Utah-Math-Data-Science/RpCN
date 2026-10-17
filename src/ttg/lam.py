@@ -69,8 +69,8 @@ def tabulated(knots, values):
     return lam
 
 
-def piecewise_linear(knots, values):     # knots: 1-D increasing
-    """Linear interpolation between knots, extrapolated linearly beyond the end segments.
+def piecewise_linear(knots, values, hold=False):   # knots: 1-D increasing
+    """Linear interpolation between knots; beyond the end knots, linear extrapolation or held end values.
 
     Parameters
     ----------
@@ -78,6 +78,9 @@ def piecewise_linear(knots, values):     # knots: 1-D increasing
         ``[K]``, increasing, ``K >= 2``.
     values : array
         ``[K]`` values at the knots.
+    hold : bool, optional
+        Static. False (default) extrapolates the end segments linearly; True holds the end values constant
+        beyond the end knots.
 
     Returns
     -------
@@ -87,6 +90,8 @@ def piecewise_linear(knots, values):     # knots: 1-D increasing
     def lam(t):
         xp = namespace(t, knots, values)
         kn, va = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
+        if hold:                                     # static
+            t = xp.clip(t, min=kn[0], max=kn[-1])
         # searchsorted(kn, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
         j = xp.sum(xp.astype(kn < t[..., None], xp.int64), axis=-1)
         j = xp.clip(j, 1, kn.shape[0] - 1)
@@ -123,7 +128,8 @@ def das_lambda(t_grid, gamma, alpha_kl):
 def level_lambda(t_levels, beta, rho):
     """CREPE's per-level tilt strength: ``beta`` at the data end, 0 at the noise end.
 
-    Level ``m`` of ``M`` gets ``beta (1 - m / M)^rho``, interpolated linearly in ``t`` between levels.
+    Level ``m`` of ``M`` gets ``beta (1 - m / M)^rho``, interpolated linearly in ``t`` between levels. The end
+    values are held: ``beta`` below level 0 (where `crepe_finish` continues denoising) and 0 above level M.
 
     Parameters
     ----------
@@ -137,9 +143,9 @@ def level_lambda(t_levels, beta, rho):
     Returns
     -------
     Callable[[array], array]
-        ``piecewise_linear(t_levels, ...)``.
+        ``piecewise_linear(t_levels, ..., hold=True)``.
     """
     xp = namespace(t_levels)
     M = t_levels.shape[0] - 1
     k = xp.arange(M + 1, dtype=t_levels.dtype, device=device(t_levels))
-    return piecewise_linear(t_levels, beta * (1 - k / M) ** rho)
+    return piecewise_linear(t_levels, beta * (1 - k / M) ** rho, hold=True)
