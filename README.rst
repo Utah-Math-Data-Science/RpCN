@@ -131,7 +131,7 @@ src/ttg/
   guidance.py   tilt, normalized
   lam.py        constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
   potentials.py FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Zero
-  resample.py   ess, systematic, masked_resample; Never, Every, ESSBelow
+  resample.py   ess, systematic, categorical, masked_resample; Never, Every, ESSBelow
   moves.py      MoveContext, PCN, LangevinMove
   exchange.py   SequentialSweep, EvenOdd, StateSwap, replica_exchange
   smc.py        smc()

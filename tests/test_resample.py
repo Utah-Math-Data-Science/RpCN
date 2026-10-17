@@ -1,4 +1,4 @@
-"""R1-R4: systematic resampling, masking, alignment, ESS."""
+"""R1-R5: systematic resampling, masking, alignment, ESS, categorical selection."""
 
 import math
 
@@ -7,7 +7,7 @@ from conftest import backends, elems, host, leading, xps_for
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ttg import Record, ess, masked_resample, systematic
+from ttg import Record, categorical, ess, masked_resample, systematic
 
 
 def draw_log_w(bk, data, I, N):
@@ -67,3 +67,25 @@ def test_R4_ess_range_and_extremes(bk, data):
     j = data.draw(st.integers(0, N - 1))
     one_hot = xp.where(xp.arange(N)[None, :] == j, 0.0, -math.inf * xp.ones((I, N), dtype=xp.float64))
     assert np.all(host(ess(one_hot)) == 1)
+
+
+@backends
+@given(data=st.data(), seed=st.integers(0, 2**20))
+def test_R5_categorical_range_and_one_hot(bk, data, seed):
+    xp = bk.xp
+    I, N = data.draw(leading(max_N=8))
+    idx = host(categorical(bk, draw_log_w(bk, data, I, N), bk.key(seed)))
+    assert idx.shape == (I,) and np.all((idx >= 0) & (idx < N))
+    j = data.draw(st.integers(0, N - 1))
+    one_hot = xp.where(xp.arange(N)[None, :] == j, 0.0, -math.inf * xp.ones((I, N), dtype=xp.float64))
+    assert np.all(host(categorical(bk, one_hot, bk.key(seed))) == j)
+
+
+@backends
+def test_R5_categorical_frequencies(bk):
+    xp = bk.xp
+    I = 20_000
+    w = np.array([0.1, 0.2, 0.3, 0.4])
+    log_w = xp.asarray(np.tile(np.log(w) + 7.0, (I, 1)))              # unnormalised on purpose
+    freq = np.bincount(host(categorical(bk, log_w, bk.key(0))), minlength=w.size) / I
+    assert np.all(np.abs(freq - w) < 5 * np.sqrt(w * (1 - w) / I))

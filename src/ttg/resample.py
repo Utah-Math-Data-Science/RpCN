@@ -25,6 +25,11 @@ def ess(log_w):                                   # [I, N] -> [I]
     return xp.exp(-logsumexp(2 * lw, axis=1))
 
 
+def _cdf(log_w):                                  # [I, N] -> [I, N]
+    xp = namespace(log_w)
+    return xp.cumulative_sum(xp.exp(log_w - logsumexp(log_w, axis=1, keepdims=True)), axis=1)
+
+
 def systematic(bk, log_w, key):                   # [I, N] -> idx [I, N]
     """Systematic resampling indices, independently per instance.
 
@@ -50,10 +55,37 @@ def systematic(bk, log_w, key):                   # [I, N] -> idx [I, N]
     xp = namespace(log_w)
     I, N = log_w.shape
     dev = device(log_w)
-    w = xp.exp(log_w - logsumexp(log_w, axis=1, keepdims=True))
-    cdf = xp.cumulative_sum(w, axis=1)
-    u = (bk.uniform(key, (I, 1), w.dtype, device=dev) + xp.arange(N, dtype=w.dtype, device=dev)[None, :]) / N
+    cdf = _cdf(log_w)
+    u = (bk.uniform(key, (I, 1), cdf.dtype, device=dev) + xp.arange(N, dtype=cdf.dtype, device=dev)[None, :]) / N
     idx = xp.sum(xp.astype(cdf[:, None, :] < u[:, :, None], xp.int64), axis=2)   # O(N^2); avoids 2-D searchsorted
+    return xp.clip(idx, max=N - 1)
+
+
+def categorical(bk, log_w, key):                  # [I, N] -> idx [I]
+    """Draw one index per instance from its normalised weights, by inverting the CDF.
+
+    Use it to pick a single particle per instance, e.g. from an `smc` run's final ``log_w``. (A fixed column of
+    `systematic` is not such a draw: column j always falls in the j-th 1/N stratum of the CDF.)
+
+    Parameters
+    ----------
+    bk : Backend
+        Supplies the one uniform draw per instance.
+    log_w : array
+        ``[I, N]`` unnormalised log-weights.
+    key : key
+        Random key.
+
+    Returns
+    -------
+    array
+        ``[I]`` int64 indices in ``[0, N)``.
+    """
+    xp = namespace(log_w)
+    I, N = log_w.shape
+    cdf = _cdf(log_w)
+    u = bk.uniform(key, (I, 1), cdf.dtype, device=device(log_w))
+    idx = xp.sum(xp.astype(cdf < u, xp.int64), axis=1)
     return xp.clip(idx, max=N - 1)
 
 
