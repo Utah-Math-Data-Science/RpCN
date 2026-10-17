@@ -158,12 +158,12 @@ def crepe_estimate():
     cfg = crepe_cfg()
 
     def run(key):
-        samples, _ = crepe(cfg, 2**10, (2,), 400, lambda r: r.x, bk=BK, evaluate=ev, schedule=sch,
+        samples, _ = crepe(cfg, 2**10, (2,), 300, lambda r: r.x, bk=BK, evaluate=ev, schedule=sch, burn_in=100,
                            dtype=xp.float64, key=key)
         return samples
 
     run = compiled(run)
-    return over_seeds(lambda key: host(run(key))[100:].reshape(-1, 2).mean(axis=0))
+    return over_seeds(lambda key: host(run(key)).reshape(-1, 2).mean(axis=0))
 
 
 def crepe_grid(cfg, xp):
@@ -193,16 +193,17 @@ def test_crepe():
 
 @needs_fast
 def test_crepe_finish():
-    """u_0 = 0.25, then crepe_finish(exact=True) to u = 0. The reference is the plain sampler with cfg.B_P on
-    CREPE's grid and then the tail grid, reweighted by exp(2 r_hat) at u = 0."""
+    """u_0 = 0.25, thin=4, burn_in=100, then crepe_finish(exact=True) from the 300 emits per chain to u = 0.
+    The reference is the plain sampler with cfg.B_P on CREPE's grid and then the tail grid, reweighted by
+    exp(2 r_hat) at u = 0."""
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg((0.25, 0.5, 0.75, 1.0))
 
     def est(key):
         k_c, k_f = BK.split(key, 2)
-        samples, _ = crepe(cfg, 2**10, (2,), 400, lambda r: r.project(finish_needs(cfg)), bk=BK, evaluate=ev,
-                           schedule=sch, dtype=xp.float64, key=k_c)
-        out = crepe_finish(pool_samples(samples, 100), cfg, n_tail=10, exact=True, bk=BK, evaluate=ev,
+        samples, _ = crepe(cfg, 2**10, (2,), 300, lambda r: r.project(finish_needs(cfg)), bk=BK, evaluate=ev,
+                           schedule=sch, dtype=xp.float64, key=k_c, thin=4, burn_in=100)   # L = 4: 300 emits
+        out = crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True, bk=BK, evaluate=ev,
                            schedule=sch, key=k_f)
         return out.log_w, out.final.x
 

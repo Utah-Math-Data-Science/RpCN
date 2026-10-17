@@ -1,5 +1,7 @@
 """X1-X7: CREPE's path exchange, replica invariant, evaluation counts, continuation and finish."""
 
+import math
+
 import numpy as np
 import pytest
 from conftest import backends, eager, elems, host, xps_for
@@ -153,38 +155,61 @@ def test_X3_X4_replica_invariant_and_counts(bk, pairs, levels, K, I, n_blocks, s
     assert tuple(samples.shape) == (n_blocks, cfg.pairs.period, I, 1, 2)
 
 
-def sweep_rows(cfg, I):
-    """§17: evaluated rows per block (period sweeps)."""
-    M, rows = cfg.M, 0
-    for n in range(cfg.pairs.period):
-        P_n = sum(len(r) for r in cfg.pairs.rounds(M + 1, n))
-        R_n = int(any(M in p for r in cfg.pairs.rounds(M + 1, n + 1) for p in r))
-        rows += I * (2 * cfg.K * P_n + len(cfg.local_levels) + R_n)
-    return rows
+def one_sweep_rows(cfg, I, n):
+    """§17: evaluated rows of sweep n."""
+    M = cfg.M
+    P_n = sum(len(r) for r in cfg.pairs.rounds(M + 1, n))
+    R_n = int(any(M in p for r in cfg.pairs.rounds(M + 1, n + 1) for p in r))
+    return I * (2 * cfg.K * P_n + len(cfg.local_levels) + R_n)
+
+
+def sweep_rows(cfg, I, L=None):
+    """§17: evaluated rows per block of L sweeps (default: one period)."""
+    return sum(one_sweep_rows(cfg, I, n) for n in range(cfg.pairs.period if L is None else L))
 
 
 @backends
-@given(levels=u_levels(max_M=2), I=st.integers(1, 2), n_blocks=st.integers(1, 3), seed=st.integers(0, 2**20),
-       data=st.data())
-def test_X5_pytree_emit_and_pool_samples(bk, levels, I, n_blocks, seed, data):
+@pytest.mark.parametrize("pairs", [EvenOdd(), SequentialSweep()], ids=lambda p: type(p).__name__)
+@given(levels=u_levels(max_M=2), I=st.integers(1, 2), n_blocks=st.integers(1, 3), thin=st.integers(1, 3),
+       burn_in=st.integers(0, 2), seed=st.integers(0, 2**20))
+def test_X5_pytree_emit_thin_burn_in_and_pool_samples(bk, pairs, levels, I, n_blocks, thin, burn_in, seed):
     xp, sch = bk.xp, VPLinear()
     ev, _, _ = toy(bk, sch)
-    cfg = make_cfg(bk, sch, levels, 1, local=False)
-    P = cfg.pairs.period
+    cfg = make_cfg(bk, sch, levels, 1, pairs=pairs, local=False)
+    L = math.lcm(cfg.pairs.period, thin)
+    E = L // thin
+    audit = AuditingEvaluate(ev)
+    seen = []                                                              # rows evaluated at each emit
+
+    def emit(r):
+        seen.append(audit.rows)
+        return r.project(finish_needs(cfg)), r.x
+
     with eager(bk):
-        samples, _ = crepe(cfg, I, (2,), n_blocks, lambda r: (r.project(finish_needs(cfg)), r.x), bk=bk,
-                           evaluate=ev, schedule=sch, dtype=xp.float64, key=bk.key(seed))
+        samples, _ = crepe(cfg, I, (2,), n_blocks, emit, bk=bk, evaluate=audit, schedule=sch, dtype=xp.float64,
+                           key=bk.key(seed), thin=thin, burn_in=burn_in)
+    init = I * (1 + cfg.M * cfg.K)                                         # §17 crepe_init
+    total = (burn_in + n_blocks) * L
+    assert audit.rows == init + (burn_in + n_blocks) * sweep_rows(cfg, I, L)   # (burn_in + n_blocks) * L sweeps
+    after = [init + sum(one_sweep_rows(cfg, I, n % L) for n in range(j)) for j in range(1, total + 1)]
+    # after sweeps burn_in L + thin, burn_in L + 2 thin, ...
+    assert seen == [after[j - 1] for j in range(burn_in * L + thin, total + 1, thin)]
     rec, x = samples
     for f in ALL:
         assert (getattr(rec, f.value) is not None) == (f in finish_needs(cfg))
-    assert tuple(rec.t.shape) == (n_blocks, P, I, 1) and tuple(rec.x.shape) == (n_blocks, P, I, 1, 2)
-    b = data.draw(st.integers(0, n_blocks - 1))
-    pooled = pool_samples(samples, b)
-    assert tuple(pooled[0].t.shape) == (I, (n_blocks - b) * P)
-    assert tuple(pooled[0].x.shape) == (I, (n_blocks - b) * P, 2)
+    assert tuple(rec.t.shape) == (n_blocks, E, I, 1) and tuple(rec.x.shape) == (n_blocks, E, I, 1, 2)
+    pooled = pool_samples(samples)
+    assert tuple(pooled[0].t.shape) == (I, n_blocks * E)
+    assert tuple(pooled[0].x.shape) == (I, n_blocks * E, 2)
     xs = host(x)
-    want = np.stack([xs[blk, p, :, 0] for blk in range(b, n_blocks) for p in range(P)], axis=1)   # sweep order
+    flat = [xs[blk, e, :, 0] for blk in range(n_blocks) for e in range(E)]   # emit order
+    want = np.stack(flat, axis=1)                                          # [I, n, 2]: row i is chain i only
     assert np.array_equal(host(pooled[1]), want) and np.array_equal(host(pooled[0].x), want)
+    with pytest.raises(ValueError):
+        crepe(cfg, I, (2,), 1, emit, bk=bk, evaluate=ev, schedule=sch, dtype=xp.float64, key=bk.key(seed), thin=0)
+    with pytest.raises(ValueError):
+        crepe(cfg, I, (2,), 1, emit, bk=bk, evaluate=ev, schedule=sch, dtype=xp.float64, key=bk.key(seed),
+              burn_in=-1)
 
 
 @backends

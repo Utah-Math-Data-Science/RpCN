@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -281,12 +282,20 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
     return stack_levels(levels)                                      # [I, M+1, ...]
 
 
-def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None):
-    """Run CREPE: replica exchange across noise levels, emitting a sample from level 0 after every sweep.
+def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=None, key, R0=None, thin=1,
+          burn_in=0):
+    """Run CREPE: replica exchange across noise levels, emitting a sample from level 0 after every `thin`-th sweep.
 
     Each sweep proposes path exchanges between adjacent levels (per `cfg.pairs`), accepts or rejects them per
     chain, applies the local move (if any), and refreshes the top replica with a fresh prior draw when the next
-    sweep uses it. Samples are correlated MCMC output; discard a burn-in.
+    sweep uses it. Samples are correlated MCMC output: `burn_in` blocks run first and emit nothing.
+
+    A block is ``L = lcm(cfg.pairs.period, thin)`` sweeps, so the pair-schedule parity lines up across blocks.
+    The `burn_in` blocks and the `n_blocks` emitting blocks (``L // thin`` emits each) are two scans, because
+    whether a block emits is static. Thinning suits `crepe_finish`, where every kept
+    sample costs `n_tail` evaluations and correlated particles overstate its effective sample size: set `thin`
+    to about twice the integrated autocorrelation time (in sweeps) of a cheap emitted scalar such as the reward.
+    For plain averages over CREPE's own samples, thinning only discards information.
 
     Parameters
     ----------
@@ -297,7 +306,7 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     D : tuple of int
         Event shape.
     n_blocks : int
-        Number of scan iterations; each runs ``cfg.pairs.period`` sweeps.
+        Number of emitting blocks, after the burn-in; each runs ``L = lcm(cfg.pairs.period, thin)`` sweeps.
     emit : Callable[[Record], Any]
         Maps the level-0 replicas (a Record of shape [I, 1, ...]) to any pytree of arrays, e.g. ``lambda r: r.x0``,
         ``lambda r: (r.x0, r.reward)``, or ``lambda r: r.project(finish_needs(cfg))`` for `crepe_finish`.
@@ -317,11 +326,17 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     R0 : Record, optional
         Replicas from an earlier call (its returned `R`) to continue from, skipping `crepe_init`. Must carry
         ``cfg.replica_needs``; extras are dropped. Level times are the caller's responsibility.
+    thin : int, optional
+        Static, >= 1. Emit after every `thin`-th sweep only (sweeps ``thin, 2 thin, ...``); the sweeps in between
+        still run. Default 1: emit after every sweep.
+    burn_in : int, optional
+        Static, >= 0. Blocks (L sweeps each) run before sampling, with nothing emitted or stored. They cost the
+        same evaluations as any other block. A run continued from `R0` usually needs 0.
 
     Returns
     -------
     samples : pytree
-        Stacked `emit` outputs: every leaf has shape [n_blocks, period, I, 1, ...].
+        Stacked `emit` outputs: every leaf has shape [n_blocks, L // thin, I, 1, ...].
     R : Record
         The final replicas, shape [I, M+1, *D].
 
@@ -329,7 +344,13 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     ------
     PartialRecord
         If `R0` lacks features in ``cfg.replica_needs``.
+    ValueError
+        If `thin` is not an int >= 1 or `burn_in` not an int >= 0.
     """
+    if not isinstance(thin, int) or thin < 1:
+        raise ValueError("crepe needs a static int thin >= 1")
+    if not isinstance(burn_in, int) or burn_in < 0:
+        raise ValueError("crepe needs a static int burn_in >= 0")
     xp = bk.xp
     k_init, k_run = bk.split(key, 2)                                 # same split whether or not R0 is given
     if R0 is None:                                                   # static
@@ -345,9 +366,11 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
     def top_used(n):                                                 # static
         return any(cfg.M in p for rnd in cfg.pairs.rounds(cfg.M + 1, n) for p in rnd)
 
-    def body(R, key):
+    L = math.lcm(cfg.pairs.period, thin)                             # static: sweeps per scan body
+
+    def block(R, key, emitting):                                     # emitting: static
         outs = []
-        for n, kk in zip(range(cfg.pairs.period), bk.split(key, cfg.pairs.period)):
+        for n, kk in zip(range(L), bk.split(key, L)):
             k_x, k_l, k_r = bk.split(kk, 3)
             R = replica_exchange(R, cfg.pairs, xchg, sweep=n, key=k_x, bk=bk)
             if cfg.local_move is not None:                           # static
@@ -359,10 +382,14 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
                 top = top_replica(cfg, I, D, bk=bk, evaluate=evaluate, schedule=schedule,
                                   dtype=dtype, device=device, key=k_r)
                 R = put_levels(R, [cfg.M], top)
-            outs.append(emit(take_levels(R, [0])))                   # e.g. lambda r: r.x0
-        return R, tree_map(lambda *a: xp.stack(a), *outs)           # any pytree, not just an array
+            if emitting and (n + 1) % thin == 0:                     # static
+                outs.append(emit(take_levels(R, [0])))               # e.g. lambda r: r.x0
+        return R, (tree_map(lambda *a: xp.stack(a), *outs) if emitting else None)   # any pytree
 
-    R, samples = bk.scan(body, R, bk.split(k_run, n_blocks))
+    k_burn, k_samp = bk.split(k_run, 2)
+    if burn_in > 0:                                                  # static
+        R, _ = bk.scan(lambda R, k: block(R, k, False), R, bk.split(k_burn, burn_in))
+    R, samples = bk.scan(lambda R, k: block(R, k, True), R, bk.split(k_samp, n_blocks))
     return samples, R
 
 
@@ -384,27 +411,25 @@ def finish_needs(cfg):
     return cfg.B_P.requires | cfg.B_Q.requires | {Feature.REWARD}
 
 
-def pool_samples(samples, burn_in=0):
+def pool_samples(samples):
     """Pool `crepe`'s samples per chain: each chain becomes an instance, its samples that instance's particles.
 
     Parameters
     ----------
     samples : pytree
-        `crepe`'s samples; every leaf has shape [n_blocks, period, I, 1, ...].
-    burn_in : int, optional
-        Number of leading blocks to discard.
+        `crepe`'s samples; every leaf has shape [n_blocks, E, I, 1, ...], with E emits per block. Burn-in is
+        `crepe`'s job (its `burn_in`).
 
     Returns
     -------
     pytree
-        Every leaf has shape [I, (n_blocks - burn_in) * period, ...], each chain's samples in sweep order; the
-        level axis (size 1) is dropped.
+        Every leaf has shape [I, n_blocks * E, ...]: one instance per chain, its particles that chain's emitted
+        samples in order (chains are never mixed); the level axis (size 1) is dropped.
     """
     def pool(a):
         xp = namespace(a)
-        a = a[burn_in:, ...]
-        nb, P, I = a.shape[0], a.shape[1], a.shape[2]
-        return xp.moveaxis(xp.reshape(a, (nb * P, I) + tuple(a.shape[4:])), 0, 1)
+        nb, E, I = a.shape[0], a.shape[1], a.shape[2]
+        return xp.moveaxis(xp.reshape(a, (nb * E, I) + tuple(a.shape[4:])), 0, 1)   # level axis (size 1) dropped
 
     return tree_map(pool, samples)
 
@@ -442,7 +467,7 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
     ----------
     start : Record
         Level-0 samples with leading axes [I, N] at t = ``schedule.time(u_levels[0])``, e.g.
-        ``pool_samples(samples, burn_in)`` with ``emit = lambda r: r.project(finish_needs(cfg))``.
+        ``pool_samples(samples)`` with ``emit = lambda r: r.project(finish_needs(cfg))``.
     cfg : CREPEConfig
         The configuration; ``u_levels[0]`` must be > 0.
     n_tail : int

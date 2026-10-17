@@ -114,11 +114,15 @@ rest of the way to :math:`u = 0`, weighted (``exact=True``) or as plain guided d
 .. code:: python
 
    cfg = CREPEConfig(u_levels=(0.25, 0.5, 0.75, 1.0), ...)       # as above, with lam on these levels
-   samples, _ = crepe(cfg, I, D, 100, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=evaluate,
-                      schedule=sch, dtype=xp.float32, key=key)
-   out = crepe_finish(pool_samples(samples, burn_in=20), cfg, n_tail=10, exact=True, bk=bk,
+   samples, _ = crepe(cfg, I, D, 80, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=evaluate,
+                      schedule=sch, dtype=xp.float32, key=key, thin=4, burn_in=20)   # 80 emits, 1 per 4 sweeps
+   out = crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True, bk=bk,
                       evaluate=evaluate, schedule=sch, key=bk.key(2))
-   x0, log_w = out.final.x0, out.log_w                           # [I, 80 * period, *D], [I, 80 * period]
+   x0, log_w = out.final.x0, out.log_w                           # [I, 80, *D], [I, 80]
+
+``thin`` keeps every ``thin``-th sweep's sample, so the particles ``crepe_finish`` pays ``n_tail`` evaluations
+for are closer to independent; set it to about twice the autocorrelation time of a cheap emitted scalar such
+as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``R0`` usually needs none.
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
 
