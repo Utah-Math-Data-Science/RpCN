@@ -56,14 +56,12 @@ def _():
     sm_n_training_samples = mo.ui.number(start=128, stop=32768, step=128, value=9984, label="sm_n_training_samples")
     sm_n_sampling_steps = mo.ui.number(start=20, stop=1000, step=10, value=50, label="sm_n_sampling_steps")
 
-    # Methods
-    fk_ensemble_size = mo.ui.number(start=2, stop=256, step=1, value=20, label='FK/DAS particles')
+    # Methods: every method gets the same number of denoiser evaluations (NFE) per sample
+    nfe_budget = mo.ui.number(start=100, stop=100000, step=50, value=2000, label='NFE per sample')
     das_gamma = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.008, label=r'DAS $\gamma$')
     rpcn_replicas = mo.ui.number(start=1, stop=32, step=1, value=4, label='RpCN replicas')
-    rpcn_pcn_steps = mo.ui.number(start=1, stop=100, step=1, value=8, label='RpCN pCN steps')
     crepe_n_levels = mo.ui.number(start=2, stop=32, step=1, value=5, label='CREPE levels')
     crepe_fine_steps = mo.ui.number(start=1, stop=100, step=1, value=10, label='CREPE fine steps per gap')
-    crepe_n_blocks = mo.ui.number(start=1, stop=200, step=1, value=10, label='CREPE blocks')
 
     mo.vstack([
         rng_seed,
@@ -73,22 +71,19 @@ def _():
         mo.md('### Denoiser'),
         mo.hstack([sm_n_training_samples, sm_n_sampling_steps]),
         mo.md('### Methods'),
-        mo.hstack([fk_ensemble_size, das_gamma]),
-        mo.hstack([rpcn_replicas, rpcn_pcn_steps]),
-        mo.hstack([crepe_n_levels, crepe_fine_steps, crepe_n_blocks]),
+        mo.hstack([nfe_budget, das_gamma]),
+        mo.hstack([rpcn_replicas, crepe_n_levels, crepe_fine_steps]),
     ])
     return (
         batch_size,
         crepe_fine_steps,
-        crepe_n_blocks,
         crepe_n_levels,
         das_gamma,
         device,
-        fk_ensemble_size,
         n_gmm_modes,
         n_grid,
+        nfe_budget,
         rng_seed,
-        rpcn_pcn_steps,
         rpcn_replicas,
         sm_n_sampling_steps,
         sm_n_training_samples,
@@ -185,15 +180,17 @@ def _(bin_centers, bins, device, reward_fn, tilted_log_prob, x_grid):
         steering_hist += eps
         steering_hist = steering_hist / steering_hist.sum()
         return (ground_truth_hist * (np.log(ground_truth_hist) - np.log(steering_hist))).sum()
-    def get_metrics(samples):
+    def get_metrics(samples, nfe):
         return dict(
             kl=float(get_kl_divergence(samples)),
             mean_reward=reward_fn(samples.to(device)).mean().item(),
+            nfe=nfe,
         )
     # Reference: E[R] under the tilted target, by quadrature on the plot grid.
     metrics_target = dict(
         kl=0.0,
         mean_reward=((tilted_log_prob(x_grid).exp() * reward_fn(x_grid[:, None])).sum() * (x_grid[1] - x_grid[0])).item(),
+        nfe=None,
     )
     return get_metrics, metrics_target
 
@@ -250,29 +247,89 @@ def _(
             for x_chunk, t_chunk in zip(x.split(row_chunk_size), t.split(row_chunk_size))
         ]
         return ttg.ops.tree_map(lambda *chunks: torch.cat(chunks), *records)
+    def counting(evaluate):
+        # Wraps `evaluate` to count denoiser evaluations (rows); NFE per sample = rows / batch size.
+        rows = [0]
+        def counted(x, t, needs):
+            rows[0] += x.shape[0]
+            return evaluate(x, t, needs)
+        return counted, lambda: rows[0] / batch_size.value
     # Reverse-SDE Euler-Maruyama step, as in `Euler.step` in toy.model.
     reverse_step = ttg.EulerMaruyama(ttg.ReverseSDE(sch), ttg.Direction.BACKWARD)
     u_grid = bk.xp.linspace(1.0, 0.0, sm_n_sampling_steps.value, dtype=dtype, device=device)
-    return bk, dtype, evaluate, event_shape, reverse_step, sch, u_grid
+    return (
+        bk,
+        counting,
+        dtype,
+        evaluate,
+        event_shape,
+        reverse_step,
+        sch,
+        u_grid,
+    )
+
+
+@app.cell
+def _(
+    crepe_fine_steps,
+    crepe_n_levels,
+    nfe_budget,
+    rpcn_replicas,
+    sm_n_sampling_steps,
+):
+    # Denoiser evaluations per sample, with S sampling steps:
+    #   FK, DAS: N S                      (one evaluation per particle per step)
+    #   RpCN:    K S (1 + M)              (K rungs; each step evaluates once, then M pCN proposals; also at the start)
+    #   CREPE:   1 + (L - 1) K_f          (prior draw at the top, carried down K_f fine steps per gap)
+    #            + blocks (2 K_f (L - 1) + 2 (L - 1) + 1)
+    #                                     (per block of two EvenOdd sweeps: each of the L - 1 pairs exchanges once,
+    #                                      up and down; a Langevin move on L - 1 levels per sweep; one top refresh)
+    def _derive_settings():
+        S, K, L, K_f = sm_n_sampling_steps.value, rpcn_replicas.value, crepe_n_levels.value, crepe_fine_steps.value
+        budget = nfe_budget.value
+        crepe_init, crepe_block = 1 + (L - 1) * K_f, 2 * K_f * (L - 1) + 2 * (L - 1) + 1
+        settings = dict(
+            fk_ensemble_size=budget // S,
+            rpcn_pcn_steps=budget // (K * S) - 1,
+            crepe_n_blocks=(budget - crepe_init) // crepe_block,
+        )
+        expected_nfe = {
+            'FK': settings['fk_ensemble_size'] * S,
+            'DAS': settings['fk_ensemble_size'] * S,
+            'CREPE': crepe_init + settings['crepe_n_blocks'] * crepe_block,
+            'RpCN': K * S * (1 + settings['rpcn_pcn_steps']),
+        }
+        return settings, expected_nfe
+    nfe_settings, _expected_nfe = _derive_settings()
+    mo.stop(
+        min(nfe_settings.values()) < 1,
+        mo.md(f'**NFE budget {nfe_budget.value} is too small for these settings:** {nfe_settings}'),
+    )
+    mo.vstack([
+        mo.md(f'Derived from {nfe_budget.value} NFE per sample: {nfe_settings}'),
+        pl.DataFrame(dict(method=list(_expected_nfe), expected_nfe=list(_expected_nfe.values()))),
+    ])
+    return (nfe_settings,)
 
 
 @app.cell
 def _(
     batch_size,
     bk,
+    counting,
     device,
     dtype,
     evaluate,
     event_shape,
-    fk_ensemble_size,
     get_metrics,
+    nfe_settings,
     reverse_step,
     rng_seed_fk,
     sch,
     tilt,
     u_grid,
 ):
-    def run_fk(batch_size, ensemble_size):
+    def run_fk(batch_size, ensemble_size, evaluate):
         key_smc, key_select = bk.split(bk.key(rng_seed_fk), 2)
         fk = ttg.smc(
             sch.prior((batch_size, ensemble_size), event_shape, xp=bk.xp, dtype=dtype, device=device),
@@ -289,8 +346,9 @@ def _(
         # One particle per instance, drawn from the normalized final weights.
         selected = ttg.categorical(bk, fk.log_w, key_select)
         return fk.final.x[torch.arange(batch_size, device=device), selected]
-    samples_fk = run_fk(batch_size.value, fk_ensemble_size.value).cpu()
-    metrics_fk = get_metrics(samples_fk)
+    _evaluate, _nfe = counting(evaluate)
+    samples_fk = run_fk(batch_size.value, nfe_settings['fk_ensemble_size'], _evaluate).cpu()
+    metrics_fk = get_metrics(samples_fk, _nfe())
     metrics_fk
     return metrics_fk, samples_fk
 
@@ -299,20 +357,21 @@ def _(
 def _(
     batch_size,
     bk,
+    counting,
     das_gamma,
     device,
     dtype,
     evaluate,
     event_shape,
-    fk_ensemble_size,
     get_metrics,
+    nfe_settings,
     reverse_step,
     rng_seed_das,
     sch,
     tilt,
     u_grid,
 ):
-    def run_das(batch_size, ensemble_size):
+    def run_das(batch_size, ensemble_size, evaluate):
         key_smc, key_select = bk.split(bk.key(rng_seed_das), 2)
         # Tempered tilt that reaches 1 / alpha_kl = beta at the last step.
         lam = ttg.das_lambda(sch.time(u_grid), gamma=das_gamma.value, alpha_kl=1 / tilt.value)
@@ -330,8 +389,9 @@ def _(
         )
         selected = ttg.categorical(bk, das.log_w, key_select)
         return das.final.x[torch.arange(batch_size, device=device), selected]
-    samples_das = run_das(batch_size.value, fk_ensemble_size.value).cpu()
-    metrics_das = get_metrics(samples_das)
+    _evaluate, _nfe = counting(evaluate)
+    samples_das = run_das(batch_size.value, nfe_settings['fk_ensemble_size'], _evaluate).cpu()
+    metrics_das = get_metrics(samples_das, _nfe())
     metrics_das
     return metrics_das, samples_das
 
@@ -340,20 +400,21 @@ def _(
 def _(
     batch_size,
     bk,
+    counting,
     crepe_fine_steps,
-    crepe_n_blocks,
     crepe_n_levels,
     device,
     dtype,
     evaluate,
     event_shape,
     get_metrics,
+    nfe_settings,
     reverse_step,
     rng_seed_crepe,
     sch,
     tilt,
 ):
-    def run_crepe(n_chains, n_levels, fine_steps, n_blocks):
+    def run_crepe(n_chains, n_levels, fine_steps, n_blocks, evaluate):
         u_levels = tuple(m / (n_levels - 1) for m in range(n_levels))
         lam = ttg.level_lambda(sch.time(bk.xp.asarray(u_levels, dtype=dtype, device=device)), beta=tilt.value, rho=1.0)
         cfg = ttg.CREPEConfig(
@@ -373,8 +434,9 @@ def _(
         )
         # [n_blocks, period, I, 1, *D]: the last sweep's level-0 replica of each independent chain.
         return samples[-1, -1, :, 0]
-    samples_crepe = run_crepe(batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, crepe_n_blocks.value).cpu()
-    metrics_crepe = get_metrics(samples_crepe)
+    _evaluate, _nfe = counting(evaluate)
+    samples_crepe = run_crepe(batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, nfe_settings['crepe_n_blocks'], _evaluate).cpu()
+    metrics_crepe = get_metrics(samples_crepe, _nfe())
     metrics_crepe
     return metrics_crepe, samples_crepe
 
@@ -383,20 +445,21 @@ def _(
 def _(
     batch_size,
     bk,
+    counting,
     device,
     dtype,
     evaluate,
     event_shape,
     get_metrics,
+    nfe_settings,
     reverse_step,
     rng_seed_rpcn,
-    rpcn_pcn_steps,
     rpcn_replicas,
     sch,
     tilt,
     u_grid,
 ):
-    def run_rpcn(batch_size, n_replicas, pcn_steps):
+    def run_rpcn(batch_size, n_replicas, pcn_steps, evaluate):
         # Temperature ladder 0 = beta_0 < ... < beta_K = beta on the particle axis; no resampling.
         inverse_temperatures = torch.linspace(0.0, tilt.value, n_replicas, device=device, dtype=dtype)
         rotations = torch.linspace(math.pi / 2 - 1e-3, 0.05, n_replicas, device=device, dtype=dtype)
@@ -417,8 +480,9 @@ def _(
             key=bk.key(rng_seed_rpcn),
         )
         return rpcn.final.x[:, -1]  # the beta_K = beta replica
-    samples_rpcn = run_rpcn(batch_size.value, rpcn_replicas.value, rpcn_pcn_steps.value).cpu()
-    metrics_rpcn = get_metrics(samples_rpcn)
+    _evaluate, _nfe = counting(evaluate)
+    samples_rpcn = run_rpcn(batch_size.value, rpcn_replicas.value, nfe_settings['rpcn_pcn_steps'], _evaluate).cpu()
+    metrics_rpcn = get_metrics(samples_rpcn, _nfe())
     metrics_rpcn
     return metrics_rpcn, samples_rpcn
 
