@@ -388,7 +388,7 @@ def _(
         )
         # One particle per instance, drawn from the normalized final weights.
         selected = ttg.categorical(bk, fk.log_w, key_select)
-        return fk.final.x[torch.arange(batch_size, device=device), selected]
+        return fk.final.x0[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
     samples_fk = run_fk(batch_size.value, fk_ensemble_size, _evaluate).cpu()
     metrics_fk = get_metrics(samples_fk, _nfe())
@@ -431,7 +431,7 @@ def _(
             key=key_smc,
         )
         selected = ttg.categorical(bk, das.log_w, key_select)
-        return das.final.x[torch.arange(batch_size, device=device), selected]
+        return das.final.x0[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
     samples_das = run_das(batch_size.value, fk_ensemble_size, _evaluate).cpu()
     metrics_das = get_metrics(samples_das, _nfe())
@@ -477,7 +477,6 @@ def _(
             lam=lam,
             local_move=ttg.LangevinMove(ttg.Guided(ttg.Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), ttg.tilt(lam, 0.5))),
             local_levels=tuple(range(n_levels - 1)),
-            out_needs=frozenset(),  # only x is used
         )
         key_crepe, key_select = bk.split(bk.key(rng_seed_crepe), 2)
         # One instance per chain, its particles the chain's post-burn-in samples at u = 0: finished from u0 (weighted
@@ -490,10 +489,10 @@ def _(
             thin=thin, burn_in=burn_in,
         )
         if finish is None:
-            return out.final.x[:, -1]  # plain CREPE: each chain's last kept sample
+            return out.final.x0[:, -1]  # plain CREPE: each chain's last kept sample, denoised
         # One particle per chain, drawn from its normalized weights.
         selected = ttg.categorical(bk, out.log_w, key_select)
-        return out.final.x[torch.arange(n_chains, device=device), selected]
+        return out.final.x0[torch.arange(n_chains, device=device), selected]
     _finish = (
         dict(u0=crepe_u0.value, n_tail=int(crepe_n_tail.value), exact=crepe_finish_exact.value)
         if crepe_u0.value > 0 else None
@@ -546,7 +545,7 @@ def _(
             move=ttg.PCN(n_steps=pcn_steps, step=ttg.ladder(rotations.sin()), pairs=ttg.SequentialSweep()),
             key=bk.key(rng_seed_rpcn),
         )
-        return rpcn.final.x[:, -1]  # the beta_K = beta replica
+        return rpcn.final.x0[:, -1]  # the beta_K = beta replica, denoised
     _evaluate, _nfe = counting(evaluate)
     samples_rpcn = run_rpcn(batch_size.value, rpcn_replicas.value, rpcn_pcn_steps, _evaluate).cpu()
     metrics_rpcn = get_metrics(samples_rpcn, _nfe())
