@@ -58,10 +58,22 @@ def _():
 
     # Methods: every method gets the same number of denoiser evaluations (NFE) per sample
     nfe_budget = mo.ui.number(start=100, stop=100000, step=50, value=2000, label='NFE per sample')
-    das_gamma = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.008, label=r'DAS $\gamma$')
-    rpcn_replicas = mo.ui.number(start=1, stop=32, step=1, value=4, label='RpCN replicas')
-    crepe_n_levels = mo.ui.number(start=2, stop=32, step=1, value=5, label='CREPE levels')
-    crepe_fine_steps = mo.ui.number(start=1, stop=100, step=1, value=10, label='CREPE fine steps per gap')
+
+    # DAS
+    das_gamma = mo.ui.number(start=0.001, stop=1.0, step=0.001, value=0.008, label=r'$\gamma$')
+
+    # RpCN
+    rpcn_replicas = mo.ui.number(start=1, stop=32, step=1, value=4, label='Replicas')
+
+    # CREPE
+    crepe_n_levels = mo.ui.number(start=2, stop=32, step=1, value=5, label='Levels')
+    crepe_fine_steps = mo.ui.number(start=1, stop=100, step=1, value=10, label='Fine steps per gap')
+    crepe_thin = mo.ui.number(start=1, stop=100, step=1, value=1, label='Thin (sweeps per emit)')
+    crepe_burn_in = mo.ui.number(start=0, stop=10000, step=1, value=0, label='Burn-in blocks')
+    # u_0 > 0 puts level 0 above the data end, so its samples are finished down to u = 0 (crepe_sample does this)
+    crepe_u0 = mo.ui.number(start=0.0, stop=0.9, step=0.01, value=0.0, label='Lowest level $u_0$ ($> 0$: finish)')
+    crepe_n_tail = mo.ui.number(start=1, stop=200, step=1, value=10, label='Finish steps')
+    crepe_finish_exact = mo.ui.checkbox(value=False, label='Exact (weighted) finish')
 
     mo.vstack([
         rng_seed,
@@ -71,13 +83,25 @@ def _():
         mo.md('### Denoiser'),
         mo.hstack([sm_n_training_samples, sm_n_sampling_steps]),
         mo.md('### Methods'),
-        mo.hstack([nfe_budget, das_gamma]),
-        mo.hstack([rpcn_replicas, crepe_n_levels, crepe_fine_steps]),
+        mo.hstack([nfe_budget]),
+        mo.md('#### DAS'),
+        mo.hstack([das_gamma]),
+        mo.md('#### RpCN'),
+        mo.hstack([rpcn_replicas]),
+        mo.md('#### CREPE'),
+        mo.hstack([crepe_n_levels, crepe_fine_steps]),
+        mo.hstack([crepe_thin, crepe_burn_in]),
+        mo.hstack([crepe_u0, crepe_n_tail, crepe_finish_exact]),
     ])
     return (
         batch_size,
+        crepe_burn_in,
         crepe_fine_steps,
+        crepe_finish_exact,
         crepe_n_levels,
+        crepe_n_tail,
+        crepe_thin,
+        crepe_u0,
         das_gamma,
         device,
         n_gmm_modes,
@@ -237,7 +261,7 @@ def _(
         lambda x, t: _denoiser(t, x),  # the ensemble denoiser predicts x0
         lambda x, t, x0, s: (x0, ttg.eps_from_x0(x, t, x0, s)),
         sch,
-        reward_fn,
+        ttg.on_x0(reward_fn),  # the builders call reward(x0, x, t); this reward reads x0 only
     )
     def evaluate(x, t, needs, row_chunk_size=batch_size.value):
         # Rows are independent (evaluation contract C3), so chunking them bounds the memory autograd holds
@@ -271,8 +295,12 @@ def _(
 
 @app.cell
 def _(
+    crepe_burn_in,
     crepe_fine_steps,
     crepe_n_levels,
+    crepe_n_tail,
+    crepe_thin,
+    crepe_u0,
     nfe_budget,
     rpcn_replicas,
     sm_n_sampling_steps,
@@ -281,22 +309,31 @@ def _(
     #   FK, DAS: N S                      (one evaluation per particle per step)
     #   RpCN:    K S (1 + M)              (K rungs; each step evaluates once, then M pCN proposals; also at the start)
     #   CREPE:   1 + (L - 1) K_f          (prior draw at the top, carried down K_f fine steps per gap)
-    #            + blocks (2 K_f (L - 1) + 2 (L - 1) + 1)
-    #                                     (per block of two EvenOdd sweeps: each of the L - 1 pairs exchanges once,
-    #                                      up and down; a Langevin move on L - 1 levels per sweep; one top refresh)
+    #            + (b + n) W / 2 (2 K_f (L - 1) + 2 (L - 1) + 1)
+    #                                     (b burn-in and n sampling blocks of W = lcm(2, thin) EvenOdd sweeps; per
+    #                                      two sweeps, each of the L - 1 pairs exchanges once, up and down; a
+    #                                      Langevin move on L - 1 levels per sweep; one top refresh)
+    #            + n (W / thin) T         (with the finish: T tail steps for each of the chain's n W / thin emits)
     def _derive_settings():
         S, K, L, K_f = sm_n_sampling_steps.value, rpcn_replicas.value, crepe_n_levels.value, crepe_fine_steps.value
         budget = nfe_budget.value
-        crepe_init, crepe_block = 1 + (L - 1) * K_f, 2 * K_f * (L - 1) + 2 * (L - 1) + 1
+        W = math.lcm(2, int(crepe_thin.value))
+        emits_per_block = W // int(crepe_thin.value)
+        crepe_init = 1 + (L - 1) * K_f
+        crepe_block = W // 2 * (2 * K_f * (L - 1) + 2 * (L - 1) + 1)
+        crepe_finish_per_block = emits_per_block * crepe_n_tail.value if crepe_u0.value > 0 else 0
+        crepe_burn = int(crepe_burn_in.value) * crepe_block
+        crepe_n_blocks = (budget - crepe_init - crepe_burn) // (crepe_block + crepe_finish_per_block)
         settings = dict(
             fk_ensemble_size=budget // S,
             rpcn_pcn_steps=budget // (K * S) - 1,
-            crepe_n_blocks=(budget - crepe_init) // crepe_block,
+            crepe_n_blocks=crepe_n_blocks,
+            crepe_emits_per_chain=crepe_n_blocks * emits_per_block,
         )
         expected_nfe = {
             'FK': settings['fk_ensemble_size'] * S,
             'DAS': settings['fk_ensemble_size'] * S,
-            'CREPE': crepe_init + settings['crepe_n_blocks'] * crepe_block,
+            'CREPE': crepe_init + crepe_burn + crepe_n_blocks * (crepe_block + crepe_finish_per_block),
             'RpCN': K * S * (1 + settings['rpcn_pcn_steps']),
         }
         return settings, expected_nfe
@@ -401,8 +438,13 @@ def _(
     batch_size,
     bk,
     counting,
+    crepe_burn_in,
     crepe_fine_steps,
+    crepe_finish_exact,
     crepe_n_levels,
+    crepe_n_tail,
+    crepe_thin,
+    crepe_u0,
     device,
     dtype,
     evaluate,
@@ -414,8 +456,10 @@ def _(
     sch,
     tilt,
 ):
-    def run_crepe(n_chains, n_levels, fine_steps, n_blocks, evaluate):
-        u_levels = tuple(m / (n_levels - 1) for m in range(n_levels))
+    def run_crepe(n_chains, n_levels, fine_steps, n_blocks, evaluate, thin=1, burn_in=0, finish=None):
+        # finish: None, or dict(u0=..., n_tail=..., exact=...) to start the levels at u0 > 0 and finish to u = 0
+        u0 = 0.0 if finish is None else finish['u0']
+        u_levels = tuple(u0 + (1.0 - u0) * m / (n_levels - 1) for m in range(n_levels))
         lam = ttg.level_lambda(sch.time(bk.xp.asarray(u_levels, dtype=dtype, device=device)), beta=tilt.value, rho=1.0)
         cfg = ttg.CREPEConfig(
             u_levels=u_levels,
@@ -427,15 +471,32 @@ def _(
             lam=lam,
             local_move=ttg.LangevinMove(ttg.Guided(ttg.Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), ttg.tilt(lam, 0.5))),
             local_levels=tuple(range(n_levels - 1)),
+            out_needs=frozenset(),  # only x is used
         )
-        samples, _ = ttg.crepe(
-            cfg, n_chains, event_shape, n_blocks, lambda r: r.x,
-            bk=bk, evaluate=evaluate, schedule=sch, dtype=dtype, device=device, key=bk.key(rng_seed_crepe),
+        key_crepe, key_select = bk.split(bk.key(rng_seed_crepe), 2)
+        # One instance per chain, its particles the chain's post-burn-in samples at u = 0: finished from u0 (weighted
+        # if exact, resampling only within a chain) when u0 > 0, otherwise CREPE's level-0 samples with log_w = 0.
+        out, _ = ttg.crepe_sample(
+            cfg, n_chains, event_shape, n_blocks,
+            n_tail=None if finish is None else finish['n_tail'],
+            exact=None if finish is None else finish['exact'],
+            bk=bk, evaluate=evaluate, schedule=sch, dtype=dtype, device=device, key=key_crepe,
+            thin=thin, burn_in=burn_in,
         )
-        # [n_blocks, period, I, 1, *D]: the last sweep's level-0 replica of each independent chain.
-        return samples[-1, -1, :, 0]
+        if finish is None:
+            return out.final.x[:, -1]  # plain CREPE: each chain's last kept sample
+        # One particle per chain, drawn from its normalized weights.
+        selected = ttg.categorical(bk, out.log_w, key_select)
+        return out.final.x[torch.arange(n_chains, device=device), selected]
+    _finish = (
+        dict(u0=crepe_u0.value, n_tail=int(crepe_n_tail.value), exact=crepe_finish_exact.value)
+        if crepe_u0.value > 0 else None
+    )
     _evaluate, _nfe = counting(evaluate)
-    samples_crepe = run_crepe(batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, nfe_settings['crepe_n_blocks'], _evaluate).cpu()
+    samples_crepe = run_crepe(
+        batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, nfe_settings['crepe_n_blocks'], _evaluate,
+        thin=int(crepe_thin.value), burn_in=int(crepe_burn_in.value), finish=_finish,
+    ).cpu()
     metrics_crepe = get_metrics(samples_crepe, _nfe())
     metrics_crepe
     return metrics_crepe, samples_crepe
