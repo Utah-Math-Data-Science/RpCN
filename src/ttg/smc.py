@@ -9,7 +9,7 @@ from .evaluate import evaluate_rows, start_record
 from .kernels import Gaussian
 from .moves import MoveContext
 from .ops import device, lead_shape, namespace, steps_first
-from .records import Point, Record
+from .records import Feature, Point, Record
 from .resample import masked_resample
 
 Array = Any
@@ -23,17 +23,17 @@ class SMCResult:
     ----------
     final : Record
         Particles at the last grid point, shape [I, N, ...]. Carries the features required by the potential and
-        the move, plus `final_needs`.
+        the move, plus `out_needs`.
     log_w : array
         Unnormalised log-weights of the final particles, shape [I, N]. Normalise over axis 1 (per instance).
     """
 
-    final: Record          # [I, N, ...], carries potential.requires | move.requires | final_needs
+    final: Record          # [I, N, ...], carries potential.requires | move.requires | out_needs
     log_w: Array           # [I, N] unnormalised
 
 
 def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, policy,
-        move=None, move_at=lambda k: True, final_needs=frozenset(), key) -> SMCResult:
+        move=None, move_at=lambda k: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """Run sequential Monte Carlo along a grid of times: FK steering, DAS, RpCN, and CREPE's paths.
 
     Starting from `start` at the first grid point, each step k = 1, ..., S-1 optionally resamples (per instance,
@@ -72,8 +72,9 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
     move_at : Callable[[int], bool], optional
         Given the step index k (possibly traced), whether to apply `move` after step k. k = 0 is the start point,
         where a move is applied only if `start` is a Gaussian (it needs a reference). Default: always.
-    final_needs : iterable of Feature, optional
-        Extra features to evaluate at the last grid point (e.g. ``{Feature.X0}``).
+    out_needs : iterable of Feature, optional
+        Extra features to evaluate at the last grid point. Default ``{Feature.X0}``, the final denoised estimate,
+        which costs nothing extra because that point is evaluated anyway.
     key : backend key
         Root random key, e.g. ``bk.key(0)``.
 
@@ -99,7 +100,7 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
         raise ValueError("smc needs S >= 2 grid points")
     mv = move.requires if move is not None else frozenset()
     need_mid = target.requires | proposal.requires | potential.requires | mv     # I4
-    need_end = potential.requires | mv | frozenset(final_needs)
+    need_end = potential.requires | mv | frozenset(out_needs)
     ev_mid = lambda p: evaluate_rows(evaluate, p, need_mid, bk)
     ev_end = lambda p: evaluate_rows(evaluate, p, need_end, bk)
     k_start, k_mv0, k_steps = bk.split(key, 3)

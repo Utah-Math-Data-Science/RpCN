@@ -194,7 +194,7 @@ class PathExchange:
 
         def run(start, grid, tgt, prop, p, k):
             return smc(start, grid, bk=bk, evaluate=self.evaluate, schedule=self.schedule, target=tgt,
-                       proposal=prop, potential=p, policy=Never(), final_needs=c.replica_needs, key=k)
+                       proposal=prop, potential=p, policy=Never(), out_needs=c.replica_needs, key=k)
 
         def grid(asc):
             return per_row_grid(c, lo, I, asc, xp=xp, dtype=dtype, device=dev)
@@ -278,7 +278,7 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
     for m in range(cfg.M, 0, -1):                                    # static loop
         res = smc(cur, xp.flip(fine_grid(cfg, m - 1, xp=xp, dtype=dtype, device=device), axis=0),
                   bk=bk, evaluate=evaluate, schedule=schedule, target=cfg.B_P, proposal=cfg.B_P,
-                  potential=Zero(), policy=Never(), final_needs=cfg.replica_needs, key=ks[m - 1])
+                  potential=Zero(), policy=Never(), out_needs=cfg.replica_needs, key=ks[m - 1])
         levels[m - 1] = cur = res.final
     return stack_levels(levels)                                      # [I, M+1, ...]
 
@@ -461,7 +461,7 @@ def tail_grid(cfg, n_tail, *, xp, dtype, device=None):
 
 
 def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=None,
-                 final_needs=frozenset({Feature.X0}), key) -> SMCResult:
+                 out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """Carry level-0 samples from ``u_levels[0] > 0`` down to u = 0 with one `smc` run over `n_tail` steps.
 
     Most callers use `crepe_sample`, which composes `crepe`, `pool_samples` and this function.
@@ -488,7 +488,7 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
     policy : policy, optional
         Resampling policy for ``exact=True`` (default ``ESSBelow(0.5)``, within each instance). Ignored for
         ``exact=False``, which never resamples.
-    final_needs : frozenset of Feature, optional
+    out_needs : frozenset of Feature, optional
         Features the final particles carry. Default ``{Feature.X0}``.
     key : backend key
         Random key.
@@ -515,7 +515,7 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
         target = proposal = cfg.B_Q
         potential, policy = Zero(), Never()
     return smc(start, grid, bk=bk, evaluate=evaluate, schedule=schedule, target=target, proposal=proposal,
-               potential=potential, policy=policy, final_needs=final_needs, key=key)
+               potential=potential, policy=policy, out_needs=out_needs, key=key)
 
 
 
@@ -591,5 +591,5 @@ def crepe_sample(cfg, I, D, n_blocks, *, n_tail=None, exact=None, bk, evaluate, 
     if not finishing:                                                # static: level 0 is already u = 0
         return SMCResult(final=start, log_w=xp.zeros_like(start.t)), R
     res = crepe_finish(start, cfg, n_tail, exact=exact, bk=bk, evaluate=evaluate, schedule=schedule,
-                       policy=policy, final_needs=cfg.out_needs, key=k_tail)
+                       policy=policy, out_needs=cfg.out_needs, key=k_tail)
     return SMCResult(final=res.final.project(cfg.out_needs), log_w=res.log_w), R

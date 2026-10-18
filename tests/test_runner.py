@@ -111,7 +111,7 @@ def test_E1_row_counts_and_no_duplicates(bk, start_kind, move_kind, lead, S, str
         audit = AuditingEvaluate(ev)
         smc(start, u_grid(bk, S), bk=bk, evaluate=audit, schedule=sch, target=P, proposal=Guided(P, tilt(constant(1.0))),
             potential=pot, policy=Every(2), move=move, move_at=lambda k: k % stride == 0,
-            final_needs={Feature.X0}, key=bk.key(seed))
+            out_needs={Feature.X0}, key=bk.key(seed))
     steps = range(0 if start_kind == "gaussian" else 1, S)
     moved = sum(1 for k in steps if k % stride == 0)
     rows = I * N * (S if start_kind != "record" else S - 1) + I * N * per * moved
@@ -198,7 +198,7 @@ def test_E5_move_never_fired_is_no_move(bk, move_kind, lead, S, seed):
     P = PosteriorStep(sch)
     run = lambda **kw: smc(gaussian_start(bk, sch, I, N), u_grid(bk, S), bk=bk, evaluate=ev, schedule=sch,
                            target=P, proposal=Guided(P, tilt(constant(1.0))), potential=FKMax(constant(1.0)),
-                           policy=Every(2), final_needs={Feature.X0}, key=bk.key(seed), **kw)
+                           policy=Every(2), out_needs={Feature.X0}, key=bk.key(seed), **kw)
     with eager(bk):
         a = run(move=None)
         b = run(move=MOVES[move_kind][0], move_at=lambda k: False)

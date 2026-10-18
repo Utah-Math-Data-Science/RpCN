@@ -43,7 +43,7 @@ the estimate alone:
 
 .. code:: python
 
-   from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature,
+   from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every,
                     FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep, ReverseSDE,
                     VPLinear, constant, crepe, crepe_sample, das_lambda, ladder, level_lambda,
                     make_evaluate_torch, on_x0, smc, tilt, x0_from_eps)
@@ -67,7 +67,7 @@ the estimate alone:
 .. code:: python
 
    fk = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=P,
-            potential=FKDiff(constant(10.0)), policy=Every(5), final_needs={Feature.X0}, key=key)
+            potential=FKDiff(constant(10.0)), policy=Every(5), key=key)
    x0, log_w = fk.final.x0, fk.log_w                 # [I, N, *D] samples, [I, N] log-weights
 
 **DAS**
@@ -76,7 +76,7 @@ the estimate alone:
 
    lam = das_lambda(sch.time(u), gamma=0.008, alpha_kl=0.01)
    das = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=Guided(P, tilt(lam)),
-             potential=FKDiff(lam), policy=ESSBelow(0.5), final_needs={Feature.X0}, key=key)
+             potential=FKDiff(lam), policy=ESSBelow(0.5), key=key)
 
 **RpCN** — the particle axis is a temperature ladder :math:`0 = \beta_0 < \dots < \beta_K = \beta`;
 there is no resampling.
@@ -89,7 +89,7 @@ there is no resampling.
    rpcn = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, bk=bk, evaluate=evaluate, schedule=sch,
               target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
               move=PCN(n_steps=20, step=constant(0.95), pairs=EvenOdd()), move_at=lambda k: k % 20 == 0,
-              final_needs={Feature.X0}, key=key)
+              key=key)
    coldest = rpcn.final.x0[:, K]                     # [I, *D]: the beta_K = beta replica
 
 **CREPE** — replica exchange across noise levels :math:`0 = u_0 < \dots < u_M = 1`.

@@ -67,7 +67,7 @@ def reference(lam=LAM):
 
         def run(key):
             out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), u, bk=BK, evaluate=ev, schedule=sch,
-                      target=P, proposal=P, potential=Zero(), policy=Never(), final_needs={Feature.REWARD}, key=key)
+                      target=P, proposal=P, potential=Zero(), policy=Never(), out_needs={Feature.REWARD}, key=key)
             return lam * out.final.reward, out.final.x
 
         run = compiled(run)
@@ -183,7 +183,7 @@ def test_crepe():
     def run(key):
         out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, bk=BK, evaluate=ev, schedule=sch,
                   target=cfg.B_P, proposal=cfg.B_P, potential=Zero(), policy=Never(),
-                  final_needs={Feature.REWARD}, key=key)
+                  out_needs={Feature.REWARD}, key=key)
         return lam0 * out.final.reward, out.final.x
 
     run = compiled(run)
@@ -210,7 +210,7 @@ def test_crepe_finish():
     def ref(key):
         out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, bk=BK, evaluate=ev, schedule=sch,
                   target=cfg.B_P, proposal=cfg.B_P, potential=Zero(), policy=Never(),
-                  final_needs={Feature.REWARD}, key=key)
+                  out_needs={Feature.REWARD}, key=key)
         return LAM * out.final.reward, out.final.x
 
     ref = compiled(ref)

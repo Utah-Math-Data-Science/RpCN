@@ -326,7 +326,7 @@ class RectifiedFlow(ScheduleDefaults):  # x_t = (1 - t) x0 + t eps, clipped to [
 
 All three are used by the tests (`SCHEDULES`, §18).
 
-**Final denoising** is the user's choice. Requesting `X0` in `final_needs` returns $\hat x_0$ at the last point at no extra cost, because that point is evaluated anyway.
+**Final denoising** is the default. `u = 0` maps to `t_min`, not to clean data, so `smc`, `crepe_finish` and `CREPEConfig` all default `out_needs` to `{X0}`, and `final.x0` gives $\hat x_0$ at the last point. This costs nothing extra, because that point is evaluated anyway. Pass `out_needs=frozenset()` to keep only `x` and the features the run itself needs.
 
 ## 6. Records and the evaluation contract
 
@@ -1067,11 +1067,11 @@ CREPE's `PathExchange` is in §16.
 ```python
 @dataclass(frozen=True)
 class SMCResult:
-    final: Record          # [I, N, ...], carries potential.requires | move.requires | final_needs
+    final: Record          # [I, N, ...], carries potential.requires | move.requires | out_needs
     log_w: Array           # [I, N] unnormalised
 
 def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, policy,
-        move=None, move_at=lambda k: True, final_needs=frozenset(), key) -> SMCResult:
+        move=None, move_at=lambda k: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """start: Gaussian (sampled, and the first move's reference), Point, or Record; leading axes [I, N].
     u_grid: [S] (shared) or [I, N, S] (per row; increasing or decreasing -- the runner doesn't care)."""
     x_like = start.mean if isinstance(start, Gaussian) else start.x
@@ -1081,7 +1081,7 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
     S = t_steps.shape[0]
     mv = move.requires if move is not None else frozenset()
     need_mid = target.requires | proposal.requires | potential.requires | mv     # I4
-    need_end = potential.requires | mv | frozenset(final_needs)
+    need_end = potential.requires | mv | frozenset(out_needs)
     ev_mid = lambda p: evaluate_rows(evaluate, p, need_mid, bk)
     ev_end = lambda p: evaluate_rows(evaluate, p, need_end, bk)
     k_start, k_mv0, k_steps = bk.split(key, 3)
@@ -1136,19 +1136,19 @@ start = sch.prior((I, N), D, xp=xp, dtype=xp.float32)   # D: event shape tuple, 
 # FK steering: FKDiff; optionally Guided(P, tilt(lam)) as proposal.
 # FKMax / FKSum plug in the same way, within their usage limit (§9).
 fk = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=P,
-         potential=FKDiff(constant(10.0)), policy=Every(5), final_needs={Feature.X0}, key=key)
+         potential=FKDiff(constant(10.0)), policy=Every(5), key=key)
 
 # DAS
 lam = das_lambda(sch.time(u), gamma=0.008, alpha_kl=0.01)
 das = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=Guided(P, tilt(lam)),
-          potential=FKDiff(lam), policy=ESSBelow(0.5), final_needs={Feature.X0}, key=key)
+          potential=FKDiff(lam), policy=ESSBelow(0.5), key=key)
 
 # FK + pCN moves (resample-move): valid for any FK potential, because the move targets
 # the conditional of the FK target given the rest of the path, via the cumulative log_tilt
 fk_pcn = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=P,
              potential=FKDiff(constant(10.0)), policy=Every(5),
              move=PCN(n_steps=2, step=constant(0.3)), move_at=lambda k: k % 5 == 0,
-             final_needs={Feature.X0}, key=key)
+             key=key)
 ```
 
 ## 15. RpCN
@@ -1161,8 +1161,8 @@ P = DDIMStep(sch, eta=1.0)                                # = PosteriorStep (tes
 out = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, bk=bk, evaluate=evaluate, schedule=sch,
           target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
           move=PCN(n_steps=M, step=ladder(step_sizes), pairs=SequentialSweep()),   # or EvenOdd()
-          move_at=lambda k: k % 20 == 0, final_needs={Feature.X0}, key=key)
-coldest = out.final.x[:, K]                               # the beta_K = beta replica at the last level; or .x0
+          move_at=lambda k: k % 20 == 0, key=key)
+coldest = out.final.x0[:, K]                              # the beta_K = beta replica, denoised
 ```
 
 - At the start point, `ref` is the prior; afterwards it is the target kernel's distribution for the current step.
@@ -1219,7 +1219,7 @@ class PathExchange:
         pot = lambda P_rev, Q_rev: Sum(TiltEnds(c.lam), ReverseRatio(P_rev, Q_rev))
         run = lambda start, grid, tgt, prop, p, k: smc(start, grid, bk=bk, evaluate=self.evaluate,
                   schedule=self.schedule, target=tgt, proposal=prop, potential=p, policy=Never(),
-                  final_needs=c.replica_needs, key=k)
+                  out_needs=c.replica_needs, key=k)
         grid = lambda asc: per_row_grid(c, lo, I, asc, xp=xp, dtype=dtype, device=dev)
         up = run(take_levels(R, lo), grid(True), c.F_P, c.F_Q, pot(c.B_P, c.B_Q), k_up)
         dn = run(take_levels(R, hi), grid(False), c.B_P, c.B_Q, pot(c.F_P, c.F_Q), k_dn)
@@ -1273,7 +1273,7 @@ def crepe_init(cfg, I, D, *, bk, evaluate, schedule, dtype, device=None, key):
     for m in range(cfg.M, 0, -1):                                    # static loop
         res = smc(cur, xp.flip(fine_grid(cfg, m - 1, xp=xp, dtype=dtype, device=device), axis=0),
                   bk=bk, evaluate=evaluate, schedule=schedule, target=cfg.B_P, proposal=cfg.B_P,
-                  potential=Zero(), policy=Never(), final_needs=cfg.replica_needs, key=ks[m - 1])
+                  potential=Zero(), policy=Never(), out_needs=cfg.replica_needs, key=ks[m - 1])
         levels[m - 1] = cur = res.final
     return stack_levels(levels)                                      # [I, M+1, ...]
 ```
@@ -1355,7 +1355,7 @@ def tail_grid(cfg, n_tail, *, xp, dtype, device=None):   # [n_tail + 1], exactly
     return xp.asarray([u0 * (1 - j / n_tail) for j in range(n_tail)] + [0.0], dtype=dtype, device=device)
 
 def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=None,
-                 final_needs=frozenset({Feature.X0}), key) -> SMCResult:
+                 out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """start: level-0 Records with leading axes [I, N] (e.g. pool_samples(samples)), at t = tau(u_levels[0])."""
     if cfg.u_levels[0] <= 0:
         raise ValueError("crepe_finish needs u_levels[0] > 0")
@@ -1369,7 +1369,7 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
         target = proposal = cfg.B_Q
         potential, policy = Zero(), Never()
     return smc(start, grid, bk=bk, evaluate=evaluate, schedule=schedule, target=target, proposal=proposal,
-               potential=potential, policy=policy, final_needs=final_needs, key=key)
+               potential=potential, policy=policy, out_needs=out_needs, key=key)
 ```
 
 - **`exact=True`** targets $p_0\, e^{\lambda(\tau(0))\, \hat r}$, the tilted target at $u = 0$ on the path law of `cfg.B_P`. The start samples already carry $e^{\lambda(\tau(u_0))\, \hat r}$, so `Relative` makes the starting weight exactly 0 and the final weight $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}}$ plus the proposal correction $\log B^P - \log B^Q$ along the tail. The result is weighted (`log_w`); with `level_lambda`, $\lambda$ is $\beta$ along the whole tail.
@@ -1399,7 +1399,7 @@ def crepe_sample(cfg, I, D, n_blocks, *, n_tail=None, exact=None, bk, evaluate, 
     if not finishing:                                                # static: level 0 is already u = 0
         return SMCResult(final=start, log_w=xp.zeros_like(start.t)), R
     res = crepe_finish(start, cfg, n_tail, exact=exact, bk=bk, evaluate=evaluate, schedule=schedule,
-                       policy=policy, final_needs=cfg.out_needs, key=k_tail)
+                       policy=policy, out_needs=cfg.out_needs, key=k_tail)
     return SMCResult(final=res.final.project(cfg.out_needs), log_w=res.log_w), R
 ```
 
@@ -1655,7 +1655,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | X5 | `emit` may return any pytree: with `emit = lambda r: r.project(finish_needs(cfg))`, `samples` is a `Record` whose leaves have leading axes `[n_blocks, L // thin, I, 1]` with $L = \operatorname{lcm}(\text{period}, \text{thin})$. With a counting `emit`, the run makes `n_blocks * L` sweeps (counts per §17) and emits `n_blocks * L // thin` times, after sweeps `thin, 2 thin, ...`. With `burn_in=b`, the run makes `(b + n_blocks) * L` sweeps, `emit` is first called after sweep `b L + thin`, and `samples` keeps the same shape. `pool_samples(samples)` has leading axes `[I, n_blocks * L // thin]`, keeps every chain's samples in emit order, and never mixes chains within an instance |
 | X6 | `crepe(..., R0=R)` makes no `crepe_init` evaluations (counts per §17), keeps the replica invariant, raises `PartialRecord` if `R0` lacks `replica_needs`, and with `n_blocks = 0` returns `R0.project(cfg.replica_needs)` unchanged |
 | X7 | `crepe_finish` raises `ValueError` when `u_levels[0] == 0`. With `exact=False`, its `log_w` is identically 0, and it equals `smc(start, tail_grid(...), target=proposal=cfg.B_Q, potential=Zero(), policy=Never())` for the same key. With `exact=True` and `Never()`, its `log_w` equals, along a replayed tail, $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}} + \sum [\log B^P - \log B^Q]$; `tail_grid` starts at exactly `u_levels[0]` and ends at exactly 0 |
-| X8 | `crepe_sample` equals, for the same key, the composition it is defined by: `crepe` with `emit = lambda r: r.project(finish_needs(cfg))` and the first key of `bk.split(key, 2)`, then `crepe_finish(pool_samples(samples), ..., final_needs=cfg.out_needs)` with the second, its `final` projected to `cfg.out_needs`; it returns the same `R`. Its evaluation counts match §17 (the finish adds nothing beyond its `n_tail` steps). With `u_levels[0] == 0` it runs no finish, `log_w` is identically 0, and `final` equals `pool_samples` of the level-0 samples projected to `cfg.out_needs`. `final` carries exactly `cfg.out_needs` for both values of `exact` and both cases of `u_levels[0]`. It raises `ValueError` if `n_blocks < 1`, or if `u_levels[0] > 0` and `n_tail` or `exact` is missing |
+| X8 | `crepe_sample` equals, for the same key, the composition it is defined by: `crepe` with `emit = lambda r: r.project(finish_needs(cfg))` and the first key of `bk.split(key, 2)`, then `crepe_finish(pool_samples(samples), ..., out_needs=cfg.out_needs)` with the second, its `final` projected to `cfg.out_needs`; it returns the same `R`. Its evaluation counts match §17 (the finish adds nothing beyond its `n_tail` steps). With `u_levels[0] == 0` it runs no finish, `log_w` is identically 0, and `final` equals `pool_samples` of the level-0 samples projected to `cfg.out_needs`. `final` carries exactly `cfg.out_needs` for both values of `exact` and both cases of `u_levels[0]`. It raises `ValueError` if `n_blocks < 1`, or if `u_levels[0] > 0` and `n_tail` or `exact` is missing |
 
 Three worked examples:
 

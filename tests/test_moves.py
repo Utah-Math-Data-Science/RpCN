@@ -208,6 +208,6 @@ def test_counts_rpcn(bk, I, K, S, M, stride, seed):
         smc(sch.prior((I, K + 1), (2,), xp=xp, dtype=xp.float64), xp.linspace(1.0, 0.0, S, dtype=xp.float64),
             bk=bk, evaluate=audit, schedule=sch, target=P, proposal=P, potential=FKDiff(ladder(betas)),
             policy=Never(), move=PCN(n_steps=M, step=ladder(steps), pairs=EvenOdd()),
-            move_at=lambda k: k % stride == 0, final_needs={Feature.X0}, key=bk.key(seed))
+            move_at=lambda k: k % stride == 0, out_needs={Feature.X0}, key=bk.key(seed))
     steered = sum(1 for k in range(S) if k % stride == 0)
     assert audit.rows == I * (K + 1) * (S + M * steered)

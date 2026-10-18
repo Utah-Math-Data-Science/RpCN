@@ -266,7 +266,7 @@ def test_X7_crepe_finish(bk, n_tail, I, N, seed, u0, data):
     with eager(bk):
         out = crepe_finish(start, cfg, n_tail, exact=False, bk=bk, evaluate=ev, schedule=sch, key=bk.key(seed + 1))
         ref = smc(start, grid, bk=bk, evaluate=ev, schedule=sch, target=cfg.B_Q, proposal=cfg.B_Q,
-                  potential=Zero(), policy=Never(), final_needs=frozenset({Feature.X0}), key=bk.key(seed + 1))
+                  potential=Zero(), policy=Never(), out_needs=frozenset({Feature.X0}), key=bk.key(seed + 1))
     assert bool(xp.all(out.log_w == 0))
     assert bool(xp.all(out.final.x == ref.final.x)) and bool(xp.all(out.log_w == ref.log_w))
 
@@ -311,7 +311,7 @@ def test_X8_crepe_sample_is_its_composition(bk, exact, I, n_blocks, thin, burn_i
         samples, R_ref = crepe(cfg, I, (2,), n_blocks, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=ev,
                                schedule=sch, dtype=xp.float64, key=k_chain, thin=thin, burn_in=burn_in)
         ref = crepe_finish(pool_samples(samples), cfg, n_tail, exact=exact, bk=bk, evaluate=ev, schedule=sch,
-                           final_needs=cfg.out_needs, key=k_tail)
+                           out_needs=cfg.out_needs, key=k_tail)
     same_tree(out.final, ref.final.project(cfg.out_needs))
     assert np.array_equal(host(out.log_w), host(ref.log_w))
     same_tree(R, R_ref)

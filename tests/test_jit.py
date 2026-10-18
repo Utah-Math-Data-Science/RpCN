@@ -34,7 +34,7 @@ def test_smc_jit_matches_eager():
                   bk=bk, evaluate=ev, schedule=sch, target=P, proposal=Guided(P, tilt(constant(0.5))),
                   potential=FKMax(ladder(betas)), policy=ESSBelow(0.5),
                   move=PCN(2, ladder(steps), pairs=EvenOdd()), move_at=lambda k: k % 2 == 0,
-                  final_needs={Feature.X0}, key=key)
+                  out_needs={Feature.X0}, key=key)
         return out.log_w, out.final.x, out.final.x0
 
     for a, b in zip(*both(f, bk.key(3))):
