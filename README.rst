@@ -45,8 +45,8 @@ the estimate alone:
 
    from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature,
                     FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep, ReverseSDE,
-                    VPLinear, constant, crepe, crepe_finish, das_lambda, finish_needs, ladder, level_lambda,
-                    make_evaluate_torch, on_x0, pool_samples, smc, tilt, x0_from_eps)
+                    VPLinear, constant, crepe, crepe_sample, das_lambda, ladder, level_lambda,
+                    make_evaluate_torch, on_x0, smc, tilt, x0_from_eps)
    from ttg.backend import TorchBackend
 
    bk = TorchBackend()
@@ -108,20 +108,20 @@ there is no resampling.
    more, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
                           dtype=xp.float32, key=bk.key(1), R0=replicas)   # continue: no re-initialisation
 
-With the lowest level above the data end (:math:`u_0 > 0`), ``crepe_finish`` carries the level-0 samples the
-rest of the way to :math:`u = 0`, weighted (``exact=True``) or as plain guided denoising (``exact=False``):
+``crepe_sample`` runs CREPE end to end and returns an ``SMCResult`` with one instance per chain. With the lowest
+level above the data end (:math:`u_0 > 0`), it also finishes the level-0 samples the rest of the way to
+:math:`u = 0`, weighted (``exact=True``) or as plain guided denoising (``exact=False``):
 
 .. code:: python
 
    cfg = CREPEConfig(u_levels=(0.25, 0.5, 0.75, 1.0), ...)       # as above, with lam on these levels
-   samples, _ = crepe(cfg, I, D, 80, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=evaluate,
-                      schedule=sch, dtype=xp.float32, key=key, thin=4, burn_in=20)   # 80 emits, 1 per 4 sweeps
-   out = crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True, bk=bk,
-                      evaluate=evaluate, schedule=sch, key=bk.key(2))
+   out, replicas = crepe_sample(cfg, I, D, 80, n_tail=10, exact=True, bk=bk, evaluate=evaluate, schedule=sch,
+                                dtype=xp.float32, key=key, thin=4, burn_in=20)   # 80 samples, 1 per 4 sweeps
    x0, log_w = out.final.x0, out.log_w                           # [I, 80, *D], [I, 80]
 
-``thin`` keeps every ``thin``-th sweep's sample, so the particles ``crepe_finish`` pays ``n_tail`` evaluations
-for are closer to independent; set it to about twice the autocorrelation time of a cheap emitted scalar such
+``crepe``, ``pool_samples`` and ``crepe_finish`` remain available for custom ``emit`` functions. ``thin`` keeps
+every ``thin``-th sweep's sample, so the particles the finish pays ``n_tail`` evaluations for are closer to
+independent; set it to about twice the autocorrelation time of a cheap emitted scalar such
 as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``R0`` usually needs none.
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
@@ -156,7 +156,8 @@ src/ttg/
   moves.py      MoveContext, PCN, LangevinMove
   exchange.py   SequentialSweep, EvenOdd, StateSwap, replica_exchange
   smc.py        smc()
-  crepe.py      CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish
+  crepe.py      CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish,
+                crepe_sample
   testing/      test doubles, the Gaussian toy model, Hypothesis strategies
 tests/          one file per property group of §18.3, plus test_statistical.py (§18.4)
 ```

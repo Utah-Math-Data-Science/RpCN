@@ -21,9 +21,10 @@ class CREPEConfig:
     """Configuration of CREPE: replicas at noise levels u_0 < ... < u_M = 1, exchanging paths between neighbours.
 
     Level 0 (u_0, usually 0) is the data end and holds the tilted target; level M is the prior. If u_0 > 0, level 0
-    samples ``p_{u_0} exp(lambda(tau(u_0)) r_hat)`` and `crepe_finish` carries its samples to u = 0. A path exchange
-    between levels m and m+1 runs `K` fine steps across the gap: up (towards noise) with `F_Q` as the proposal
-    and `F_P` as the target, and down (towards data) with `B_Q` as the proposal and `B_P` as the target.
+    samples ``p_{u_0} exp(lambda(tau(u_0)) r_hat)`` and `crepe_finish` carries its samples to u = 0 (`crepe_sample`
+    does both in one call). A path exchange between levels m and m+1 runs `K` fine steps across the gap: up
+    (towards noise) with `F_Q` as the proposal and `F_P` as the target, and down (towards data) with `B_Q` as the
+    proposal and `B_P` as the target.
 
     Parameters
     ----------
@@ -463,6 +464,8 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
                  final_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """Carry level-0 samples from ``u_levels[0] > 0`` down to u = 0 with one `smc` run over `n_tail` steps.
 
+    Most callers use `crepe_sample`, which composes `crepe`, `pool_samples` and this function.
+
     Parameters
     ----------
     start : Record
@@ -514,3 +517,79 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
     return smc(start, grid, bk=bk, evaluate=evaluate, schedule=schedule, target=target, proposal=proposal,
                potential=potential, policy=policy, final_needs=final_needs, key=key)
 
+
+
+def crepe_sample(cfg, I, D, n_blocks, *, n_tail=None, exact=None, bk, evaluate, schedule, dtype, device=None,
+                 key, R0=None, thin=1, burn_in=0, policy=None):
+    """Run CREPE end to end: the chains, the pooling, and, when ``u_levels[0] > 0``, the finish to u = 0.
+
+    Composes `crepe` (with an `emit` it chooses, so the finish never re-evaluates), `pool_samples` and
+    `crepe_finish`. The result is an `SMCResult` either way: with ``u_levels[0] == 0`` there is no finish, `final` is
+    the pooled level-0 samples and `log_w` is exactly 0. Estimate with the self-normalised `log_w` average.
+
+    Parameters
+    ----------
+    cfg : CREPEConfig
+        The configuration.
+    I : int
+        Number of independent chains.
+    D : tuple of int
+        Event shape.
+    n_blocks : int
+        Number of emitting blocks, >= 1; see `crepe`.
+    n_tail : int, optional
+        Finish steps from ``u_levels[0]`` to 0. Required if ``u_levels[0] > 0``; ignored otherwise.
+    exact : bool, optional
+        Static. Weighted (True) or unweighted (False) finish; see `crepe_finish`. Required if ``u_levels[0] > 0``;
+        ignored otherwise.
+    bk : Backend
+        Randomness and control flow; ``bk.xp`` creates the arrays.
+    evaluate : Callable[[array, array, frozenset], Record]
+        The model.
+    schedule : Schedule
+        The noise schedule.
+    dtype : dtype
+        Run dtype.
+    device : device, optional
+        Run device.
+    key : backend key
+        Random key; split in two, for `crepe` and `crepe_finish`.
+    R0 : Record, optional
+        Replicas to continue from (a previous call's `R`); pass a fresh `key` and usually ``burn_in=0``.
+    thin : int, optional
+        See `crepe`.
+    burn_in : int, optional
+        See `crepe`.
+    policy : policy, optional
+        The finish's resampling policy; see `crepe_finish`.
+
+    Returns
+    -------
+    result : SMCResult
+        ``final``: [I, N, ...] at u = 0, carrying exactly ``cfg.out_needs``, with ``N = n_blocks * L // thin``
+        (``L = lcm(cfg.pairs.period, thin)``); ``log_w``: [I, N]. Each chain is one instance.
+    R : Record
+        `crepe`'s final replicas, shape [I, M+1, *D].
+
+    Raises
+    ------
+    ValueError
+        If ``n_blocks < 1``, or ``u_levels[0] > 0`` and `n_tail` or `exact` is missing.
+    """
+    xp = bk.xp
+    if n_blocks < 1:
+        raise ValueError("crepe_sample needs n_blocks >= 1")
+    finishing = cfg.u_levels[0] > 0                                  # static
+    if finishing and (n_tail is None or exact is None):
+        raise ValueError("u_levels[0] > 0: crepe_sample needs n_tail and exact")
+    needs = finish_needs(cfg) if finishing else cfg.out_needs        # both subsets of cfg.replica_needs
+    k_chain, k_tail = bk.split(key, 2)
+    samples, R = crepe(cfg, I, D, n_blocks, lambda r: r.project(needs), bk=bk, evaluate=evaluate,
+                       schedule=schedule, dtype=dtype, device=device, key=k_chain, R0=R0, thin=thin,
+                       burn_in=burn_in)
+    start = pool_samples(samples)                                    # [I, N, ...], one instance per chain
+    if not finishing:                                                # static: level 0 is already u = 0
+        return SMCResult(final=start, log_w=xp.zeros_like(start.t)), R
+    res = crepe_finish(start, cfg, n_tail, exact=exact, bk=bk, evaluate=evaluate, schedule=schedule,
+                       policy=policy, final_needs=cfg.out_needs, key=k_tail)
+    return SMCResult(final=res.final.project(cfg.out_needs), log_w=res.log_w), R

@@ -12,8 +12,7 @@ from conftest import BACKENDS, host
 
 from ttg import (PCN, CREPEConfig, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every, Feature, FKDiff, FKMax,
                  FKSum, Guided, Langevin, LangevinMove, Never, Noising, PosteriorStep, ReverseSDE, VPLinear, Zero,
-                 constant, crepe, crepe_finish, das_lambda, finish_needs, ladder, level_lambda, pool_samples, smc,
-                 tilt)
+                 constant, crepe_sample, das_lambda, ladder, level_lambda, smc, tilt)
 from ttg.crepe import fine_grid, tail_grid
 from ttg.testing import toy_evaluate
 
@@ -157,10 +156,10 @@ def crepe_estimate():
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg()
 
-    def run(key):
-        samples, _ = crepe(cfg, 2**10, (2,), 300, lambda r: r.x, bk=BK, evaluate=ev, schedule=sch, burn_in=100,
-                           dtype=xp.float64, key=key)
-        return samples
+    def run(key):                                             # u_0 = 0: no finish, log_w == 0
+        out, _ = crepe_sample(cfg, 2**10, (2,), 300, bk=BK, evaluate=ev, schedule=sch, dtype=xp.float64, key=key,
+                              burn_in=100)
+        return out.final.x
 
     run = compiled(run)
     return over_seeds(lambda key: host(run(key)).reshape(-1, 2).mean(axis=0))
@@ -193,18 +192,15 @@ def test_crepe():
 
 @needs_fast
 def test_crepe_finish():
-    """u_0 = 0.25, thin=4, burn_in=100, then crepe_finish(exact=True) from the 300 emits per chain to u = 0.
+    """u_0 = 0.25, through crepe_sample: thin=4, burn_in=100, then the exact finish of the 300 emits per chain.
     The reference is the plain sampler with cfg.B_P on CREPE's grid and then the tail grid, reweighted by
     exp(2 r_hat) at u = 0."""
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg((0.25, 0.5, 0.75, 1.0))
 
     def est(key):
-        k_c, k_f = BK.split(key, 2)
-        samples, _ = crepe(cfg, 2**10, (2,), 300, lambda r: r.project(finish_needs(cfg)), bk=BK, evaluate=ev,
-                           schedule=sch, dtype=xp.float64, key=k_c, thin=4, burn_in=100)   # L = 4: 300 emits
-        out = crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True, bk=BK, evaluate=ev,
-                           schedule=sch, key=k_f)
+        out, _ = crepe_sample(cfg, 2**10, (2,), 300, n_tail=10, exact=True, bk=BK, evaluate=ev, schedule=sch,
+                              dtype=xp.float64, key=key, thin=4, burn_in=100)   # L = 4: 300 emits per chain
         return out.log_w, out.final.x
 
     est = compiled(est)

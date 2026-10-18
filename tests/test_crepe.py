@@ -1,4 +1,4 @@
-"""X1-X7: CREPE's path exchange, replica invariant, evaluation counts, continuation and finish."""
+"""X1-X8: CREPE's path exchange, replica invariant, evaluation counts, continuation, finish and crepe_sample."""
 
 import math
 
@@ -11,7 +11,7 @@ from hypothesis import strategies as st
 
 from ttg import (CREPEConfig, Direction, EulerMaruyama, EvenOdd, Feature, ForwardSDE, Guided, Langevin,
                  LangevinMove, Never, Noising, PartialRecord, PathExchange, Point, ReverseSDE, SequentialSweep,
-                 VPLinear, Zero, crepe, crepe_finish, crepe_init, evaluate_rows, finish_needs, level_lambda,
+                 VPLinear, Zero, crepe, crepe_finish, crepe_init, crepe_sample, evaluate_rows, finish_needs, level_lambda,
                  per_row_grid, pool_samples, smc, tail_grid, tilt)
 from ttg.ops import steps_first, take_levels
 from ttg.testing import AuditingEvaluate, ReplayKernel
@@ -283,3 +283,74 @@ def test_X7_crepe_finish(bk, n_tail, I, N, seed, u0, data):
     want = ell(cfg, recs[-1]) - ell(cfg, recs[0]) + path_terms(recs, ts, cfg.B_P, B_Q)
     assert bool(xp.all(out.final.x == path[-1, ...]))
     assert np.all(np.abs(host(out.log_w - want)) <= 1e-8 * (1 + np.abs(host(want))))
+
+
+def same_tree(a, b):
+    """Identical leaves (and identical None structure) in two Records."""
+    for f in ("x", "t", *(f.value for f in ALL)):
+        u, v = getattr(a, f), getattr(b, f)
+        assert (u is None) == (v is None), f
+        assert u is None or np.array_equal(host(u), host(v)), f
+
+
+@backends
+@pytest.mark.parametrize("exact", [True, False])
+@given(I=st.integers(1, 2), n_blocks=st.integers(1, 2), thin=st.integers(1, 2), burn_in=st.integers(0, 1),
+       n_tail=st.integers(1, 3), u0=st.floats(0.05, 0.5), seed=st.integers(0, 2**20))
+def test_X8_crepe_sample_is_its_composition(bk, exact, I, n_blocks, thin, burn_in, n_tail, u0, seed):
+    xp, sch = bk.xp, VPLinear()
+    ev, _, _ = toy(bk, sch)
+    cfg = make_cfg(bk, sch, (u0, (u0 + 1.0) / 2, 1.0), 1, local=False)
+    audit = AuditingEvaluate(ev)
+    key = bk.key(seed)
+    with eager(bk):
+        out, R = crepe_sample(cfg, I, (2,), n_blocks, n_tail=n_tail, exact=exact, bk=bk, evaluate=audit,
+                              schedule=sch, dtype=xp.float64, key=key, thin=thin, burn_in=burn_in)
+        rows = audit.rows
+        k_chain, k_tail = bk.split(key, 2)
+        samples, R_ref = crepe(cfg, I, (2,), n_blocks, lambda r: r.project(finish_needs(cfg)), bk=bk, evaluate=ev,
+                               schedule=sch, dtype=xp.float64, key=k_chain, thin=thin, burn_in=burn_in)
+        ref = crepe_finish(pool_samples(samples), cfg, n_tail, exact=exact, bk=bk, evaluate=ev, schedule=sch,
+                           final_needs=cfg.out_needs, key=k_tail)
+    same_tree(out.final, ref.final.project(cfg.out_needs))
+    assert np.array_equal(host(out.log_w), host(ref.log_w))
+    same_tree(R, R_ref)
+    for f in ALL:
+        assert (getattr(out.final, f.value) is not None) == (f in cfg.out_needs)
+    L = math.lcm(cfg.pairs.period, thin)
+    N = n_blocks * L // thin
+    assert tuple(out.log_w.shape) == (I, N)
+    init = I * (1 + cfg.M * cfg.K)                                         # §17
+    assert rows == init + (burn_in + n_blocks) * sweep_rows(cfg, I, L) + I * N * n_tail
+
+
+@backends
+@given(I=st.integers(1, 2), n_blocks=st.integers(1, 2), thin=st.integers(1, 2), seed=st.integers(0, 2**20),
+       exact=st.sampled_from([None, True, False]))
+def test_X8_crepe_sample_without_finish(bk, I, n_blocks, thin, seed, exact):
+    xp, sch = bk.xp, VPLinear()
+    ev, _, _ = toy(bk, sch)
+    cfg = make_cfg(bk, sch, (0.0, 0.5, 1.0), 1, local=False)
+    audit = AuditingEvaluate(ev)
+    key = bk.key(seed)
+    with eager(bk):
+        out, R = crepe_sample(cfg, I, (2,), n_blocks, exact=exact, bk=bk, evaluate=audit, schedule=sch,
+                              dtype=xp.float64, key=key, thin=thin)        # n_tail and exact ignored at u_0 = 0
+        rows = audit.rows
+        samples, R_ref = crepe(cfg, I, (2,), n_blocks, lambda r: r.project(cfg.out_needs), bk=bk, evaluate=ev,
+                               schedule=sch, dtype=xp.float64, key=bk.split(key, 2)[0], thin=thin)
+    same_tree(out.final, pool_samples(samples).project(cfg.out_needs))
+    assert bool(xp.all(out.log_w == 0)) and out.log_w.shape == out.final.t.shape
+    same_tree(R, R_ref)
+    for f in ALL:
+        assert (getattr(out.final, f.value) is not None) == (f in cfg.out_needs)
+    L = math.lcm(cfg.pairs.period, thin)
+    assert rows == I * (1 + cfg.M * cfg.K) + n_blocks * sweep_rows(cfg, I, L)   # no finish rows
+    kw = dict(bk=bk, evaluate=ev, schedule=sch, dtype=xp.float64, key=key)
+    with pytest.raises(ValueError):
+        crepe_sample(cfg, I, (2,), 0, **kw)
+    fcfg = make_cfg(bk, sch, (0.2, 0.6, 1.0), 1, local=False)
+    with pytest.raises(ValueError):
+        crepe_sample(fcfg, I, (2,), 1, exact=True, **kw)                   # n_tail missing
+    with pytest.raises(ValueError):
+        crepe_sample(fcfg, I, (2,), 1, n_tail=2, **kw)                     # exact missing
