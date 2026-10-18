@@ -47,7 +47,7 @@ All code below is **pseudocode in Python syntax**. It is meant to pin down inter
 | 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K13, L1, C1–C2, N2–N3 |
 | 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P6, R1–R5, E1–E4, N1, N4 |
 | 3 | `moves.py`, `exchange.py` (FK + pCN, RpCN) | M1–M7, E5, §17 counts with moves |
-| 4 | `crepe.py` | X1–X7 |
+| 4 | `crepe.py` | X1–X8 |
 | 5 | statistical tests (§18.4) | every row passes; the $\lambda = 0$ sanity check fails as intended |
 
 **Where to start reading:** §1 (invariants), §4.1 (wiring rules), then each module's section in build order.
@@ -114,7 +114,7 @@ ttg/
   moves.py       MoveContext, rescore, tilt_delta, PCN, LangevinMove
   exchange.py    PairSchedule (SequentialSweep, EvenOdd), Exchange (StateSwap), replica_exchange
   smc.py         smc()
-  crepe.py       CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish
+  crepe.py       CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish, crepe_sample
   testing/       CountingNetwork, AuditingEvaluate, ReplayKernel, toy Gaussian model, strategies
 ```
 
@@ -1172,7 +1172,7 @@ coldest = out.final.x[:, K]                               # the beta_K = beta re
 
 **Layout.**
 - **Replicas** are one `Record` with axes `[I, M+1, ...]`: $I$ chains, levels $m = 0..M$ at $u_0 < \dots < u_M = 1$.
-- **The lowest level may sit above the data end** ($u_0 > 0$). Level 0 then samples $\propto p_{u_0}\, e^{\lambda(\tau(u_0))\, \hat r}$, and `crepe_finish` (below) carries its samples the rest of the way to $u = 0$.
+- **The lowest level may sit above the data end** ($u_0 > 0$). Level 0 then samples $\propto p_{u_0}\, e^{\lambda(\tau(u_0))\, \hat r}$, and `crepe_finish` (below) carries its samples the rest of the way to $u = 0$. `crepe_sample` (end of this section) runs the chains and the finish in one call.
 - **Replica invariant:** every replica always carries exactly `replica_needs`, and the replica at level $m$ always has $t = \tau(u_m)$.
 
 ```python
@@ -1336,7 +1336,7 @@ def crepe(cfg, I, D, n_blocks, emit, *, bk, evaluate, schedule, dtype, device=No
 
 Otherwise the top level is approximately, not exactly, at its target. The approximation is the same as the one in the prior itself.
 
-**Finishing from $u_0 > 0$.** `crepe_finish` runs one `smc` from the level-0 samples to $u = 0$, over `n_tail` steps.
+**Finishing from $u_0 > 0$.** `crepe_finish` runs one `smc` from the level-0 samples to $u = 0$, over `n_tail` steps. Most callers use `crepe_sample` (below), which composes `crepe`, `pool_samples` and `crepe_finish`.
 
 ```python
 def finish_needs(cfg):          # what emit must keep for crepe_finish (emit = lambda r: r.project(finish_needs(cfg)))
@@ -1377,6 +1377,39 @@ def crepe_finish(start, cfg, n_tail, *, exact, bk, evaluate, schedule, policy=No
 - **Grouping:** `pool_samples` makes each chain one instance and its post-burn-in samples that instance's particles, so `exact=True` resamples only within a chain. Instances therefore stay as independent as the chains themselves (the API's `[I, ...]` contract). The particles within an instance are correlated unless `crepe` ran with enough `thin`.
 - **Memory:** `emit = lambda r: r.project(finish_needs(cfg))` keeps only what the finish reads. `start_record` then projects to the finish's needs (§6), and nothing is re-evaluated (I1).
 
+**One call.** `crepe_sample` runs CREPE end to end: the chains, the pooling, and, when $u_0 > 0$, the finish to $u = 0$.
+
+```python
+def crepe_sample(cfg, I, D, n_blocks, *, n_tail=None, exact=None, bk, evaluate, schedule, dtype, device=None,
+                 key, R0=None, thin=1, burn_in=0, policy=None) -> tuple[SMCResult, Record]:
+    """-> (result, R). result.final: [I, N, ...] at u = 0, carrying exactly cfg.out_needs, with
+    N = n_blocks * L // thin; result.log_w: [I, N]. R: crepe's replicas (pass back as R0 to continue)."""
+    xp = bk.xp
+    if n_blocks < 1:
+        raise ValueError("crepe_sample needs n_blocks >= 1")
+    finishing = cfg.u_levels[0] > 0                                  # static
+    if finishing and (n_tail is None or exact is None):
+        raise ValueError("u_levels[0] > 0: crepe_sample needs n_tail and exact")
+    needs = finish_needs(cfg) if finishing else cfg.out_needs        # both subsets of cfg.replica_needs
+    k_chain, k_tail = bk.split(key, 2)
+    samples, R = crepe(cfg, I, D, n_blocks, lambda r: r.project(needs), bk=bk, evaluate=evaluate,
+                       schedule=schedule, dtype=dtype, device=device, key=k_chain, R0=R0, thin=thin,
+                       burn_in=burn_in)
+    start = pool_samples(samples)                                    # [I, N, ...], one instance per chain
+    if not finishing:                                                # static: level 0 is already u = 0
+        return SMCResult(final=start, log_w=xp.zeros_like(start.t)), R
+    res = crepe_finish(start, cfg, n_tail, exact=exact, bk=bk, evaluate=evaluate, schedule=schedule,
+                       policy=policy, final_needs=cfg.out_needs, key=k_tail)
+    return SMCResult(final=res.final.project(cfg.out_needs), log_w=res.log_w), R
+```
+
+- **Why a separate function:** `crepe` stays the bare chain sampler, with any `emit` (diagnostics, autocorrelation estimates for `thin`, the level-0 samples themselves). `crepe_sample` chooses `emit` itself, so the finish never re-evaluates (I1) and the caller can't get `emit` wrong. `crepe`, `pool_samples` and `crepe_finish` stay public.
+- **One output type:** the result is an `SMCResult` whether or not $u_0 > 0$. With $u_0 = 0$ there is no finish: `final` is the pooled level-0 samples and `log_w` is exactly 0. `final` always carries exactly `cfg.out_needs`, so its structure doesn't depend on $u_0$ or `exact`, and the self-normalised `log_w` average is the estimator in every case.
+- **`n_tail` and `exact`** are required when $u_0 > 0$ and ignored when $u_0 = 0$. `policy` is passed to `crepe_finish` (default `ESSBelow(0.5)` for `exact=True`).
+- **Keys:** `bk.split(key, 2)`; the first goes to `crepe`, the second to `crepe_finish`.
+- **Continuing and memory:** pass `R` back as `R0` with a fresh `key` (and usually `burn_in=0`). Each call finishes only its own samples, so with `exact=True` resampling never mixes samples from different calls. The finish batch is $I N$ rows; to bound it, draw the same total number of samples over several continued calls.
+
+
 ## 17. Exact evaluation counts
 
 These counts are asserted by the tests.
@@ -1395,6 +1428,7 @@ These counts are asserted by the tests.
 | `crepe` with `R0` given | no `crepe_init` rows; sweeps as above |
 | `crepe` with `burn_in` $= b$ | $b L$ sweeps before sampling, each counted as above |
 | `crepe_finish`, start `[I, N]` | $I N \cdot$ `n_tail` |
+| `crepe_sample` | the `crepe` rows, plus, if $u_0 > 0$, the `crepe_finish` row with $N$ = `n_blocks * L // thin` |
 
 For a CREPE sweep:
 - $P_n$ is the number of pairs in `cfg.pairs.rounds(M+1, n)`;
@@ -1621,6 +1655,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | X5 | `emit` may return any pytree: with `emit = lambda r: r.project(finish_needs(cfg))`, `samples` is a `Record` whose leaves have leading axes `[n_blocks, L // thin, I, 1]` with $L = \operatorname{lcm}(\text{period}, \text{thin})$. With a counting `emit`, the run makes `n_blocks * L` sweeps (counts per §17) and emits `n_blocks * L // thin` times, after sweeps `thin, 2 thin, ...`. With `burn_in=b`, the run makes `(b + n_blocks) * L` sweeps, `emit` is first called after sweep `b L + thin`, and `samples` keeps the same shape. `pool_samples(samples)` has leading axes `[I, n_blocks * L // thin]`, keeps every chain's samples in emit order, and never mixes chains within an instance |
 | X6 | `crepe(..., R0=R)` makes no `crepe_init` evaluations (counts per §17), keeps the replica invariant, raises `PartialRecord` if `R0` lacks `replica_needs`, and with `n_blocks = 0` returns `R0.project(cfg.replica_needs)` unchanged |
 | X7 | `crepe_finish` raises `ValueError` when `u_levels[0] == 0`. With `exact=False`, its `log_w` is identically 0, and it equals `smc(start, tail_grid(...), target=proposal=cfg.B_Q, potential=Zero(), policy=Never())` for the same key. With `exact=True` and `Never()`, its `log_w` equals, along a replayed tail, $\lambda(\tau(0))\,\hat r_{\text{end}} - \lambda(\tau(u_0))\,\hat r_{\text{start}} + \sum [\log B^P - \log B^Q]$; `tail_grid` starts at exactly `u_levels[0]` and ends at exactly 0 |
+| X8 | `crepe_sample` equals, for the same key, the composition it is defined by: `crepe` with `emit = lambda r: r.project(finish_needs(cfg))` and the first key of `bk.split(key, 2)`, then `crepe_finish(pool_samples(samples), ..., final_needs=cfg.out_needs)` with the second, its `final` projected to `cfg.out_needs`; it returns the same `R`. Its evaluation counts match §17 (the finish adds nothing beyond its `n_tail` steps). With `u_levels[0] == 0` it runs no finish, `log_w` is identically 0, and `final` equals `pool_samples` of the level-0 samples projected to `cfg.out_needs`. `final` carries exactly `cfg.out_needs` for both values of `exact` and both cases of `u_levels[0]`. It raises `ValueError` if `n_blocks < 1`, or if `u_levels[0] > 0` and `n_tail` or `exact` is missing |
 
 Three worked examples:
 
@@ -1689,7 +1724,7 @@ These are seeded and marked `slow`. On the Gaussian toy, FK, DAS, FK + pCN, RpCN
 | DAS | `Guided(P, tilt(lam))` proposal, `FKDiff(lam)`, `ESSBelow(0.5)`, `lam = das_lambda(t_grid, gamma=0.008, alpha_kl=0.5)`; $N = 256$, $I = 16$ |
 | FK + pCN | as FK with `FKDiff`, plus `PCN(n_steps=2, step=constant(0.3))` and `move_at=lambda k: k % 5 == 0` |
 | RpCN | $K = 3$, `betas = linspace(0, 2, 4)`, `step_sizes = (0.95, 0.95, 0.95, 0.95)`, `PCN(n_steps=20, step=ladder(step_sizes), pairs=EvenOdd())` at **every** step, `Never()`; $I = 2^{12}$; the estimate uses rung $K$ only. RpCN is exact only as mixing becomes complete, so its bound adds $0.02$ for that bias: $4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2} + 0.02$ |
-| CREPE | `u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)`, $K = 10$, `level_lambda(..., beta=2.0, rho=1.0)` (so $\lambda = 2$ at level 0 and $0$ at the top), the default kernels of §16, `Langevin(h=lambda t: 0.01 * sch.std(t)**2)` on levels 0–3, `EvenOdd()`; $I = 2^{10}$ chains, `burn_in=100`, `n_blocks=300`, level-0 samples pooled. **Reference:** the plain sampler using `cfg.B_P` on CREPE's own grid (the `fine_grid`s of every gap concatenated, from level $M$ down to level 0), reweighted by $e^{\lambda_0 \hat r}$ at level 0, where $\lambda_0 = 2$ |
-| CREPE + finish | as the CREPE row, but `u_levels = (0.25, 0.5, 0.75, 1.0)` (so $u_0 > 0$), `emit = lambda r: r.project(finish_needs(cfg))`, `thin=4`, `burn_in=100`, `n_blocks=300` (so $L = 4$ and 300 emits per chain), then `crepe_finish(pool_samples(samples), cfg, n_tail=10, exact=True)` with its default `ESSBelow(0.5)`; the estimate is the self-normalised `log_w` average of the final `x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's grid from level $M$ down to level 0, then on `tail_grid(cfg, 10)` down to $u = 0$, reweighted by $e^{2 \hat r}$ at the end. `exact=False` has no statistical test: it is approximate by design |
+| CREPE | `u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)`, $K = 10$, `level_lambda(..., beta=2.0, rho=1.0)` (so $\lambda = 2$ at level 0 and $0$ at the top), the default kernels of §16, `Langevin(h=lambda t: 0.01 * sch.std(t)**2)` on levels 0–3, `EvenOdd()`; $I = 2^{10}$ chains, run through `crepe_sample` with `burn_in=100`, `n_blocks=300` (no finish, since $u_0 = 0$); the estimate is the average of `final.x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's own grid (the `fine_grid`s of every gap concatenated, from level $M$ down to level 0), reweighted by $e^{\lambda_0 \hat r}$ at level 0, where $\lambda_0 = 2$ |
+| CREPE + finish | as the CREPE row, but `u_levels = (0.25, 0.5, 0.75, 1.0)` (so $u_0 > 0$), run through `crepe_sample` with `n_tail=10`, `exact=True`, `thin=4`, `burn_in=100`, `n_blocks=300` (so $L = 4$ and 300 emits per chain) and the finish's default `ESSBelow(0.5)`; the estimate is the self-normalised `log_w` average of the final `x`. **Reference:** the plain sampler using `cfg.B_P` on CREPE's grid from level $M$ down to level 0, then on `tail_grid(cfg, 10)` down to $u = 0$, reweighted by $e^{2 \hat r}$ at the end. `exact=False` has no statistical test: it is approximate by design |
 | pass condition | $\lvert \bar m - \bar m_{\text{ref}} \rvert \le 4\sqrt{\mathrm{SE}^2 + \mathrm{SE}_{\text{ref}}^2}$ for both coordinates, with each standard error taken from the spread across the 8 seeds |
 | sanity check | for each tested $\lambda$, the same tolerance must **fail** for $\lambda = 0$ against that $\lambda$'s reference, so the test can detect a missing tilt |
