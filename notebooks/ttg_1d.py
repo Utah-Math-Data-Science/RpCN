@@ -248,7 +248,6 @@ def _(
     get_denoiser,
     prob_path,
     reward_fn,
-    sm_n_sampling_steps,
     training_samples,
 ):
     bk = TorchBackend(device)
@@ -280,17 +279,37 @@ def _(
         return counted, lambda: rows[0] / batch_size.value
     # Reverse-SDE Euler-Maruyama step, as in `Euler.step` in toy.model.
     reverse_step = ttg.EulerMaruyama(ttg.ReverseSDE(sch), ttg.Direction.BACKWARD)
+    return bk, counting, dtype, evaluate, event_shape, reverse_step, sch
+
+
+@app.cell
+def _(bk, device, dtype, sm_n_sampling_steps):
+    # The sampling grid of FK, DAS and RpCN, in its own cell so CREPE (which uses its own levels) doesn't depend on it.
     u_grid = bk.xp.linspace(1.0, 0.0, sm_n_sampling_steps.value, dtype=dtype, device=device)
-    return (
-        bk,
-        counting,
-        dtype,
-        evaluate,
-        event_shape,
-        reverse_step,
-        sch,
-        u_grid,
-    )
+    return (u_grid,)
+
+
+@app.cell
+def _(nfe_budget, sm_n_sampling_steps):
+    # Each method's settings are derived in its own cell from the shared NFE budget, so changing one method's
+    # parameters reruns only that method. Denoiser evaluations per sample, with S sampling steps:
+    #   FK, DAS: N S                      (one evaluation per particle per step)
+    fk_ensemble_size = nfe_budget.value // sm_n_sampling_steps.value
+    fk_expected_nfe = fk_ensemble_size * sm_n_sampling_steps.value
+    mo.stop(fk_ensemble_size < 1, mo.md(f'**NFE budget {nfe_budget.value} is too small for FK/DAS.**'))
+    mo.md(f'FK/DAS: {fk_ensemble_size} particles')
+    return fk_ensemble_size, fk_expected_nfe
+
+
+@app.cell
+def _(nfe_budget, rpcn_replicas, sm_n_sampling_steps):
+    #   RpCN:    K S (1 + M)              (K rungs; each step evaluates once, then M pCN proposals; also at the start)
+    _S, _K = sm_n_sampling_steps.value, rpcn_replicas.value
+    rpcn_pcn_steps = nfe_budget.value // (_K * _S) - 1
+    rpcn_expected_nfe = _K * _S * (1 + rpcn_pcn_steps)
+    mo.stop(rpcn_pcn_steps < 1, mo.md(f'**NFE budget {nfe_budget.value} is too small for RpCN with {_K} replicas.**'))
+    mo.md(f'RpCN: {rpcn_pcn_steps} pCN steps')
+    return rpcn_expected_nfe, rpcn_pcn_steps
 
 
 @app.cell
@@ -302,51 +321,38 @@ def _(
     crepe_thin,
     crepe_u0,
     nfe_budget,
-    rpcn_replicas,
-    sm_n_sampling_steps,
 ):
-    # Denoiser evaluations per sample, with S sampling steps:
-    #   FK, DAS: N S                      (one evaluation per particle per step)
-    #   RpCN:    K S (1 + M)              (K rungs; each step evaluates once, then M pCN proposals; also at the start)
     #   CREPE:   1 + (L - 1) K_f          (prior draw at the top, carried down K_f fine steps per gap)
     #            + (b + n) W / 2 (2 K_f (L - 1) + 2 (L - 1) + 1)
     #                                     (b burn-in and n sampling blocks of W = lcm(2, thin) EvenOdd sweeps; per
     #                                      two sweeps, each of the L - 1 pairs exchanges once, up and down; a
     #                                      Langevin move on L - 1 levels per sweep; one top refresh)
     #            + n (W / thin) T         (with the finish: T tail steps for each of the chain's n W / thin emits)
-    def _derive_settings():
-        S, K, L, K_f = sm_n_sampling_steps.value, rpcn_replicas.value, crepe_n_levels.value, crepe_fine_steps.value
-        budget = nfe_budget.value
+    def _derive_crepe():
+        L, K_f = crepe_n_levels.value, crepe_fine_steps.value
         W = math.lcm(2, int(crepe_thin.value))
         emits_per_block = W // int(crepe_thin.value)
-        crepe_init = 1 + (L - 1) * K_f
-        crepe_block = W // 2 * (2 * K_f * (L - 1) + 2 * (L - 1) + 1)
-        crepe_finish_per_block = emits_per_block * crepe_n_tail.value if crepe_u0.value > 0 else 0
-        crepe_burn = int(crepe_burn_in.value) * crepe_block
-        crepe_n_blocks = (budget - crepe_init - crepe_burn) // (crepe_block + crepe_finish_per_block)
-        settings = dict(
-            fk_ensemble_size=budget // S,
-            rpcn_pcn_steps=budget // (K * S) - 1,
-            crepe_n_blocks=crepe_n_blocks,
-            crepe_emits_per_chain=crepe_n_blocks * emits_per_block,
-        )
-        expected_nfe = {
-            'FK': settings['fk_ensemble_size'] * S,
-            'DAS': settings['fk_ensemble_size'] * S,
-            'CREPE': crepe_init + crepe_burn + crepe_n_blocks * (crepe_block + crepe_finish_per_block),
-            'RpCN': K * S * (1 + settings['rpcn_pcn_steps']),
-        }
-        return settings, expected_nfe
-    nfe_settings, _expected_nfe = _derive_settings()
-    mo.stop(
-        min(nfe_settings.values()) < 1,
-        mo.md(f'**NFE budget {nfe_budget.value} is too small for these settings:** {nfe_settings}'),
-    )
+        init = 1 + (L - 1) * K_f
+        block = W // 2 * (2 * K_f * (L - 1) + 2 * (L - 1) + 1)
+        finish_per_block = emits_per_block * crepe_n_tail.value if crepe_u0.value > 0 else 0
+        burn = int(crepe_burn_in.value) * block
+        n_blocks = (nfe_budget.value - init - burn) // (block + finish_per_block)
+        return n_blocks, n_blocks * emits_per_block, init + burn + n_blocks * (block + finish_per_block)
+    crepe_n_blocks, _emits_per_chain, crepe_expected_nfe = _derive_crepe()
+    mo.stop(crepe_n_blocks < 1, mo.md(f'**NFE budget {nfe_budget.value} is too small for these CREPE settings.**'))
+    mo.md(f'CREPE: {crepe_n_blocks} blocks, {_emits_per_chain} kept samples per chain')
+    return crepe_expected_nfe, crepe_n_blocks
+
+
+@app.cell
+def _(crepe_expected_nfe, fk_expected_nfe, nfe_budget, rpcn_expected_nfe):
+    # Summary only; no method depends on this cell.
+    _expected_nfe = {'FK': fk_expected_nfe, 'DAS': fk_expected_nfe, 'CREPE': crepe_expected_nfe, 'RpCN': rpcn_expected_nfe}
     mo.vstack([
-        mo.md(f'Derived from {nfe_budget.value} NFE per sample: {nfe_settings}'),
+        mo.md(f'Expected NFE per sample, from a budget of {nfe_budget.value}:'),
         pl.DataFrame(dict(method=list(_expected_nfe), expected_nfe=list(_expected_nfe.values()))),
     ])
-    return (nfe_settings,)
+    return
 
 
 @app.cell
@@ -358,8 +364,8 @@ def _(
     dtype,
     evaluate,
     event_shape,
+    fk_ensemble_size,
     get_metrics,
-    nfe_settings,
     reverse_step,
     rng_seed_fk,
     sch,
@@ -384,7 +390,7 @@ def _(
         selected = ttg.categorical(bk, fk.log_w, key_select)
         return fk.final.x[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
-    samples_fk = run_fk(batch_size.value, nfe_settings['fk_ensemble_size'], _evaluate).cpu()
+    samples_fk = run_fk(batch_size.value, fk_ensemble_size, _evaluate).cpu()
     metrics_fk = get_metrics(samples_fk, _nfe())
     metrics_fk
     return metrics_fk, samples_fk
@@ -400,8 +406,8 @@ def _(
     dtype,
     evaluate,
     event_shape,
+    fk_ensemble_size,
     get_metrics,
-    nfe_settings,
     reverse_step,
     rng_seed_das,
     sch,
@@ -427,7 +433,7 @@ def _(
         selected = ttg.categorical(bk, das.log_w, key_select)
         return das.final.x[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
-    samples_das = run_das(batch_size.value, nfe_settings['fk_ensemble_size'], _evaluate).cpu()
+    samples_das = run_das(batch_size.value, fk_ensemble_size, _evaluate).cpu()
     metrics_das = get_metrics(samples_das, _nfe())
     metrics_das
     return metrics_das, samples_das
@@ -441,6 +447,7 @@ def _(
     crepe_burn_in,
     crepe_fine_steps,
     crepe_finish_exact,
+    crepe_n_blocks,
     crepe_n_levels,
     crepe_n_tail,
     crepe_thin,
@@ -450,7 +457,6 @@ def _(
     evaluate,
     event_shape,
     get_metrics,
-    nfe_settings,
     reverse_step,
     rng_seed_crepe,
     sch,
@@ -494,7 +500,7 @@ def _(
     )
     _evaluate, _nfe = counting(evaluate)
     samples_crepe = run_crepe(
-        batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, nfe_settings['crepe_n_blocks'], _evaluate,
+        batch_size.value, crepe_n_levels.value, crepe_fine_steps.value, crepe_n_blocks, _evaluate,
         thin=int(crepe_thin.value), burn_in=int(crepe_burn_in.value), finish=_finish,
     ).cpu()
     metrics_crepe = get_metrics(samples_crepe, _nfe())
@@ -512,9 +518,9 @@ def _(
     evaluate,
     event_shape,
     get_metrics,
-    nfe_settings,
     reverse_step,
     rng_seed_rpcn,
+    rpcn_pcn_steps,
     rpcn_replicas,
     sch,
     tilt,
@@ -542,7 +548,7 @@ def _(
         )
         return rpcn.final.x[:, -1]  # the beta_K = beta replica
     _evaluate, _nfe = counting(evaluate)
-    samples_rpcn = run_rpcn(batch_size.value, rpcn_replicas.value, nfe_settings['rpcn_pcn_steps'], _evaluate).cpu()
+    samples_rpcn = run_rpcn(batch_size.value, rpcn_replicas.value, rpcn_pcn_steps, _evaluate).cpu()
     metrics_rpcn = get_metrics(samples_rpcn, _nfe())
     metrics_rpcn
     return metrics_rpcn, samples_rpcn
