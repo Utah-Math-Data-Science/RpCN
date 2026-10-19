@@ -44,9 +44,9 @@ the estimate alone:
 .. code:: python
 
    from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every,
-                    FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep, ReverseSDE,
-                    VPLinear, constant, crepe, crepe_sample, das_lambda, ladder, level_lambda,
-                    make_evaluate_torch, on_x0, smc, tilt, x0_from_eps)
+                    FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep,
+                    SequentialSweep, ReverseSDE, VPLinear, constant, crepe, crepe_sample,
+                    das_lambda, ladder, level_lambda, make_evaluate_torch, on_x0, smc, tilt, x0_from_eps)
    from ttg.backend import TorchBackend
 
    bk = TorchBackend()
@@ -88,7 +88,7 @@ there is no resampling.
    P = DDIMStep(sch, eta=1.0)
    rpcn = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, bk=bk, evaluate=evaluate, schedule=sch,
               target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
-              move=PCN(n_steps=20, step=constant(0.95), pairs=EvenOdd()), move_at=lambda k: k % 20 == 0,
+              move=PCN(n_steps=20, step=constant(0.95), pairs=SequentialSweep()),
               key=key)
    coldest = rpcn.final.x0[:, K]                     # [I, *D]: the beta_K = beta replica
 
@@ -115,7 +115,7 @@ level above the data end (:math:`u_0 > 0`), it also finishes the level-0 samples
 .. code:: python
 
    cfg = CREPEConfig(u_levels=(0.25, 0.5, 0.75, 1.0), ...)       # as above, with lam on these levels
-   out, replicas = crepe_sample(cfg, I, D, 80, n_tail=10, exact=True, bk=bk, evaluate=evaluate, schedule=sch,
+   out, replicas = crepe_sample(cfg, I, D, 80, n_tail=10, exact=False, bk=bk, evaluate=evaluate, schedule=sch,
                                 dtype=xp.float32, key=key, thin=4, burn_in=20)   # 80 samples, 1 per 4 sweeps
    x0, log_w = out.final.x0, out.log_w                           # [I, 80, *D], [I, 80]
 
@@ -125,39 +125,3 @@ independent; set it to about twice the autocorrelation time of a cheap emitted s
 as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``R0`` usually needs none.
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
-
-## Commands
-
-```sh
-uv sync --all-extras                       # set up (JAX and PyTorch extras)
-uv run pytest                              # fast suite (Hypothesis, `default` profile)
-uv run pytest --hypothesis-profile=ci      # fast suite, `ci` profile (200 examples, derandomized)
-uv run pytest -m slow                      # statistical tests (§18.4); float64 on JAX or PyTorch
-```
-
-`uv sync` without extras, followed by `uv run pytest`, runs the suite on `array_api_strict` only, with the
-JAX and PyTorch tests skipped.
-
-## Layout
-
-```
-src/ttg/
-  backend/      Backend protocol; jax.py, torch.py, strict.py (randomness, scan, cond, switch)
-  ops.py        Array-API helpers and the pure-Python pytree map
-  schedule.py   VPLinear, EDM, RectifiedFlow
-  records.py    Feature, Point, Record
-  evaluate.py   evaluation contract, conversions, JAX/PyTorch builders, on_x0, evaluate_rows, start_record
-  kernels.py    Gaussian, transition, Noising, PosteriorStep, DDIMStep, EulerMaruyama, Langevin, Guided
-  sde.py        Direction, ForwardSDE, ReverseSDE
-  guidance.py   tilt, normalized
-  lam.py        constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
-  potentials.py FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Zero, Relative
-  resample.py   ess, systematic, categorical, masked_resample; Never, Every, ESSBelow
-  moves.py      MoveContext, PCN, LangevinMove
-  exchange.py   SequentialSweep, EvenOdd, StateSwap, replica_exchange
-  smc.py        smc()
-  crepe.py      CREPEConfig, PathExchange, crepe_init, crepe(), pool_samples, finish_needs, crepe_finish,
-                crepe_sample
-  testing/      test doubles, the Gaussian toy model, Hypothesis strategies
-tests/          one file per property group of §18.3, plus test_statistical.py (§18.4)
-```
