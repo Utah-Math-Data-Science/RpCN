@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .ops import device_of, namespace
+from .ops import device_of, index_dtype, namespace
 
 
 def _take_1d(values, indices):   # Array API `take` wants 1-D indices
@@ -93,7 +93,7 @@ def piecewise_linear(knots, values, hold=False):   # knots: 1-D increasing
         if hold:                                     # static
             t = xp.clip(t, min=knots_t[0], max=knots_t[-1])
         # searchsorted(knots_t, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
-        upper_index = xp.sum(xp.astype(knots_t < t[..., None], xp.int64), axis=-1)
+        upper_index = xp.sum(xp.astype(knots_t < t[..., None], index_dtype(xp, device_of(t))), axis=-1)
         upper_index = xp.clip(upper_index, 1, knots_t.shape[0] - 1)
         knot_lo, knot_hi = _take_1d(knots_t, upper_index - 1), _take_1d(knots_t, upper_index)
         value_lo, value_hi = _take_1d(values_t, upper_index - 1), _take_1d(values_t, upper_index)

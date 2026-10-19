@@ -72,6 +72,11 @@ def device_of(a):
     return array_api_compat.device(a)
 
 
+def index_dtype(xp, device=None):
+    """The namespace's default indexing dtype (int32 on JAX without x64, int64 on NumPy and PyTorch)."""
+    return xp.__array_namespace_info__().default_dtypes(device=device)["indexing"]
+
+
 def bcast(v, like):
     """[L...] -> broadcastable against [L..., *D]."""
     xp = namespace(v)

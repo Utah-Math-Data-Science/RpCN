@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ops import device_of, logsumexp, namespace, take_rows, tree_map
+from .ops import device_of, index_dtype, logsumexp, namespace, take_rows, tree_map
 
 
 def ess(log_weights):                             # [I, N] -> [I]
@@ -45,7 +45,7 @@ def systematic(backend, log_weights, key):                   # [I, N] -> ancesto
     Returns
     -------
     array
-        ``[I, N]`` int64 ancestor indices in ``[0, N)``, non-decreasing along axis 1.
+        ``[I, N]`` integer (`index_dtype`) ancestor indices in ``[0, N)``, non-decreasing along axis 1.
 
     Notes
     -----
@@ -59,7 +59,7 @@ def systematic(backend, log_weights, key):                   # [I, N] -> ancesto
     positions = (backend.uniform(key, (I, 1), cdf.dtype, device=device)
                  + xp.arange(N, dtype=cdf.dtype, device=device)[None, :]) / N
     # O(N^2); avoids 2-D searchsorted
-    ancestors = xp.sum(xp.astype(cdf[:, None, :] < positions[:, :, None], xp.int64), axis=2)
+    ancestors = xp.sum(xp.astype(cdf[:, None, :] < positions[:, :, None], index_dtype(xp, device)), axis=2)
     return xp.clip(ancestors, max=N - 1)
 
 
@@ -81,13 +81,14 @@ def categorical(backend, log_weights, key):                  # [I, N] -> ancesto
     Returns
     -------
     array
-        ``[I]`` int64 indices in ``[0, N)``.
+        ``[I]`` integer (`index_dtype`) indices in ``[0, N)``.
     """
     xp = namespace(log_weights)
     I, N = log_weights.shape
+    device = device_of(log_weights)
     cdf = _cdf(log_weights)
-    uniform = backend.uniform(key, (I, 1), cdf.dtype, device=device_of(log_weights))
-    ancestors = xp.sum(xp.astype(cdf < uniform, xp.int64), axis=1)
+    uniform = backend.uniform(key, (I, 1), cdf.dtype, device=device)
+    ancestors = xp.sum(xp.astype(cdf < uniform, index_dtype(xp, device)), axis=1)
     return xp.clip(ancestors, max=N - 1)
 
 
@@ -116,7 +117,8 @@ def masked_resample(backend, tree, log_weights, resample_mask, key):    # resamp
     """
     xp = namespace(log_weights, resample_mask)
     I, N = log_weights.shape
-    own_index = xp.arange(N, dtype=xp.int64, device=device_of(log_weights))[None, :]
+    device = device_of(log_weights)
+    own_index = xp.arange(N, dtype=index_dtype(xp, device), device=device)[None, :]
     ancestors = xp.where(resample_mask[:, None], systematic(backend, log_weights, key), own_index)
     tree = tree_map(lambda a: take_rows(a, ancestors), tree)
     return tree, xp.where(resample_mask[:, None], xp.zeros_like(log_weights), log_weights)
