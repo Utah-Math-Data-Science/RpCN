@@ -8,7 +8,7 @@ from hypothesis import settings
 from ttg import EDM, RectifiedFlow, VPLinear
 from ttg.backend import StrictBackend
 from ttg.ops import importable
-from ttg.testing.strategies import elems, leading, u_pair, xps_for  # noqa: F401  (re-exported for tests)
+from ttg.testing.strategies import element_bounds, leading_shape, u_pair, xps_for  # noqa: F401  (re-exported for tests)
 
 settings.register_profile("default", deadline=None, max_examples=50)   # JAX compile time breaks deadlines
 settings.register_profile("ci", deadline=None, max_examples=200, derandomize=True)
@@ -38,13 +38,13 @@ def available_backends():              # strict always; jax (with jax_enable_x64
 BACKENDS = available_backends()
 SCHEDULES = [VPLinear, EDM, RectifiedFlow]   # constructors take no arguments; defaults as in §5
 
-backends = pytest.mark.parametrize("bk", BACKENDS, ids=str)
+backends = pytest.mark.parametrize("backend", BACKENDS, ids=str)
 schedules = pytest.mark.parametrize("make_schedule", SCHEDULES, ids=lambda c: c.__name__)
 
 
-def eager(bk):
+def eager(backend):
     """Counting and duplicate tests run eagerly: under jit, Python side effects run once per trace."""
-    if bk.name == "jax":
+    if backend.name == "jax":
         import jax
 
         return jax.disable_jit()

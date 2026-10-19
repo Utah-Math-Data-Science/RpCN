@@ -11,9 +11,9 @@ _SEED_HIGH = 2**62
 
 
 def _generator(key, device):
-    g = torch.Generator(device=device if device is not None else "cpu")
-    g.manual_seed(int(key))
-    return g
+    generator = torch.Generator(device=device if device is not None else "cpu")
+    generator.manual_seed(int(key))
+    return generator
 
 
 class TorchBackend(EagerControl):
@@ -63,22 +63,22 @@ class TorchBackend(EagerControl):
         """
         return torch.tensor(seed, dtype=torch.int64)
 
-    def split(self, key, n):
-        """Split `key` into `n` keys: `n` int64 seeds drawn from a CPU generator seeded with `key`.
+    def split(self, key, n_keys):
+        """Split `key` into `n_keys` keys: `n_keys` int64 seeds drawn from a CPU generator seeded with `key`.
 
         Parameters
         ----------
         key : torch.Tensor
             An int64 seed.
-        n : int
+        n_keys : int
             Number of keys.
 
         Returns
         -------
         torch.Tensor
-            `n` int64 seeds, shape ``[n]``, on CPU.
+            `n_keys` int64 seeds, shape ``[n_keys]``, on CPU.
         """
-        return torch.randint(0, _SEED_HIGH, (n,), generator=_generator(key, "cpu"), dtype=torch.int64)
+        return torch.randint(0, _SEED_HIGH, (n_keys,), generator=_generator(key, "cpu"), dtype=torch.int64)
 
     def normal(self, key, shape, dtype, device=None):
         """Draw standard normal samples with ``torch.randn``, from a generator on `device` seeded with `key`.

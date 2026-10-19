@@ -4,40 +4,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ops import device, logsumexp, namespace, take_rows, tree_map
+from .ops import device_of, logsumexp, namespace, take_rows, tree_map
 
 
-def ess(log_w):                                   # [I, N] -> [I]
+def ess(log_weights):                             # [I, N] -> [I]
     """Effective sample size of each instance's weights, ``1 / sum_n w_n**2`` with normalised ``w``.
 
     Parameters
     ----------
-    log_w : array
+    log_weights : array
         ``[I, N]`` unnormalised log-weights.
 
     Returns
     -------
     array
-        ``[I]``, in ``[1, N]``, in the dtype of `log_w`.
+        ``[I]``, in ``[1, N]``, in the dtype of `log_weights`.
     """
-    xp = namespace(log_w)
-    lw = log_w - logsumexp(log_w, axis=1, keepdims=True)
-    return xp.exp(-logsumexp(2 * lw, axis=1))
+    xp = namespace(log_weights)
+    log_weights_normalized = log_weights - logsumexp(log_weights, axis=1, keepdims=True)
+    return xp.exp(-logsumexp(2 * log_weights_normalized, axis=1))
 
 
-def _cdf(log_w):                                  # [I, N] -> [I, N]
-    xp = namespace(log_w)
-    return xp.cumulative_sum(xp.exp(log_w - logsumexp(log_w, axis=1, keepdims=True)), axis=1)
+def _cdf(log_weights):                            # [I, N] -> [I, N]
+    xp = namespace(log_weights)
+    return xp.cumulative_sum(xp.exp(log_weights - logsumexp(log_weights, axis=1, keepdims=True)), axis=1)
 
 
-def systematic(bk, log_w, key):                   # [I, N] -> idx [I, N]
+def systematic(backend, log_weights, key):                   # [I, N] -> ancestors [I, N]
     """Systematic resampling indices, independently per instance.
 
     Parameters
     ----------
-    bk : Backend
+    backend : Backend
         Supplies the one uniform draw per instance.
-    log_w : array
+    log_weights : array
         ``[I, N]`` unnormalised log-weights.
     key : key
         Random key.
@@ -52,26 +52,28 @@ def systematic(bk, log_w, key):                   # [I, N] -> idx [I, N]
     Costs O(N**2) memory and time per instance (a comparison against the whole CDF), which avoids a 2-D
     searchsorted.
     """
-    xp = namespace(log_w)
-    I, N = log_w.shape
-    dev = device(log_w)
-    cdf = _cdf(log_w)
-    u = (bk.uniform(key, (I, 1), cdf.dtype, device=dev) + xp.arange(N, dtype=cdf.dtype, device=dev)[None, :]) / N
-    idx = xp.sum(xp.astype(cdf[:, None, :] < u[:, :, None], xp.int64), axis=2)   # O(N^2); avoids 2-D searchsorted
-    return xp.clip(idx, max=N - 1)
+    xp = namespace(log_weights)
+    I, N = log_weights.shape
+    device = device_of(log_weights)
+    cdf = _cdf(log_weights)
+    positions = (backend.uniform(key, (I, 1), cdf.dtype, device=device)
+                 + xp.arange(N, dtype=cdf.dtype, device=device)[None, :]) / N
+    # O(N^2); avoids 2-D searchsorted
+    ancestors = xp.sum(xp.astype(cdf[:, None, :] < positions[:, :, None], xp.int64), axis=2)
+    return xp.clip(ancestors, max=N - 1)
 
 
-def categorical(bk, log_w, key):                  # [I, N] -> idx [I]
+def categorical(backend, log_weights, key):                  # [I, N] -> ancestors [I]
     """Draw one index per instance from its normalised weights, by inverting the CDF.
 
-    Use it to pick a single particle per instance, e.g. from an `smc` run's final ``log_w``. (A fixed column of
-    `systematic` is not such a draw: column j always falls in the j-th 1/N stratum of the CDF.)
+    Use it to pick a single particle per instance, e.g. from an `smc` run's final ``log_weights``. (A fixed column
+    of `systematic` is not such a draw: column j always falls in the j-th 1/N stratum of the CDF.)
 
     Parameters
     ----------
-    bk : Backend
+    backend : Backend
         Supplies the one uniform draw per instance.
-    log_w : array
+    log_weights : array
         ``[I, N]`` unnormalised log-weights.
     key : key
         Random key.
@@ -81,26 +83,26 @@ def categorical(bk, log_w, key):                  # [I, N] -> idx [I]
     array
         ``[I]`` int64 indices in ``[0, N)``.
     """
-    xp = namespace(log_w)
-    I, N = log_w.shape
-    cdf = _cdf(log_w)
-    u = bk.uniform(key, (I, 1), cdf.dtype, device=device(log_w))
-    idx = xp.sum(xp.astype(cdf < u, xp.int64), axis=1)
-    return xp.clip(idx, max=N - 1)
+    xp = namespace(log_weights)
+    I, N = log_weights.shape
+    cdf = _cdf(log_weights)
+    uniform = backend.uniform(key, (I, 1), cdf.dtype, device=device_of(log_weights))
+    ancestors = xp.sum(xp.astype(cdf < uniform, xp.int64), axis=1)
+    return xp.clip(ancestors, max=N - 1)
 
 
-def masked_resample(bk, tree, log_w, do, key):    # do: [I] bool
-    """Resample the instances selected by `do`; leave the others unchanged. Branch-free.
+def masked_resample(backend, tree, log_weights, resample_mask, key):    # resample_mask: [I] bool
+    """Resample the instances selected by `resample_mask`; leave the others unchanged. Branch-free.
 
     Parameters
     ----------
-    bk : Backend
+    backend : Backend
         Randomness for `systematic`.
     tree : pytree
         Arrays with leading axes ``[I, N]`` (e.g. a ``(Record, State)`` pair), gathered along axis 1.
-    log_w : array
+    log_weights : array
         ``[I, N]`` unnormalised log-weights.
-    do : array
+    resample_mask : array
         ``[I]`` bool: which instances to resample.
     key : key
         Random key.
@@ -108,30 +110,30 @@ def masked_resample(bk, tree, log_w, do, key):    # do: [I] bool
     Returns
     -------
     tree : pytree
-        Resampled where `do`, unchanged elsewhere.
-    log_w : array
-        ``[I, N]``: zeros where `do`, `log_w` elsewhere.
+        Resampled where `resample_mask`, unchanged elsewhere.
+    log_weights : array
+        ``[I, N]``: zeros where `resample_mask`, `log_weights` elsewhere.
     """
-    xp = namespace(log_w, do)
-    I, N = log_w.shape
-    keep = xp.arange(N, dtype=xp.int64, device=device(log_w))[None, :]
-    idx = xp.where(do[:, None], systematic(bk, log_w, key), keep)
-    tree = tree_map(lambda a: take_rows(a, idx), tree)
-    return tree, xp.where(do[:, None], xp.zeros_like(log_w), log_w)
+    xp = namespace(log_weights, resample_mask)
+    I, N = log_weights.shape
+    own_index = xp.arange(N, dtype=xp.int64, device=device_of(log_weights))[None, :]
+    ancestors = xp.where(resample_mask[:, None], systematic(backend, log_weights, key), own_index)
+    tree = tree_map(lambda a: take_rows(a, ancestors), tree)
+    return tree, xp.where(resample_mask[:, None], xp.zeros_like(log_weights), log_weights)
 
 
 @dataclass(frozen=True)
-class Never:                                      # k: step index, possibly traced
+class Never:                                      # step_index: possibly traced
     """Resampling policy: never resample. Required when axis 1 is a temperature ladder (RpCN)."""
 
-    def should_resample(self, log_w, k):
+    def should_resample(self, log_weights, step_index):
         """All False.
 
         Parameters
         ----------
-        log_w : array
+        log_weights : array
             ``[I, N]`` log-weights.
-        k : int or array
+        step_index : int or array
             Step index, possibly traced.
 
         Returns
@@ -139,61 +141,63 @@ class Never:                                      # k: step index, possibly trac
         array
             ``[I]`` bool.
         """
-        xp = namespace(log_w)
-        return xp.zeros(log_w.shape[0], dtype=xp.bool, device=device(log_w))
+        xp = namespace(log_weights)
+        return xp.zeros(log_weights.shape[0], dtype=xp.bool, device=device_of(log_weights))
 
 
 @dataclass(frozen=True)
 class Every:
-    """Resampling policy: resample every instance on steps whose index is a multiple of `n`.
+    """Resampling policy: resample every instance on steps whose index is a multiple of `interval`.
 
     Parameters
     ----------
-    n : int
+    interval : int
         Stride in steps.
     """
 
-    n: int
+    interval: int
 
-    def should_resample(self, log_w, k):
-        """``k % n == 0``, broadcast to every instance.
+    def should_resample(self, log_weights, step_index):
+        """``step_index % interval == 0``, broadcast to every instance.
 
         Parameters
         ----------
-        log_w : array
+        log_weights : array
             ``[I, N]`` log-weights.
-        k : int or array
-            Step index, possibly traced. `smc` resamples before advancing to grid point `k`, ``k = 1 .. S-1``.
+        step_index : int or array
+            Step index, possibly traced. `smc` resamples before advancing to grid point `step_index`,
+            ``step_index = 1 .. S-1``.
 
         Returns
         -------
         array
             ``[I]`` bool.
         """
-        xp = namespace(log_w)
-        return xp.broadcast_to(xp.asarray(k % self.n == 0, device=device(log_w)), (log_w.shape[0],))
+        xp = namespace(log_weights)
+        return xp.broadcast_to(xp.asarray(step_index % self.interval == 0, device=device_of(log_weights)),
+                               (log_weights.shape[0],))
 
 
 @dataclass(frozen=True)
 class ESSBelow:
-    """Resampling policy: resample the instances whose effective sample size is below ``frac * N``.
+    """Resampling policy: resample the instances whose effective sample size is below ``fraction * N``.
 
     Parameters
     ----------
-    frac : float
+    fraction : float
         Threshold as a fraction of the particle count N, e.g. 0.5.
     """
 
-    frac: float
+    fraction: float
 
-    def should_resample(self, log_w, k):
-        """``ess(log_w) < frac * N`` per instance.
+    def should_resample(self, log_weights, step_index):
+        """``ess(log_weights) < fraction * N`` per instance.
 
         Parameters
         ----------
-        log_w : array
+        log_weights : array
             ``[I, N]`` log-weights.
-        k : int or array
+        step_index : int or array
             Step index (unused).
 
         Returns
@@ -201,4 +205,4 @@ class ESSBelow:
         array
             ``[I]`` bool.
         """
-        return ess(log_w) < self.frac * log_w.shape[1]
+        return ess(log_weights) < self.fraction * log_weights.shape[1]

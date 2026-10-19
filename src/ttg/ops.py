@@ -28,8 +28,8 @@ def pytree(cls):
     if jax_available():
         import jax
 
-        data = [f.name for f in fields(cls) if not f.metadata.get("static")]
-        meta = [f.name for f in fields(cls) if f.metadata.get("static")]
+        data = [dataclass_field.name for dataclass_field in fields(cls) if not dataclass_field.metadata.get("static")]
+        meta = [dataclass_field.name for dataclass_field in fields(cls) if dataclass_field.metadata.get("static")]
         jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=meta)
     return cls
 
@@ -38,19 +38,20 @@ def static(default=MISSING):
     return field(default=default, metadata={"static": True})
 
 
-def tree_map(f, *trees):
+def tree_map(fn, *trees):
     """Pure Python map over dataclasses, tuples, lists and dicts. None leaves stay None; static fields are kept."""
-    t = trees[0]
-    if t is None:
+    first = trees[0]
+    if first is None:
         return None
-    if is_dataclass(t):
-        return replace(t, **{fl.name: tree_map(f, *(getattr(x, fl.name) for x in trees))
-                             for fl in fields(t) if not fl.metadata.get("static")})
-    if isinstance(t, (tuple, list)):
-        return type(t)(tree_map(f, *xs) for xs in zip(*trees))
-    if isinstance(t, dict):
-        return {k: tree_map(f, *(x[k] for x in trees)) for k in t}
-    return f(*trees)
+    if is_dataclass(first):
+        return replace(first, **{dataclass_field.name: tree_map(fn, *(getattr(tree, dataclass_field.name)
+                                                                      for tree in trees))
+                                 for dataclass_field in fields(first) if not dataclass_field.metadata.get("static")})
+    if isinstance(first, (tuple, list)):
+        return type(first)(tree_map(fn, *children) for children in zip(*trees))
+    if isinstance(first, dict):
+        return {k: tree_map(fn, *(tree[k] for tree in trees)) for k in first}
+    return fn(*trees)
 
 
 def leaves(tree):
@@ -63,11 +64,11 @@ def leaves(tree):
 prod = math.prod
 
 
-def axis1_size(tree):
+def n_levels(tree):
     return leaves(tree)[0].shape[1]
 
 
-def device(a):
+def device_of(a):
     return array_api_compat.device(a)
 
 
@@ -79,20 +80,20 @@ def bcast(v, like):
 
 def logsumexp(a, axis, keepdims=False):
     xp = namespace(a)
-    m = xp.max(a, axis=axis, keepdims=True)
-    m = xp.where(xp.isfinite(m), m, 0.0)
-    out = m + xp.log(xp.sum(xp.exp(a - m), axis=axis, keepdims=True))
+    shift = xp.max(a, axis=axis, keepdims=True)
+    shift = xp.where(xp.isfinite(shift), shift, 0.0)
+    out = shift + xp.log(xp.sum(xp.exp(a - shift), axis=axis, keepdims=True))
     return out if keepdims else xp.squeeze(out, axis=axis)
 
 
-def flatten_leading(a, k):
+def flatten_leading(a, n_leading):
     xp = namespace(a)
-    return xp.reshape(a, (-1,) + tuple(a.shape[k:]))
+    return xp.reshape(a, (-1,) + tuple(a.shape[n_leading:]))
 
 
-def unflatten_leading(a, lead):
+def unflatten_leading(a, leading_shape):
     xp = namespace(a)
-    return xp.reshape(a, tuple(lead) + tuple(a.shape[1:]))
+    return xp.reshape(a, tuple(leading_shape) + tuple(a.shape[1:]))
 
 
 def take_rows(a, idx):
@@ -100,65 +101,67 @@ def take_rows(a, idx):
     xp = namespace(a, idx)
     I, N = idx.shape
     flat = flatten_leading(a, 2)
-    flat_idx = xp.reshape(xp.arange(I, dtype=idx.dtype, device=device(idx))[:, None] * N + idx, (-1,))
+    flat_idx = xp.reshape(xp.arange(I, dtype=idx.dtype, device=device_of(idx))[:, None] * N + idx, (-1,))
     return unflatten_leading(xp.take(flat, flat_idx, axis=0), (I, N))
 
 
 def take_levels(tree, levels):
     """Select a static list of positions on axis 1."""
     runs = []                                    # maximal runs of consecutive levels, as (start, stop)
-    for m in levels:
-        if runs and runs[-1][1] == m:
-            runs[-1] = (runs[-1][0], m + 1)
+    for level in levels:
+        if runs and runs[-1][1] == level:
+            runs[-1] = (runs[-1][0], level + 1)
         else:
-            runs.append((m, m + 1))
+            runs.append((level, level + 1))
 
     def take(a):                                 # slices, not an index array: no host-to-device copy (a GPU sync)
-        parts = [a[:, lo:hi, ...] for lo, hi in runs]
+        parts = [a[:, start:stop, ...] for start, stop in runs]
         return parts[0] if len(parts) == 1 else namespace(a).concat(parts, axis=1)
 
     return tree_map(take, tree)
 
 
-def put_levels(tree, levels, sub):
-    """Write `sub` (axis 1 = len(levels)) into positions `levels` of `tree`; rebuilds axis 1 statically."""
+def put_levels(tree, levels, values):
+    """Write `values` (axis 1 = len(levels)) into positions `levels` of `tree`; rebuilds axis 1 statically."""
     levels = list(levels)
 
     def put(a, b):
         xp = namespace(a, b)
-        cols = [b[:, levels.index(m), ...] if m in levels else a[:, m, ...] for m in range(a.shape[1])]
-        return xp.stack(cols, axis=1)
+        columns = [b[:, levels.index(level), ...] if level in levels else a[:, level, ...]
+                   for level in range(a.shape[1])]
+        return xp.stack(columns, axis=1)
 
-    return tree_map(put, tree, sub)
+    return tree_map(put, tree, values)
 
 
 def tree_where(mask, a, b):
     """mask [I] or [I, P]; a and b must have identical structure."""
-    def where(u, v):
-        xp = namespace(mask, u, v)
-        return xp.where(bcast(mask, u), u, v)
+    def where(on_true, on_false):
+        xp = namespace(mask, on_true, on_false)
+        return xp.where(bcast(mask, on_true), on_true, on_false)
 
     return tree_map(where, a, b)
 
 
 def stack_levels(levels):
     """List of trees with axis 1 of size 1 -> one tree."""
-    def cat(*a):
+    def concat_levels(*a):
         return namespace(*a).concat(a, axis=1)
 
-    return tree_map(cat, *levels)
+    return tree_map(concat_levels, *levels)
 
 
-def steps_first(t_grid, lead):
-    """[S] or [*lead, S] -> [S, *lead]."""
+def steps_first(t_grid, leading_shape):
+    """[S] or [*leading_shape, S] -> [S, *leading_shape]."""
     xp = namespace(t_grid)
-    lead = tuple(lead)
+    leading_shape = tuple(leading_shape)
     if t_grid.ndim == 1:
-        return xp.broadcast_to(xp.reshape(t_grid, (-1,) + (1,) * len(lead)), (t_grid.shape[0], *lead))
+        return xp.broadcast_to(xp.reshape(t_grid, (-1,) + (1,) * len(leading_shape)),
+                               (t_grid.shape[0], *leading_shape))
     return xp.moveaxis(t_grid, -1, 0)
 
 
-def lead_shape(start):
+def leading_shape_of(start):
     """Gaussian -> var.shape; Point / Record -> t.shape."""
     from .kernels import Gaussian
 

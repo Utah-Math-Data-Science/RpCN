@@ -18,8 +18,8 @@ from ttg.testing import toy_evaluate
 
 pytestmark = pytest.mark.slow
 
-FAST = [bk for bk in BACKENDS if bk.name in ("jax", "torch")]
-BK = next((bk for bk in FAST if bk.name == "jax"), FAST[0] if FAST else None)
+FAST = [backend for backend in BACKENDS if backend.name in ("jax", "torch")]
+BACKEND = next((backend for backend in FAST if backend.name == "jax"), FAST[0] if FAST else None)
 SEEDS = 8
 LAM = 2.0
 S = 50
@@ -27,7 +27,7 @@ S = 50
 
 def compiled(f):
     """jit on JAX; plain eager call on PyTorch."""
-    if BK.name == "jax":
+    if BACKEND.name == "jax":
         import jax
 
         return jax.jit(f)
@@ -35,7 +35,7 @@ def compiled(f):
 
 
 def setup():
-    xp, sch = BK.xp, VPLinear()
+    xp, sch = BACKEND.xp, VPLinear()
     mu = xp.asarray([0.5, -0.5], dtype=xp.float64)
     w = xp.asarray([1.0, 0.0], dtype=xp.float64)
     ev = toy_evaluate(mu, 1.0, w, sch)
@@ -53,7 +53,7 @@ def softmax_mean(log_w, x):
 
 def over_seeds(estimate):
     """estimate(key) -> [2]; returns (mean, standard error) across the seeds."""
-    vals = np.stack([np.asarray(estimate(BK.key(1000 + s))) for s in range(SEEDS)])
+    vals = np.stack([np.asarray(estimate(BACKEND.key(1000 + s))) for s in range(SEEDS)])
     return vals.mean(axis=0), vals.std(axis=0, ddof=1) / math.sqrt(SEEDS)
 
 
@@ -66,8 +66,9 @@ def reference(lam=LAM):
         xp, sch, ev, u, P = setup()
 
         def run(key):
-            out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), u, bk=BK, evaluate=ev, schedule=sch,
-                      target=P, proposal=P, potential=Zero(), policy=Never(), out_needs={Feature.REWARD}, key=key)
+            out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), u, backend=BACKEND, evaluate=ev,
+                      schedule=sch, target=P, proposal=P, potential=Zero(), policy=Never(), out_needs={Feature.REWARD},
+                      key=key)
             return lam * out.final.reward, out.final.x
 
         run = compiled(run)
@@ -79,10 +80,10 @@ def fk_run(potential, proposal=None, policy=Every(5), move=None, move_at=lambda 
     xp, sch, ev, u, P = setup()
 
     def run(key):
-        out = smc(sch.prior((I, N), (2,), xp=xp, dtype=xp.float64), u, bk=BK, evaluate=ev, schedule=sch, target=P,
-                  proposal=P if proposal is None else proposal, potential=potential, policy=policy, move=move,
+        out = smc(sch.prior((I, N), (2,), xp=xp, dtype=xp.float64), u, backend=BACKEND, evaluate=ev, schedule=sch,
+                  target=P, proposal=P if proposal is None else proposal, potential=potential, policy=policy, move=move,
                   move_at=move_at, key=key)
-        return out.log_w, out.final.x
+        return out.log_weights, out.final.x
 
     run = compiled(run)
     return over_seeds(lambda key: softmax_mean(*run(key)))
@@ -95,7 +96,7 @@ def check(name, est, ref, slack=0.0):
     return bool(np.all(np.abs(m - m_ref) <= tol))
 
 
-needs_fast = pytest.mark.skipif(BK is None, reason="§18.4 runs in float64 on JAX or PyTorch")
+needs_fast = pytest.mark.skipif(BACKEND is None, reason="§18.4 runs in float64 on JAX or PyTorch")
 
 
 @needs_fast
@@ -111,14 +112,14 @@ def test_fk_steering(Pot, lam, policy, N):
 @needs_fast
 def test_das():
     xp, sch, ev, u, P = setup()
-    lam = das_lambda(sch.time(u), gamma=0.008, alpha_kl=0.5)
+    lam = das_lambda(sch.time(u), growth=0.008, alpha_kl=0.5)
     est = fk_run(FKDiff(lam), proposal=Guided(P, tilt(lam)), policy=ESSBelow(0.5))
     assert check("DAS", est, reference())
 
 
 @needs_fast
 def test_fk_with_pcn_moves():
-    est = fk_run(FKDiff(constant(LAM)), move=PCN(n_steps=2, step=constant(0.3)), move_at=lambda k: k % 5 == 0)
+    est = fk_run(FKDiff(constant(LAM)), move=PCN(n_proposals=2, step_size=constant(0.3)), move_at=lambda k: k % 5 == 0)
     assert check("FK + pCN", est, reference())
 
 
@@ -130,9 +131,9 @@ def test_rpcn():
     steps = xp.full((K + 1,), 0.95, dtype=xp.float64)      # small steps accept ~100% and don't mix
 
     def run(key):
-        out = smc(sch.prior((2**12, K + 1), (2,), xp=xp, dtype=xp.float64), u, bk=BK, evaluate=ev, schedule=sch,
-                  target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
-                  move=PCN(n_steps=20, step=ladder(steps), pairs=EvenOdd()), key=key)
+        out = smc(sch.prior((2**12, K + 1), (2,), xp=xp, dtype=xp.float64), u, backend=BACKEND, evaluate=ev,
+                  schedule=sch, target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
+                  move=PCN(n_proposals=20, step_size=ladder(steps), pairs=EvenOdd()), key=key)
         return out.final.x[:, K, ...]
 
     run = compiled(run)
@@ -145,9 +146,10 @@ def crepe_cfg(u_levels=(0.0, 0.25, 0.5, 0.75, 1.0)):
     lam = level_lambda(sch.time(xp.asarray(u_levels, dtype=xp.float64)), beta=LAM, rho=1.0)
     noise = Noising(sch)
     B_P = EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD)
-    cfg = CREPEConfig(u_levels=u_levels, K=10, F_P=noise, F_Q=noise, B_P=B_P, B_Q=Guided(B_P, tilt(lam)), lam=lam,
-                      pairs=EvenOdd(),
-                      local_move=LangevinMove(Guided(Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), tilt(lam, 0.5))),
+    cfg = CREPEConfig(u_levels=u_levels, steps_per_gap=10, model_noising=noise, proposal_noising=noise,
+                      model_denoising=B_P, proposal_denoising=Guided(B_P, tilt(lam)), lam=lam, pairs=EvenOdd(),
+                      local_move=LangevinMove(Guided(Langevin(step_size=lambda t: 0.01 * sch.std(t) ** 2),
+                                                     tilt(lam, 0.5))),
                       local_levels=tuple(range(len(u_levels) - 1)))
     return cfg
 
@@ -157,8 +159,8 @@ def crepe_estimate():
     cfg = crepe_cfg()
 
     def run(key):                                             # u_0 = 0: no finish, log_w == 0
-        out, _ = crepe_sample(cfg, 2**10, (2,), 300, bk=BK, evaluate=ev, schedule=sch, dtype=xp.float64, key=key,
-                              burn_in=100)
+        out, _ = crepe_sample(cfg, 2**10, (2,), 300, backend=BACKEND, evaluate=ev, schedule=sch, dtype=xp.float64,
+                              key=key, burn_in=100)
         return out.final.x
 
     run = compiled(run)
@@ -167,23 +169,23 @@ def crepe_estimate():
 
 def crepe_grid(cfg, xp):
     """CREPE's own grid: the fine grids of every gap concatenated, u_M down to u_0, [M K + 1]."""
-    gaps = [xp.flip(fine_grid(cfg, m, xp=xp, dtype=xp.float64), axis=0) for m in reversed(range(cfg.M))]
+    gaps = [xp.flip(fine_grid(cfg, m, xp=xp, dtype=xp.float64), axis=0) for m in reversed(range(cfg.n_gaps))]
     return xp.concat([gaps[0]] + [g[1:] for g in gaps[1:]])
 
 
 @needs_fast
 def test_crepe():
-    """The reference is the plain sampler with cfg.B_P on CREPE's own grid (the fine grids, level M down to 0),
-    reweighted by exp(lambda_0 r_hat) at level 0."""
+    """The reference is the plain sampler with cfg.model_denoising on CREPE's own grid (the fine grids, level M down
+    to 0), reweighted by exp(lambda_0 r_hat) at level 0."""
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg()
     grid = crepe_grid(cfg, xp)
     lam0 = cfg.lam(sch.time(xp.asarray(cfg.u_levels[0], dtype=xp.float64)))
 
     def run(key):
-        out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, bk=BK, evaluate=ev, schedule=sch,
-                  target=cfg.B_P, proposal=cfg.B_P, potential=Zero(), policy=Never(),
-                  out_needs={Feature.REWARD}, key=key)
+        out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, backend=BACKEND, evaluate=ev,
+                  schedule=sch, target=cfg.model_denoising, proposal=cfg.model_denoising, potential=Zero(),
+                  policy=Never(), out_needs={Feature.REWARD}, key=key)
         return lam0 * out.final.reward, out.final.x
 
     run = compiled(run)
@@ -193,24 +195,24 @@ def test_crepe():
 @needs_fast
 def test_crepe_finish():
     """u_0 = 0.25, through crepe_sample: thin=4, burn_in=100, then the exact finish of the 300 emits per chain.
-    The reference is the plain sampler with cfg.B_P on CREPE's grid and then the tail grid, reweighted by
+    The reference is the plain sampler with cfg.model_denoising on CREPE's grid and then the tail grid, reweighted by
     exp(2 r_hat) at u = 0."""
     xp, sch, ev, u, P = setup()
     cfg = crepe_cfg((0.25, 0.5, 0.75, 1.0))
 
     def est(key):
-        out, _ = crepe_sample(cfg, 2**10, (2,), 300, n_tail=10, exact=True, bk=BK, evaluate=ev, schedule=sch,
+        out, _ = crepe_sample(cfg, 2**10, (2,), 300, n_tail=10, exact=True, backend=BACKEND, evaluate=ev, schedule=sch,
                               dtype=xp.float64, key=key, thin=4, burn_in=100)   # L = 4: 300 emits per chain
-        return out.log_w, out.final.x
+        return out.log_weights, out.final.x
 
     est = compiled(est)
     tail = tail_grid(cfg, 10, xp=xp, dtype=xp.float64)
     grid = xp.concat([crepe_grid(cfg, xp), tail[1:]])          # u_M down to u_0, then down to 0
 
     def ref(key):
-        out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, bk=BK, evaluate=ev, schedule=sch,
-                  target=cfg.B_P, proposal=cfg.B_P, potential=Zero(), policy=Never(),
-                  out_needs={Feature.REWARD}, key=key)
+        out = smc(sch.prior((1, 2**16), (2,), xp=xp, dtype=xp.float64), grid, backend=BACKEND, evaluate=ev,
+                  schedule=sch, target=cfg.model_denoising, proposal=cfg.model_denoising, potential=Zero(),
+                  policy=Never(), out_needs={Feature.REWARD}, key=key)
         return LAM * out.final.reward, out.final.x
 
     ref = compiled(ref)

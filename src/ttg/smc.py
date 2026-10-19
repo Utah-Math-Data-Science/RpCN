@@ -8,7 +8,7 @@ from typing import Any
 from .evaluate import evaluate_rows, start_record
 from .kernels import Gaussian
 from .moves import MoveContext
-from .ops import device, lead_shape, namespace, steps_first
+from .ops import device_of, leading_shape_of, namespace, steps_first
 from .records import Feature, Point, Record
 from .resample import masked_resample
 
@@ -24,16 +24,16 @@ class SMCResult:
     final : Record
         Particles at the last grid point, shape [I, N, ...]. Carries the features required by the potential and
         the move, plus `out_needs`.
-    log_w : array
+    log_weights : array
         Unnormalised log-weights of the final particles, shape [I, N]. Normalise over axis 1 (per instance).
     """
 
     final: Record          # [I, N, ...], carries potential.requires | move.requires | out_needs
-    log_w: Array           # [I, N] unnormalised
+    log_weights: Array     # [I, N] unnormalised
 
 
-def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, policy,
-        move=None, move_at=lambda k: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
+def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potential, policy,
+        move=None, move_at=lambda step_index: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """Run sequential Monte Carlo along a grid of times: FK steering, DAS, RpCN, and CREPE's paths.
 
     Starting from `start` at the first grid point, each step k = 1, ..., S-1 optionally resamples (per instance,
@@ -51,7 +51,7 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
     u_grid : array
         Schedule coordinates, shape [S] (shared by all rows) or [I, N, S] (per row), S >= 2. Mapped to times
         with ``schedule.time``. May be increasing or decreasing; for sampling, run from 1 (noise) to 0 (data).
-    bk : Backend
+    backend : Backend
         Randomness and control flow (scan, cond).
     evaluate : Callable[[array, array, frozenset], Record]
         The model, e.g. from `make_evaluate_torch` or `make_evaluate_jax`.
@@ -76,7 +76,7 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
         Extra features to evaluate at the last grid point. Default ``{Feature.X0}``, the final denoised estimate,
         which costs nothing extra because that point is evaluated anyway.
     key : backend key
-        Root random key, e.g. ``bk.key(0)``.
+        Root random key, e.g. ``backend.key(0)``.
 
     Returns
     -------
@@ -90,54 +90,67 @@ def smc(start, u_grid, *, bk, evaluate, schedule, target, proposal, potential, p
     PartialRecord
         If `start` is a Record lacking features the run needs.
     """
-    x_like = start.mean if isinstance(start, Gaussian) else start.x
-    xp = namespace(x_like)
-    dtype, dev = x_like.dtype, device(x_like)                       # §4.1: run dtype and device
-    t_grid = schedule.time(xp.asarray(u_grid, dtype=dtype, device=dev))   # I5: the only schedule call
-    t_steps = steps_first(t_grid, lead_shape(start))                 # -> [S, I, N]
-    S = t_steps.shape[0]
-    if S < 2:
+    start_x = start.mean if isinstance(start, Gaussian) else start.x
+    xp = namespace(start_x)
+    dtype, device = start_x.dtype, device_of(start_x)               # §4.1: run dtype and device
+    t_grid = schedule.time(xp.asarray(u_grid, dtype=dtype, device=device))   # I5: the only schedule call
+    t_by_step = steps_first(t_grid, leading_shape_of(start))         # -> [S, I, N]
+    n_points = t_by_step.shape[0]
+    if n_points < 2:
         raise ValueError("smc needs S >= 2 grid points")
-    mv = move.requires if move is not None else frozenset()
-    need_mid = target.requires | proposal.requires | potential.requires | mv     # I4
-    need_end = potential.requires | mv | frozenset(out_needs)
-    ev_mid = lambda p: evaluate_rows(evaluate, p, need_mid, bk)
-    ev_end = lambda p: evaluate_rows(evaluate, p, need_end, bk)
-    k_start, k_mv0, k_steps = bk.split(key, 3)
+    move_needs = move.requires if move is not None else frozenset()
+    step_needs = target.requires | proposal.requires | potential.requires | move_needs   # I4
+    last_step_needs = potential.requires | move_needs | frozenset(out_needs)
+    evaluate_step = lambda point: evaluate_rows(evaluate, point, step_needs, backend)
+    evaluate_last_step = lambda point: evaluate_rows(evaluate, point, last_step_needs, backend)
+    key_start, key_first_move, key_steps = backend.split(key, 3)
 
-    def apply_move(ctx, count, k, ev, last, key):                    # -> (ctx, count); no-op without a move
+    def apply_move(ctx, n_moves, step_index, evaluate_point, is_last, key):   # -> (ctx, n_moves); no-op without a move
         if move is None:
-            return ctx, count
-        fire = lambda c: (move(c[0], ev=ev, potential=potential, last=last, count=c[1], key=key, bk=bk),
-                          c[1] + 1)
-        return bk.cond(move_at(k), fire, lambda c: c, (ctx, count))
+            return ctx, n_moves
 
-    rec, ref = start_record(start, t_steps[0, ...], need_mid, evaluate, bk, k_start)
-    st = potential.init(rec)
-    log_w = potential.log_tilt(st)
-    count = xp.zeros((), dtype=xp.int32, device=dev)                 # moves fired so far in this run
-    if ref is not None:                                              # static: a move at t_N needs a reference
-        ctx, count = apply_move(MoveContext(rec, st, None, ref), count, 0, ev_mid, False, k_mv0)
-        rec, st = ctx.rec, ctx.st
+        def run_move(operand):
+            ctx, n_moves = operand
+            return (move(ctx, evaluate_point=evaluate_point, potential=potential, is_last=is_last,
+                         move_count=n_moves, key=key, backend=backend),
+                    n_moves + 1)
 
-    def advance(carry, t_next, k, key, ev, last):
-        rec, st, log_w, count = carry
-        k_res, k_prop, k_mv = bk.split(key, 3)
-        (rec, st), log_w = masked_resample(bk, (rec, st), log_w, policy.should_resample(log_w, k), k_res)
-        ref = target.at(rec, t_next)                                  # also the pCN reference
-        q = ref if proposal is target else proposal.at(rec, t_next)
-        x = q.sample(k_prop, bk)
+        return backend.cond(move_at(step_index), run_move, lambda operand: operand, (ctx, n_moves))
+
+    record, reference = start_record(start, t_by_step[0, ...], step_needs, evaluate, backend, key_start)
+    state = potential.init(record)
+    log_weights = potential.log_tilt(state)
+    n_moves = xp.zeros((), dtype=xp.int32, device=device)            # moves fired so far in this run
+    if reference is not None:                                        # static: a move at t_N needs a reference
+        ctx, n_moves = apply_move(MoveContext(record, state, None, reference), n_moves, 0, evaluate_step, False,
+                                  key_first_move)
+        record, state = ctx.record, ctx.potential_state
+
+    def advance(carry, t_next, step_index, key, evaluate_point, is_last):
+        record, state, log_weights, n_moves = carry
+        key_resample, key_propose, key_move = backend.split(key, 3)
+        (record, state), log_weights = masked_resample(backend, (record, state), log_weights,
+                                                       policy.should_resample(log_weights, step_index), key_resample)
+        target_dist = target.at(record, t_next)                       # also the pCN reference
+        proposal_dist = target_dist if proposal is target else proposal.at(record, t_next)
+        x = proposal_dist.sample(key_propose, backend)
         if proposal is not target:                                    # static
-            log_w = log_w + ref.log_ratio(q, x)                       # I9: never two log_probs
-        new = ev(Point(x, t_next))                                    # I1
-        st_new = potential.update(st, new, last=last)
-        log_w = log_w + potential.increment(st, st_new)               # I9: never a C difference
-        ctx, count = apply_move(MoveContext(new, st_new, st, ref), count, k, ev, last, k_mv)   # log_w unchanged
-        return ctx.rec, ctx.st, log_w, count
+            log_weights = log_weights + target_dist.log_ratio(proposal_dist, x)   # I9: never two log_probs
+        new_record = evaluate_point(Point(x, t_next))                 # I1
+        new_state = potential.update(state, new_record, is_last=is_last)
+        log_weights = log_weights + potential.increment(state, new_state)   # I9: never a C difference
+        ctx, n_moves = apply_move(MoveContext(new_record, new_state, state, target_dist), n_moves, step_index,
+                                  evaluate_point, is_last, key_move)  # log_weights unchanged
+        return ctx.record, ctx.potential_state, log_weights, n_moves
 
-    keys = bk.split(k_steps, S - 1)
-    body = lambda c, inp: (advance(c, inp[0], inp[1], inp[2], ev_mid, False), None)
-    steps = xp.arange(1, S - 1, dtype=xp.int32, device=dev)
-    carry, _ = bk.scan(body, (rec, st, log_w, count), (t_steps[1:-1, ...], steps, keys[:-1, ...]))   # S == 2: empty scan
-    rec, st, log_w, _ = advance(carry, t_steps[-1, ...], S - 1, keys[-1, ...], ev_end, True)
-    return SMCResult(final=rec, log_w=log_w)
+    def scan_step(carry, step_inputs):
+        t_next, step_index, step_key = step_inputs
+        return advance(carry, t_next, step_index, step_key, evaluate_step, False), None
+
+    step_keys = backend.split(key_steps, n_points - 1)
+    step_indices = xp.arange(1, n_points - 1, dtype=xp.int32, device=device)
+    carry, _ = backend.scan(scan_step, (record, state, log_weights, n_moves),
+                            (t_by_step[1:-1, ...], step_indices, step_keys[:-1, ...]))               # S == 2: empty scan
+    record, state, log_weights, _ = advance(carry, t_by_step[-1, ...], n_points - 1, step_keys[-1, ...],
+                                            evaluate_last_step, True)
+    return SMCResult(final=record, log_weights=log_weights)

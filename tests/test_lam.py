@@ -12,8 +12,8 @@ from ttg import level_lambda, piecewise_linear
 @given(M=st.integers(1, 4), beta=st.floats(0.1, 10.0), rho=st.floats(0.5, 3.0),
        below=st.lists(st.floats(0.0, 1.0), min_size=1, max_size=5),
        above=st.lists(st.floats(0.0, 1.0), min_size=1, max_size=5))
-def test_L1_level_lambda_holds_end_values(bk, M, beta, rho, below, above):
-    xp = bk.xp
+def test_L1_level_lambda_holds_end_values(backend, M, beta, rho, below, above):
+    xp = backend.xp
     t_levels = xp.asarray([0.2 + 0.6 * m / M for m in range(M + 1)], dtype=xp.float64)
     lam = level_lambda(t_levels, beta=beta, rho=rho)
     t_lo = xp.asarray([0.2 * b for b in below], dtype=xp.float64)          # t <= t_levels[0]
@@ -24,8 +24,8 @@ def test_L1_level_lambda_holds_end_values(bk, M, beta, rho, below, above):
 
 @backends
 @given(t=st.lists(st.floats(-1.0, 2.0), min_size=1, max_size=5))
-def test_L1_piecewise_linear_extrapolates_by_default(bk, t):
-    xp = bk.xp
+def test_L1_piecewise_linear_extrapolates_by_default(backend, t):
+    xp = backend.xp
     knots = xp.asarray([0.0, 0.5, 1.0], dtype=xp.float64)
     values = xp.asarray([1.0, 2.0, 4.0], dtype=xp.float64)
     tt = np.asarray(t)

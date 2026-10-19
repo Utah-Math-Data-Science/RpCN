@@ -47,14 +47,14 @@ class Schedule(Protocol):
         """Time derivative ``d s_t / dt``."""
         ...
 
-    def prior(self, lead, event, *, xp, dtype, device=None) -> Gaussian:
+    def prior(self, leading_shape, event_shape, *, xp, dtype, device=None) -> Gaussian:
         """Return the Gaussian at the noise end, ``u = 1``.
 
         Parameters
         ----------
-        lead : tuple of int
+        leading_shape : tuple of int
             Leading (row) shape, e.g. ``(I, N)``.
-        event : tuple of int
+        event_shape : tuple of int
             Event shape ``D``.
         xp : namespace
             Array namespace to create the arrays with.
@@ -66,7 +66,7 @@ class Schedule(Protocol):
         Returns
         -------
         Gaussian
-            Mean ``[*lead, *event]`` (zeros), variance ``[*lead]``.
+            Mean ``[*leading_shape, *event_shape]`` (zeros), variance ``[*leading_shape]``.
         """
         ...
 
@@ -74,12 +74,12 @@ class Schedule(Protocol):
         """Log signal-to-noise ratio ``log(m_t^2 / s_t^2)``."""
         ...
 
-    def log_snr_diff(self, s, t):    # lsnr_s - lsnr_t
-        """``log_snr(s) - log_snr(t)``, accurate for small gaps ``s - t``.
+    def log_snr_diff(self, t_a, t_b):    # lsnr(t_a) - lsnr(t_b)
+        """``log_snr(t_a) - log_snr(t_b)``, accurate for small gaps ``t_a - t_b``.
 
         Parameters
         ----------
-        s, t : array
+        t_a, t_b : array
             Same shape.
 
         Returns
@@ -98,29 +98,29 @@ class ScheduleDefaults:
         xp = namespace(t)
         return 2 * (xp.log(self.mean(t)) - xp.log(self.std(t)))
 
-    def log_snr_diff(self, s, t):    # accurate only to ~eps * |lsnr|; override for tiny gaps
-        """``log_snr(s) - log_snr(t)`` by direct subtraction.
+    def log_snr_diff(self, t_a, t_b):   # accurate only to ~eps * |lsnr|; override for tiny gaps
+        """``log_snr(t_a) - log_snr(t_b)`` by direct subtraction.
 
         Notes
         -----
         Accurate only to about ``eps * |log_snr|``; schedules override it to stay relatively accurate for tiny
         gaps.
         """
-        return self.log_snr(s) - self.log_snr(t)
+        return self.log_snr(t_a) - self.log_snr(t_b)
 
 
 @dataclass(frozen=True)
-class VPLinear(ScheduleDefaults):    # beta(t) = b0 + t (b1 - b0),  alpha_bar = exp(-int beta)
-    """Variance-preserving schedule with linear ``beta(t) = b0 + t (b1 - b0)``.
+class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  alpha_bar = exp(-int beta)
+    """Variance-preserving schedule with linear ``beta(t) = beta_0 + t (beta_1 - beta_0)``.
 
     ``m_t = sqrt(alpha_bar_t)``, ``s_t = sqrt(1 - alpha_bar_t)`` with ``alpha_bar_t = exp(-int_0^t beta)``;
     ``time`` is linear from ``t_min`` to ``t_max``. Prior: ``N(0, 1)``.
 
     Parameters
     ----------
-    b0 : float, default 0.1
+    beta_0 : float, default 0.1
         ``beta`` at ``t = 0``.
-    b1 : float, default 20.0
+    beta_1 : float, default 20.0
         ``beta`` at ``t = 1``.
     t_min : float, default 1e-3
         ``time(0)``; keeps ``s_t > 0``.
@@ -128,8 +128,8 @@ class VPLinear(ScheduleDefaults):    # beta(t) = b0 + t (b1 - b0),  alpha_bar = 
         ``time(1)``.
     """
 
-    b0: float = 0.1
-    b1: float = 20.0
+    beta_0: float = 0.1
+    beta_1: float = 20.0
     t_min: float = 1e-3
     t_max: float = 1.0
 
@@ -137,20 +137,20 @@ class VPLinear(ScheduleDefaults):    # beta(t) = b0 + t (b1 - b0),  alpha_bar = 
         """``t_min + u (t_max - t_min)``. See ``Schedule.time``."""
         return self.t_min + u * (self.t_max - self.t_min)
 
-    def _log_ab(self, t):
-        return -(self.b0 * t + 0.5 * (self.b1 - self.b0) * t**2)
+    def _log_alpha_bar(self, t):
+        return -(self.beta_0 * t + 0.5 * (self.beta_1 - self.beta_0) * t**2)
 
     def _beta(self, t):
-        return self.b0 + t * (self.b1 - self.b0)
+        return self.beta_0 + t * (self.beta_1 - self.beta_0)
 
     def mean(self, t):
         """``sqrt(alpha_bar_t)``. See ``Schedule.mean``."""
-        return namespace(t).exp(0.5 * self._log_ab(t))
+        return namespace(t).exp(0.5 * self._log_alpha_bar(t))
 
     def std(self, t):
         """``sqrt(1 - alpha_bar_t)``. See ``Schedule.std``."""
         xp = namespace(t)
-        return xp.sqrt(-xp.expm1(self._log_ab(t)))
+        return xp.sqrt(-xp.expm1(self._log_alpha_bar(t)))
 
     def dt_mean(self, t):
         """``-beta(t) m_t / 2``. See ``Schedule.dt_mean``."""
@@ -158,24 +158,26 @@ class VPLinear(ScheduleDefaults):    # beta(t) = b0 + t (b1 - b0),  alpha_bar = 
 
     def dt_std(self, t):
         """``beta(t) alpha_bar_t / (2 s_t)``. See ``Schedule.dt_std``."""
-        return 0.5 * self._beta(t) * namespace(t).exp(self._log_ab(t)) / self.std(t)
+        return 0.5 * self._beta(t) * namespace(t).exp(self._log_alpha_bar(t)) / self.std(t)
 
-    def prior(self, lead, event, *, xp, dtype, device=None):
+    def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):
         """Return the standard normal ``N(0, 1)``. See ``Schedule.prior``."""
-        return Gaussian(xp.zeros((*lead, *event), dtype=dtype, device=device),
-                        xp.ones(tuple(lead), dtype=dtype, device=device))
+        return Gaussian(xp.zeros((*leading_shape, *event_shape), dtype=dtype, device=device),
+                        xp.ones(tuple(leading_shape), dtype=dtype, device=device))
 
     def log_snr(self, t):
         """``log(alpha_bar_t / (1 - alpha_bar_t))``. See ``Schedule.log_snr``."""
         xp = namespace(t)
-        return self._log_ab(t) - xp.log(-xp.expm1(self._log_ab(t)))
+        return self._log_alpha_bar(t) - xp.log(-xp.expm1(self._log_alpha_bar(t)))
 
-    def log_snr_diff(self, s, t):
-        """``log_snr(s) - log_snr(t)``, computed through ``s - t``. See ``Schedule.log_snr_diff``."""
-        xp = namespace(s, t)
-        d = -(s - t) * (self.b0 + 0.5 * (self.b1 - self.b0) * (s + t))   # log ab_s - log ab_t, via s - t
-        a_t = self._log_ab(t)
-        return d - xp.log1p(xp.exp(a_t) * xp.expm1(d) / xp.expm1(a_t))  # minus log((1 - ab_s) / (1 - ab_t))
+    def log_snr_diff(self, t_a, t_b):
+        """``log_snr(t_a) - log_snr(t_b)``, computed through ``t_a - t_b``. See ``Schedule.log_snr_diff``."""
+        xp = namespace(t_a, t_b)
+        # log ab_a - log ab_b, via t_a - t_b
+        log_alpha_bar_diff = -(t_a - t_b) * (self.beta_0 + 0.5 * (self.beta_1 - self.beta_0) * (t_a + t_b))
+        log_alpha_bar_b = self._log_alpha_bar(t_b)
+        return log_alpha_bar_diff - xp.log1p(xp.exp(log_alpha_bar_b) * xp.expm1(log_alpha_bar_diff)
+                                             / xp.expm1(log_alpha_bar_b))   # minus log((1 - ab_a) / (1 - ab_b))
 
 
 @dataclass(frozen=True)
@@ -201,8 +203,8 @@ class EDM(ScheduleDefaults):         # t = sigma; non-uniform spacing lives in t
 
     def time(self, u):
         """EDM ``rho`` spacing from ``s_min`` to ``s_max``. See ``Schedule.time``."""
-        a, b = self.s_min ** (1 / self.rho), self.s_max ** (1 / self.rho)
-        return (a + u * (b - a)) ** self.rho
+        root_min, root_max = self.s_min ** (1 / self.rho), self.s_max ** (1 / self.rho)
+        return (root_min + u * (root_max - root_min)) ** self.rho
 
     def mean(self, t):
         """``1``. See ``Schedule.mean``."""
@@ -220,18 +222,18 @@ class EDM(ScheduleDefaults):         # t = sigma; non-uniform spacing lives in t
         """``1``. See ``Schedule.dt_std``."""
         return namespace(t).ones_like(t)
 
-    def prior(self, lead, event, *, xp, dtype, device=None):
+    def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):
         """``N(0, s_max^2)``. See ``Schedule.prior``."""
-        return Gaussian(xp.zeros((*lead, *event), dtype=dtype, device=device),
-                        xp.full(tuple(lead), self.s_max**2, dtype=dtype, device=device))
+        return Gaussian(xp.zeros((*leading_shape, *event_shape), dtype=dtype, device=device),
+                        xp.full(tuple(leading_shape), self.s_max**2, dtype=dtype, device=device))
 
     def log_snr(self, t):
         """``-2 log t``. See ``Schedule.log_snr``."""
         return -2 * namespace(t).log(t)
 
-    def log_snr_diff(self, s, t):
-        """``-2 log1p((s - t) / t)``. See ``Schedule.log_snr_diff``."""
-        return -2 * namespace(s, t).log1p((s - t) / t)
+    def log_snr_diff(self, t_a, t_b):
+        """``-2 log1p((t_a - t_b) / t_b)``. See ``Schedule.log_snr_diff``."""
+        return -2 * namespace(t_a, t_b).log1p((t_a - t_b) / t_b)
 
 
 @dataclass(frozen=True)
@@ -271,17 +273,17 @@ class RectifiedFlow(ScheduleDefaults):  # x_t = (1 - t) x0 + t eps, clipped to [
         """``1``. See ``Schedule.dt_std``."""
         return namespace(t).ones_like(t)
 
-    def prior(self, lead, event, *, xp, dtype, device=None):   # ignores the (1 - t_max) x0 part
+    def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):   # ignores the (1 - t_max) x0 part
         """``N(0, t_max^2)``. See ``Schedule.prior``."""
-        return Gaussian(xp.zeros((*lead, *event), dtype=dtype, device=device),
-                        xp.full(tuple(lead), self.t_max**2, dtype=dtype, device=device))
+        return Gaussian(xp.zeros((*leading_shape, *event_shape), dtype=dtype, device=device),
+                        xp.full(tuple(leading_shape), self.t_max**2, dtype=dtype, device=device))
 
     def log_snr(self, t):
         """``2 (log(1 - t) - log t)``. See ``Schedule.log_snr``."""
         xp = namespace(t)
         return 2 * (xp.log1p(-t) - xp.log(t))
 
-    def log_snr_diff(self, s, t):
-        """``log_snr(s) - log_snr(t)``, computed through ``s - t``. See ``Schedule.log_snr_diff``."""
-        xp = namespace(s, t)
-        return 2 * (xp.log1p(-(s - t) / (1 - t)) - xp.log1p((s - t) / t))
+    def log_snr_diff(self, t_a, t_b):
+        """``log_snr(t_a) - log_snr(t_b)``, computed through ``t_a - t_b``. See ``Schedule.log_snr_diff``."""
+        xp = namespace(t_a, t_b)
+        return 2 * (xp.log1p(-(t_a - t_b) / (1 - t_b)) - xp.log1p((t_a - t_b) / t_b))

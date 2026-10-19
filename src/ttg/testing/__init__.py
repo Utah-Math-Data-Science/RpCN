@@ -14,16 +14,16 @@ from ..records import DuplicateEvaluation, Feature, Record
 
 Array = Any
 
-EPS32 = 2.0 ** -24                       # unit roundoff for float32
-TINY32 = 2.0 ** -126                     # smallest normal float32: the underflow floor unit (§18.3)
+UNIT_ROUNDOFF32 = 2.0 ** -24             # unit roundoff for float32
+SMALLEST_NORMAL32 = 2.0 ** -126          # smallest normal float32: the underflow floor unit (§18.3)
 
 
 class CountingNetwork:                    # contract C1
-    """Wrap a raw network ``net(x, t)`` and count its calls.
+    """Wrap a raw network ``network(x, t)`` and count its calls.
 
     Parameters
     ----------
-    net : Callable[[array, array], array]
+    network : Callable[[array, array], array]
         The network to wrap.
 
     Attributes
@@ -32,13 +32,13 @@ class CountingNetwork:                    # contract C1
         Number of calls so far.
     """
 
-    def __init__(self, net):
-        self.net, self.calls = net, 0
+    def __init__(self, network):
+        self.network, self.calls = network, 0
 
     def __call__(self, x, t):
-        """Count the call and return ``net(x, t)``."""
+        """Count the call and return ``network(x, t)``."""
         self.calls += 1
-        return self.net(x, t)
+        return self.network(x, t)
 
 
 def to_host(a):                           # eager tests only
@@ -88,11 +88,11 @@ class AuditingEvaluate:                   # invariant I1: counts rows, raises on
 
     def __call__(self, x, t, needs):
         """Record the rows, raising `DuplicateEvaluation` on a repeat, and return ``evaluate(x, t, needs)``."""
-        for xi, ti in zip(to_host(x), to_host(t)):
-            key = (xi.tobytes(), float(ti))
-            if key in self.seen:
-                raise DuplicateEvaluation(ti)
-            self.seen.add(key)
+        for x_row, t_row in zip(to_host(x), to_host(t)):
+            fingerprint = (x_row.tobytes(), float(t_row))
+            if fingerprint in self.seen:
+                raise DuplicateEvaluation(t_row)
+            self.seen.add(fingerprint)
         self.rows += t.shape[0]
         self.calls += 1
         return self.evaluate(x, t, needs)
@@ -142,8 +142,8 @@ class ReplayGaussian(Gaussian):
 
     forced: Array = None
 
-    def sample(self, key, bk):
-        """Return `forced`, ignoring `key` and `bk`."""
+    def sample(self, key, backend):
+        """Return `forced`, ignoring `key` and `backend`."""
         return self.forced
 
 
@@ -160,7 +160,7 @@ class ReplayKernel:                       # proposal double: follows a given pat
     path : array
         Points to return, shape ``[S, I, N, *D]``.
     t_grid : array
-        Times of the steps, shape ``[S, I, N]``; the target time `t` of `at` selects the step.
+        Times of the steps, shape ``[S, I, N]``; the target time `t_dst` of `at` selects the step.
     """
 
     base: Any
@@ -172,39 +172,39 @@ class ReplayKernel:                       # proposal double: follows a given pat
         """The features `base` requires."""
         return self.base.requires
 
-    def at(self, rec, t):
-        """Return `base`'s Gaussian from `rec` to time `t`, with `sample` fixed to the path point at `t`.
+    def at(self, record, t_dst):
+        """Return `base`'s Gaussian from `record` to time `t_dst`, with `sample` fixed to the path point at `t_dst`.
 
         Parameters
         ----------
-        rec : Record
+        record : Record
             Current point and its features, leading axes ``[I, N]``.
-        t : array
+        t_dst : array
             Target times, shape ``[I, N]``; must equal one row of `t_grid`.
 
         Returns
         -------
         ReplayGaussian
         """
-        d = self.base.at(rec, t)
-        k = index_of(self.t_grid, t)
-        return ReplayGaussian(d.mean, d.var, self.path[k, ...])           # sample() returns path[k]
+        base_dist = self.base.at(record, t_dst)
+        grid_index = index_of(self.t_grid, t_dst)
+        return ReplayGaussian(base_dist.mean, base_dist.var, self.path[grid_index, ...])   # sample() returns that point
 
 
-def toy_evaluate(mu, sd, w, sch):
-    """Exact `evaluate` for a Gaussian toy model: data ~ N(mu, sd^2 I), reward r(x0) = <w, x0>.
+def toy_evaluate(prior_mean, prior_std, reward_weights, schedule):
+    """Exact `evaluate` for a Gaussian toy model: data ~ N(prior_mean, prior_std^2 I), r(x0) = <reward_weights, x0>.
 
     Every feature (x0, eps, score, reward, reward gradient) is computed in closed form from the schedule.
 
     Parameters
     ----------
-    mu : array
+    prior_mean : array
         Data mean, shape ``[*D]``.
-    sd : float
+    prior_std : float
         Data standard deviation.
-    w : array
+    reward_weights : array
         Reward weights, shape ``[*D]``.
-    sch : Schedule
+    schedule : Schedule
         Noise schedule.
 
     Returns
@@ -214,43 +214,43 @@ def toy_evaluate(mu, sd, w, sch):
     """
     def evaluate(x, t, needs):
         xp = namespace(x, t)
-        m, s = bcast(sch.mean(t), x), bcast(sch.std(t), x)
-        v = m**2 * sd**2 + s**2                          # marginal variance of x_t
-        c = m * sd**2 / v                                # posterior-mean gain
-        x0 = mu + c * (x - m * mu)                       # E[x0 | x_t]
+        m, s = bcast(schedule.mean(t), x), bcast(schedule.std(t), x)
+        marginal_var = m**2 * prior_std**2 + s**2        # marginal variance of x_t
+        gain = m * prior_std**2 / marginal_var           # posterior-mean gain
+        x0 = prior_mean + gain * (x - m * prior_mean)    # E[x0 | x_t]
         eps = (x - m * x0) / s
-        score = -(x - m * mu) / v                        # = -eps / s exactly (Tweedie)
-        ev = tuple(range(1, x.ndim))
-        reward = xp.sum(w * x0, axis=ev)
-        grad = c * w                                     # d<w, x0>/dx, broadcast per row
-        vals = {Feature.X0: x0, Feature.EPS: eps, Feature.SCORE: score,
-                Feature.REWARD: reward, Feature.REWARD_GRAD: grad}
-        return Record(x, t, **{f.value: (vals[f] if f in needs else None) for f in Feature})
+        score = -(x - m * prior_mean) / marginal_var     # = -eps / s exactly (Tweedie)
+        event_axes = tuple(range(1, x.ndim))
+        reward = xp.sum(reward_weights * x0, axis=event_axes)
+        reward_grad = gain * reward_weights              # d<reward_weights, x0>/dx, broadcast per row
+        features = {Feature.X0: x0, Feature.EPS: eps, Feature.SCORE: score,
+                    Feature.REWARD: reward, Feature.REWARD_GRAD: reward_grad}
+        return Record(x, t, **{f.value: (features[f] if f in needs else None) for f in Feature})
     return evaluate
 
 
-def toy_eps_network(mu, sd, sch):
+def toy_eps_network(prior_mean, prior_std, schedule):
     """Return the toy model's exact eps prediction, as a raw ``network(x, t)`` for the evaluate builders.
 
     Parameters
     ----------
-    mu : array
+    prior_mean : array
         Data mean, shape ``[*D]``.
-    sd : float
+    prior_std : float
         Data standard deviation.
-    sch : Schedule
+    schedule : Schedule
         Noise schedule.
 
     Returns
     -------
     Callable[[array, array], array]
-        ``net(x [B, *D], t [B]) -> eps [B, *D]``.
+        ``network(x [B, *D], t [B]) -> eps [B, *D]``.
     """
-    def net(x, t):
-        m, s = bcast(sch.mean(t), x), bcast(sch.std(t), x)
-        v = m**2 * sd**2 + s**2
-        return s * (x - m * mu) / v
-    return net
+    def network(x, t):
+        m, s = bcast(schedule.mean(t), x), bcast(schedule.std(t), x)
+        marginal_var = m**2 * prior_std**2 + s**2
+        return s * (x - m * prior_mean) / marginal_var
+    return network
 
 
 def oracle(f, *args):
@@ -268,14 +268,14 @@ def oracle(f, *args):
     Any
         ``f(*args)`` on the upcast arguments.
     """
-    def up(a):
+    def to_float64(a):
         if hasattr(a, "dtype") and hasattr(a, "shape"):
             xp = namespace(a)
             if a.dtype == xp.float32:
                 return xp.astype(a, xp.float64)
         return a
-    return f(*tree_map(up, args))
+    return f(*tree_map(to_float64, args))
 
 
-__all__ = ["EPS32", "TINY32", "AuditingEvaluate", "CountingNetwork", "ReplayGaussian", "ReplayKernel",
-           "index_of", "oracle", "to_host", "toy_evaluate", "toy_eps_network"]
+__all__ = ["UNIT_ROUNDOFF32", "SMALLEST_NORMAL32", "AuditingEvaluate", "CountingNetwork", "ReplayGaussian",
+           "ReplayKernel", "index_of", "oracle", "to_host", "toy_evaluate", "toy_eps_network"]

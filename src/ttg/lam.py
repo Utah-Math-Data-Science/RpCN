@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from .ops import device, namespace
+from .ops import device_of, namespace
 
 
-def take1d(v, idx):              # Array API `take` wants 1-D indices
-    xp = namespace(v, idx)
-    return xp.reshape(xp.take(v, xp.reshape(idx, (-1,))), idx.shape)
+def _take_1d(values, indices):   # Array API `take` wants 1-D indices
+    xp = namespace(values, indices)
+    return xp.reshape(xp.take(values, xp.reshape(indices, (-1,))), indices.shape)
 
 
-def constant(c):
+def constant(value):
     """Make a tilt strength (or step size) that is the same everywhere.
 
     Parameters
     ----------
-    c : float
+    value : float
         The value.
 
     Returns
     -------
     Callable[[array], array]
-        ``lam(t) -> c`` with ``t``'s shape and dtype.
+        ``lam(t) -> value`` with ``t``'s shape and dtype.
     """
-    return lambda t: namespace(t).full_like(t, c)
+    return lambda t: namespace(t).full_like(t, value)
 
 
 def ladder(values):
@@ -64,8 +64,8 @@ def tabulated(knots, values):
     """
     def lam(t):
         xp = namespace(t, knots, values)
-        dist = xp.abs(t[..., None] - xp.astype(knots, t.dtype))
-        return take1d(xp.astype(values, t.dtype), xp.argmin(dist, axis=-1))
+        distance = xp.abs(t[..., None] - xp.astype(knots, t.dtype))
+        return _take_1d(xp.astype(values, t.dtype), xp.argmin(distance, axis=-1))
     return lam
 
 
@@ -89,27 +89,28 @@ def piecewise_linear(knots, values, hold=False):   # knots: 1-D increasing
     """
     def lam(t):
         xp = namespace(t, knots, values)
-        kn, va = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
+        knots_t, values_t = xp.astype(knots, t.dtype), xp.astype(values, t.dtype)
         if hold:                                     # static
-            t = xp.clip(t, min=kn[0], max=kn[-1])
-        # searchsorted(kn, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
-        j = xp.sum(xp.astype(kn < t[..., None], xp.int64), axis=-1)
-        j = xp.clip(j, 1, kn.shape[0] - 1)
-        k0, k1, v0, v1 = take1d(kn, j - 1), take1d(kn, j), take1d(va, j - 1), take1d(va, j)
-        return v0 + (t - k0) / (k1 - k0) * (v1 - v0)
+            t = xp.clip(t, min=knots_t[0], max=knots_t[-1])
+        # searchsorted(knots_t, t) (side="left") as a count of knots below t: no reshape of a possibly strided t
+        upper_index = xp.sum(xp.astype(knots_t < t[..., None], xp.int64), axis=-1)
+        upper_index = xp.clip(upper_index, 1, knots_t.shape[0] - 1)
+        knot_lo, knot_hi = _take_1d(knots_t, upper_index - 1), _take_1d(knots_t, upper_index)
+        value_lo, value_hi = _take_1d(values_t, upper_index - 1), _take_1d(values_t, upper_index)
+        return value_lo + (t - knot_lo) / (knot_hi - knot_lo) * (value_hi - value_lo)
     return lam
 
 
-def das_lambda(t_grid, gamma, alpha_kl):
+def das_lambda(t_grid, growth, alpha_kl):
     """DAS tempering schedule on the run's time grid.
 
-    Step ``k`` (0 = noisiest) gets ``min(1, (1 + gamma)^k - 1) / alpha_kl``; the last step gets ``1 / alpha_kl``.
+    Step ``k`` (0 = noisiest) gets ``min(1, (1 + growth)^k - 1) / alpha_kl``; the last step gets ``1 / alpha_kl``.
 
     Parameters
     ----------
     t_grid : array
-        ``[S]`` times of the run, noisiest first (e.g. ``sch.time(u)`` with ``u`` decreasing).
-    gamma : float
+        ``[S]`` times of the run, noisiest first (e.g. ``schedule.time(u)`` with ``u`` decreasing).
+    growth : float
         Tempering growth rate, > 0.
     alpha_kl : float
         KL-regularization strength; the final tilt strength is ``1 / alpha_kl``.
@@ -120,9 +121,9 @@ def das_lambda(t_grid, gamma, alpha_kl):
         ``tabulated(t_grid, ...)``: exact on the grid's times.
     """
     xp = namespace(t_grid)
-    k = xp.arange(t_grid.shape[0], dtype=t_grid.dtype, device=device(t_grid))   # float: no int/float mixing
-    lt = xp.where(k == t_grid.shape[0] - 1, 1.0, xp.clip((1 + gamma) ** k - 1, max=1.0))
-    return tabulated(t_grid, lt / alpha_kl)
+    step_index = xp.arange(t_grid.shape[0], dtype=t_grid.dtype, device=device_of(t_grid))   # float: no int/float mixing
+    ramp = xp.where(step_index == t_grid.shape[0] - 1, 1.0, xp.clip((1 + growth) ** step_index - 1, max=1.0))
+    return tabulated(t_grid, ramp / alpha_kl)
 
 
 def level_lambda(t_levels, beta, rho):
@@ -134,7 +135,7 @@ def level_lambda(t_levels, beta, rho):
     Parameters
     ----------
     t_levels : array
-        ``[M + 1]`` level times, increasing (data end first), e.g. ``sch.time(u_levels)``.
+        ``[M + 1]`` level times, increasing (data end first), e.g. ``schedule.time(u_levels)``.
     beta : float
         Tilt strength at level 0.
     rho : float
@@ -146,6 +147,6 @@ def level_lambda(t_levels, beta, rho):
         ``piecewise_linear(t_levels, ..., hold=True)``.
     """
     xp = namespace(t_levels)
-    M = t_levels.shape[0] - 1
-    k = xp.arange(M + 1, dtype=t_levels.dtype, device=device(t_levels))
-    return piecewise_linear(t_levels, beta * (1 - k / M) ** rho, hold=True)
+    n_gaps = t_levels.shape[0] - 1
+    level = xp.arange(n_gaps + 1, dtype=t_levels.dtype, device=device_of(t_levels))
+    return piecewise_linear(t_levels, beta * (1 - level / n_gaps) ** rho, hold=True)

@@ -9,7 +9,7 @@ from typing import Protocol
 class Backend(Protocol):
     """The operations the Array API standard doesn't cover: randomness, `scan`, `cond` and `switch`.
 
-    Library functions that need one of these take the backend as the keyword argument `bk`; nothing else does.
+    Library functions that need one of these take the backend as the keyword argument `backend`; nothing else does.
     Implementations: `JaxBackend`, `TorchBackend` and `StrictBackend` (tests only), all importable from
     `ttg.backend`. Each is imported lazily, so its array library is loaded only when asked for.
 
@@ -25,20 +25,20 @@ class Backend(Protocol):
     name: str                                    # "jax" | "torch" | "strict"
     xp: ModuleType                               # for constructors and tests only; library code infers xp
 
-    def split(self, key, n: int):                # -> array of n keys (stackable, so scan can slice it)
-        """Split a key into `n` independent keys.
+    def split(self, key, n_keys: int):           # -> array of n_keys keys (stackable, so scan can slice it)
+        """Split a key into `n_keys` independent keys.
 
         Parameters
         ----------
         key : key
             A key from `key` or a previous `split`.
-        n : int
+        n_keys : int
             Number of keys.
 
         Returns
         -------
         array
-            `n` keys stacked along the leading axis, so `scan` can slice one per step.
+            `n_keys` keys stacked along the leading axis, so `scan` can slice one per step.
         """
         ...
 

@@ -15,7 +15,7 @@ from .potentials import (FKDiff, FKMax, FKSum, Potential, Relative, ReverseRatio
 from .records import DuplicateEvaluation, Feature, MissingFeature, PartialRecord, Point, Record
 from .resample import ESSBelow, Every, Never, categorical, ess, masked_resample, systematic
 from .schedule import EDM, RectifiedFlow, Schedule, ScheduleDefaults, VPLinear
-from .sde import SDE, Direction, ForwardSDE, ReverseSDE, f_coeff, g2_coeff
+from .sde import SDE, Direction, ForwardSDE, ReverseSDE, diffusion_sq_coeff, drift_coeff
 from .smc import SMCResult, smc
 
 __all__ = [name for name in dir() if not name.startswith("_")]

@@ -1,7 +1,7 @@
 """S1-S5 (schedules) and V1-V2 (conversions)."""
 
 import numpy as np
-from conftest import backends, elems, host, schedules, u_pair, xps_for
+from conftest import backends, element_bounds, host, schedules, u_pair, xps_for
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -9,30 +9,30 @@ from ttg import eps_from_x0, x0_eps_from_velocity, x0_from_eps
 from ttg.ops import bcast
 
 
-def times(bk, sch, *us):
-    xp = bk.xp
+def times(backend, sch, *us):
+    xp = backend.xp
     return sch.time(xp.asarray(list(us), dtype=xp.float64))
 
 
 @backends
 @schedules
 @given(data=st.data())
-def test_S1_time_increasing_and_positive_coefficients(bk, make_schedule, data):
+def test_S1_time_increasing_and_positive_coefficients(backend, make_schedule, data):
     sch = make_schedule()
     u_lo, u_hi = data.draw(u_pair())
-    t = host(times(bk, sch, 0.0, u_lo, u_hi, 1.0))
+    t = host(times(backend, sch, 0.0, u_lo, u_hi, 1.0))
     assert t[1] < t[2] and t[0] <= t[1] and t[2] <= t[3]
-    tt = times(bk, sch, 0.0, u_lo, u_hi, 1.0)
+    tt = times(backend, sch, 0.0, u_lo, u_hi, 1.0)
     assert np.all(host(sch.mean(tt)) > 0) and np.all(host(sch.std(tt)) > 0)
 
 
 @backends
 @schedules
 @given(data=st.data())
-def test_S2_snr_strictly_decreasing(bk, make_schedule, data):
+def test_S2_snr_strictly_decreasing(backend, make_schedule, data):
     sch = make_schedule()
     u_lo, u_hi = data.draw(u_pair())
-    t = times(bk, sch, u_lo, u_hi)
+    t = times(backend, sch, u_lo, u_hi)
     snr = host(sch.mean(t) ** 2 / sch.std(t) ** 2)
     assert snr[0] > snr[1]
 
@@ -40,9 +40,9 @@ def test_S2_snr_strictly_decreasing(bk, make_schedule, data):
 @backends
 @schedules
 @given(u=st.floats(0.0, 1.0))
-def test_S3_derivatives_match_central_differences(bk, make_schedule, u):
+def test_S3_derivatives_match_central_differences(backend, make_schedule, u):
     sch = make_schedule()
-    t = times(bk, sch, u)
+    t = times(backend, sch, u)
     h = 1e-6 * t                                           # relative step, keeps t - h inside the range
     for f, df in ((sch.mean, sch.dt_mean), (sch.std, sch.dt_std)):
         fd = host((f(t + h) - f(t - h)) / (2 * h))
@@ -54,8 +54,8 @@ def test_S3_derivatives_match_central_differences(bk, make_schedule, u):
 @backends
 @schedules
 @given(data=st.data())
-def test_S4_prior_shapes_and_variance(bk, make_schedule, data):
-    xp, sch = bk.xp, make_schedule()
+def test_S4_prior_shapes_and_variance(backend, make_schedule, data):
+    xp, sch = backend.xp, make_schedule()
     lead = tuple(data.draw(st.lists(st.integers(1, 3), min_size=1, max_size=2)))
     event = tuple(data.draw(st.lists(st.integers(1, 3), min_size=1, max_size=3)))
     for dtype in (xp.float32, xp.float64):
@@ -68,11 +68,11 @@ def test_S4_prior_shapes_and_variance(bk, make_schedule, data):
 @backends
 @schedules
 @given(data=st.data())
-def test_S5_log_snr_and_its_difference(bk, make_schedule, data):
-    xp, sch = bk.xp, make_schedule()
+def test_S5_log_snr_and_its_difference(backend, make_schedule, data):
+    xp, sch = backend.xp, make_schedule()
     u_lo, u_hi = data.draw(u_pair())
-    t = times(bk, sch, u_lo)
-    s = times(bk, sch, u_hi)
+    t = times(backend, sch, u_lo)
+    s = times(backend, sch, u_hi)
     ref = 2 * (xp.log(sch.mean(t)) - xp.log(sch.std(t)))
     got = sch.log_snr(t)
     assert np.all(np.abs(host(got - ref)) <= 1e-12 * (1 + np.abs(host(ref))))
@@ -85,12 +85,12 @@ def test_S5_log_snr_and_its_difference(bk, make_schedule, data):
 @backends
 @schedules
 @given(data=st.data())
-def test_V1_eps_x0_round_trip(bk, make_schedule, data):
-    xp, xps, sch = bk.xp, xps_for(bk), make_schedule()
+def test_V1_eps_x0_round_trip(backend, make_schedule, data):
+    xp, xps, sch = backend.xp, xps_for(backend), make_schedule()
     B = data.draw(st.integers(1, 4))
     D = data.draw(xps.array_shapes(min_dims=1, max_dims=2, max_side=3))
-    x0 = data.draw(xps.arrays(xp.float64, (B, *D), elements=elems()))
-    eps = data.draw(xps.arrays(xp.float64, (B, *D), elements=elems()))
+    x0 = data.draw(xps.arrays(xp.float64, (B, *D), elements=element_bounds()))
+    eps = data.draw(xps.arrays(xp.float64, (B, *D), elements=element_bounds()))
     us = data.draw(st.lists(st.floats(0.0, 1.0), min_size=B, max_size=B))
     t = sch.time(xp.asarray(us, dtype=xp.float64))
     m, s = bcast(sch.mean(t), x0), bcast(sch.std(t), x0)
@@ -106,12 +106,12 @@ def test_V1_eps_x0_round_trip(bk, make_schedule, data):
 @backends
 @schedules
 @given(data=st.data())
-def test_V2_velocity_round_trip(bk, make_schedule, data):
-    xp, xps, sch = bk.xp, xps_for(bk), make_schedule()
+def test_V2_velocity_round_trip(backend, make_schedule, data):
+    xp, xps, sch = backend.xp, xps_for(backend), make_schedule()
     B = data.draw(st.integers(1, 4))
     D = data.draw(xps.array_shapes(min_dims=1, max_dims=2, max_side=3))
-    x0 = data.draw(xps.arrays(xp.float64, (B, *D), elements=elems()))
-    eps = data.draw(xps.arrays(xp.float64, (B, *D), elements=elems()))
+    x0 = data.draw(xps.arrays(xp.float64, (B, *D), elements=element_bounds()))
+    eps = data.draw(xps.arrays(xp.float64, (B, *D), elements=element_bounds()))
     us = data.draw(st.lists(st.floats(0.0, 1.0), min_size=B, max_size=B))
     t = sch.time(xp.asarray(us, dtype=xp.float64))
     m, s, dm, ds = (bcast(f(t), x0) for f in (sch.mean, sch.std, sch.dt_mean, sch.dt_std))

@@ -6,9 +6,9 @@ from ttg.testing import toy_evaluate
 ALL = frozenset(Feature)
 
 
-def toy(bk, sch, D=(2,), dtype=None):
+def toy(backend, sch, D=(2,), dtype=None):
     """-> (evaluate, mu, w) for data ~ N(mu, I), r(x0) = <w, x0>."""
-    xp = bk.xp
+    xp = backend.xp
     dtype = xp.float64 if dtype is None else dtype
     n = 1
     for d in D:

@@ -101,12 +101,12 @@ class Record:                        # evaluated; absent features are None
         """
         return replace(self, **{f.value: None for f in Feature if f not in needs})
 
-    def need(self, f: Feature) -> Array:
+    def need(self, feature: Feature) -> Array:
         """Return a feature, failing loudly if it was not evaluated.
 
         Parameters
         ----------
-        f : Feature
+        feature : Feature
             The feature to read.
 
         Returns
@@ -119,10 +119,10 @@ class Record:                        # evaluated; absent features are None
         MissingFeature
             If the feature is None, i.e. no component requested it. It is never re-evaluated.
         """
-        v = getattr(self, f.value)
-        if v is None:
-            raise MissingFeature(f)  # never silently re-evaluate
-        return v
+        value = getattr(self, feature.value)
+        if value is None:
+            raise MissingFeature(feature)  # never silently re-evaluate
+        return value
 
     def provides(self, needs) -> bool:   # static: depends only on pytree structure
         """Whether every feature in `needs` is present.

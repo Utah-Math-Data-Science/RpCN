@@ -45,22 +45,22 @@ class JaxBackend:
         """
         return jax.random.key(seed)
 
-    def split(self, key, n):
-        """Split `key` into `n` keys, ``jax.random.split(key, n)``.
+    def split(self, key, n_keys):
+        """Split `key` into `n_keys` keys, ``jax.random.split(key, n_keys)``.
 
         Parameters
         ----------
         key : key
             A JAX PRNG key.
-        n : int
+        n_keys : int
             Number of keys.
 
         Returns
         -------
         array
-            `n` keys stacked along the leading axis.
+            `n_keys` keys stacked along the leading axis.
         """
-        return jax.random.split(key, n)
+        return jax.random.split(key, n_keys)
 
     def normal(self, key, shape, dtype, device=None):         # device is ignored
         """Draw standard normal samples with ``jax.random.normal``.

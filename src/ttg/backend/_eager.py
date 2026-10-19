@@ -31,9 +31,9 @@ class EagerControl:
         ys : pytree of array or None
             The steps' outputs stacked along a new leading axis, or None if every step returned None.
         """
-        n = leaves(xs)[0].shape[0]
+        n_steps = leaves(xs)[0].shape[0]
         ys = []
-        for i in range(n):
+        for i in range(n_steps):
             carry, y = f(carry, tree_map(lambda a: a[i, ...], xs))
             ys.append(y)
         if all(y is None for y in ys):

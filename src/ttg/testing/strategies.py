@@ -1,4 +1,4 @@
-"""Hypothesis strategies (§18.1): elems, u_pair, leading, xps_for."""
+"""Hypothesis strategies (§18.1): element_bounds, u_pair, leading_shape, xps_for."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.array_api import make_strategies_namespace
 
 
-def xps_for(bk):
+def xps_for(backend):
     """Hypothesis array strategies for a backend's namespace.
 
     Hypothesis may not know the newest standard revision yet; array generation uses nothing newer
@@ -15,7 +15,7 @@ def xps_for(bk):
 
     Parameters
     ----------
-    bk : Backend
+    backend : Backend
         Backend whose `xp` the strategies generate arrays for.
 
     Returns
@@ -23,10 +23,10 @@ def xps_for(bk):
     module-like
         The `hypothesis.extra.array_api` strategies namespace, at the newest revision Hypothesis has released.
     """
-    return make_strategies_namespace(bk.xp, api_version=max(hypothesis.extra.array_api.RELEASED_VERSIONS))
+    return make_strategies_namespace(backend.xp, api_version=max(hypothesis.extra.array_api.RELEASED_VERSIONS))
 
 
-def elems(lo=-3.0, hi=3.0):
+def element_bounds(lo=-3.0, hi=3.0):
     """Keyword arguments for finite, normal-range float elements in ``[lo, hi]``.
 
     Parameters
@@ -56,21 +56,21 @@ def u_pair(draw, gap=1e-2):           # u_lo < u_hi, both in [0, 1]
     -------
     SearchStrategy[tuple[float, float]]
     """
-    a = draw(st.floats(0.0, 1.0 - gap))
-    return a, draw(st.floats(a + gap, 1.0))
+    u_lo = draw(st.floats(0.0, 1.0 - gap))
+    return u_lo, draw(st.floats(u_lo + gap, 1.0))
 
 
 @st.composite
-def leading(draw, max_I=3, max_N=4):
+def leading_shape(draw, max_instances=3, max_particles=4):
     """Strategy for leading axes ``(I, N)``: instances and particles, each at least 1.
 
     Parameters
     ----------
-    max_I, max_N : int
+    max_instances, max_particles : int
         Upper bounds.
 
     Returns
     -------
     SearchStrategy[tuple[int, int]]
     """
-    return draw(st.integers(1, max_I)), draw(st.integers(1, max_N))
+    return draw(st.integers(1, max_instances)), draw(st.integers(1, max_particles))

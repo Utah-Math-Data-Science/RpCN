@@ -30,12 +30,12 @@ class SDE(Protocol):
 
     requires: frozenset[Feature]          # what the drift reads from the source record
 
-    def drift(self, rec) -> Array:        # b(x, t) at the source, [L..., *D]
+    def drift(self, record) -> Array:     # b(x, t) at the source, [L..., *D]
         """Return the drift ``b(x, t)`` at the record.
 
         Parameters
         ----------
-        rec : Record
+        record : Record
             ``x`` of shape ``[L..., *D]``, ``t`` of shape ``[L...]``, carrying ``requires``.
 
         Returns
@@ -45,7 +45,7 @@ class SDE(Protocol):
         """
         ...
 
-    def diffusion2(self, t) -> Array:     # sigma_sde(t)^2, [L...]
+    def diffusion_sq(self, t) -> Array:   # sigma_sde(t)^2, [L...]
         """Return the squared diffusion coefficient ``sigma_sde(t)^2``.
 
         Parameters
@@ -61,12 +61,12 @@ class SDE(Protocol):
         ...
 
 
-def f_coeff(sch, t):                      # f = m'/m
+def drift_coeff(schedule, t):             # f = m'/m
     """Linear drift coefficient of the schedule's noising SDE, ``f(t) = m'_t / m_t``.
 
     Parameters
     ----------
-    sch : Schedule
+    schedule : Schedule
         The noise schedule.
     t : array
         ``[L...]``.
@@ -76,15 +76,15 @@ def f_coeff(sch, t):                      # f = m'/m
     array
         ``[L...]``.
     """
-    return sch.dt_mean(t) / sch.mean(t)
+    return schedule.dt_mean(t) / schedule.mean(t)
 
 
-def g2_coeff(sch, t):                     # gamma^2 = 2 s s' - 2 f s^2
+def diffusion_sq_coeff(schedule, t):      # gamma^2 = 2 s s' - 2 f s^2
     """Squared diffusion of the schedule's noising SDE, ``gamma(t)^2 = 2 s_t s'_t - 2 f(t) s_t^2``.
 
     Parameters
     ----------
-    sch : Schedule
+    schedule : Schedule
         The noise schedule.
     t : array
         ``[L...]``.
@@ -94,7 +94,7 @@ def g2_coeff(sch, t):                     # gamma^2 = 2 s s' - 2 f s^2
     array
         ``[L...]``.
     """
-    return 2 * sch.std(t) * sch.dt_std(t) - 2 * f_coeff(sch, t) * sch.std(t) ** 2
+    return 2 * schedule.std(t) * schedule.dt_std(t) - 2 * drift_coeff(schedule, t) * schedule.std(t) ** 2
 
 
 @dataclass(frozen=True)
@@ -103,20 +103,20 @@ class ForwardSDE:                         # the noising SDE whose marginals the 
 
     Parameters
     ----------
-    sch : Schedule
+    schedule : Schedule
         The noise schedule.
     """
 
-    sch: Any
+    schedule: Any
     requires = frozenset()
 
-    def drift(self, rec):
+    def drift(self, record):
         """``f(t) x``. See ``SDE.drift``."""
-        return bcast(f_coeff(self.sch, rec.t), rec.x) * rec.x
+        return bcast(drift_coeff(self.schedule, record.t), record.x) * record.x
 
-    def diffusion2(self, t):
-        """``gamma(t)^2``. See ``SDE.diffusion2``."""
-        return g2_coeff(self.sch, t)
+    def diffusion_sq(self, t):
+        """``gamma(t)^2``. See ``SDE.diffusion_sq``."""
+        return diffusion_sq_coeff(self.schedule, t)
 
 
 @dataclass(frozen=True)
@@ -127,22 +127,23 @@ class ReverseSDE:                         # same marginals, run backwards; eta =
 
     Parameters
     ----------
-    sch : Schedule
+    schedule : Schedule
         The noise schedule.
     eta : float, default 1.0
         Noise level, > 0. ``eta = 1`` is the standard reverse-time SDE; ``eta = 0`` (the probability-flow ODE)
         has no density and is not supported.
     """
 
-    sch: Any
+    schedule: Any
     eta: float = 1.0                      # eta > 0 required (eta = 0 is the probability-flow ODE: no density, I6)
     requires = frozenset({Feature.SCORE})
 
-    def drift(self, rec):
+    def drift(self, record):
         """``f x - (1 + eta^2) / 2 * gamma^2 score``. See ``SDE.drift``."""
-        c = -0.5 * (1 + self.eta**2) * g2_coeff(self.sch, rec.t)
-        return bcast(f_coeff(self.sch, rec.t), rec.x) * rec.x + bcast(c, rec.x) * rec.need(Feature.SCORE)
+        score_coeff = -0.5 * (1 + self.eta**2) * diffusion_sq_coeff(self.schedule, record.t)
+        return (bcast(drift_coeff(self.schedule, record.t), record.x) * record.x
+                + bcast(score_coeff, record.x) * record.need(Feature.SCORE))
 
-    def diffusion2(self, t):
-        """``eta^2 gamma(t)^2``. See ``SDE.diffusion2``."""
-        return self.eta**2 * g2_coeff(self.sch, t)
+    def diffusion_sq(self, t):
+        """``eta^2 gamma(t)^2``. See ``SDE.diffusion_sq``."""
+        return self.eta**2 * diffusion_sq_coeff(self.schedule, t)

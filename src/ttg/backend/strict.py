@@ -45,27 +45,27 @@ class StrictBackend(EagerControl):
         """
         return np.asarray(seed, dtype=np.int64)
 
-    def split(self, key, n):
-        """Split `key` into `n` keys: `n` int64 seeds drawn from a generator seeded with `key`.
+    def split(self, key, n_keys):
+        """Split `key` into `n_keys` keys: `n_keys` int64 seeds drawn from a generator seeded with `key`.
 
         Parameters
         ----------
         key : numpy.ndarray
             An int64 seed.
-        n : int
+        n_keys : int
             Number of keys.
 
         Returns
         -------
         numpy.ndarray
-            `n` int64 seeds, shape ``[n]``.
+            `n_keys` int64 seeds, shape ``[n_keys]``.
         """
-        return np.random.default_rng(int(key)).integers(0, _SEED_HIGH, size=n, dtype=np.int64)
+        return np.random.default_rng(int(key)).integers(0, _SEED_HIGH, size=n_keys, dtype=np.int64)
 
     def _from_numpy(self, a, dtype, device):
         np_dtype = np.float32 if dtype == self.xp.float32 else np.float64
-        kw = {} if device is None else {"device": device}
-        return self.xp.asarray(np.asarray(a, dtype=np_dtype), dtype=dtype, **kw)
+        device_kwargs = {} if device is None else {"device": device}
+        return self.xp.asarray(np.asarray(a, dtype=np_dtype), dtype=dtype, **device_kwargs)
 
     def normal(self, key, shape, dtype, device=None):
         """Draw standard normal samples from a NumPy generator seeded with `key`.

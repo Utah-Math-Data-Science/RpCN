@@ -1,16 +1,16 @@
-"""Guidance scales for `Guided` (§8a): kappa = scale(t, g, Var), one value per row."""
+"""Guidance scales for `Guided` (§8a): kappa = scale(t, grad, Var), one value per row."""
 
 from __future__ import annotations
 
 from .ops import namespace
 
 
-def event_norm(g, lead_ndim):    # ||g|| per row, over the event dims
+def event_norm(grad, lead_ndim):    # ||grad|| per row, over the event dims
     """Euclidean norm of each row over the event axes.
 
     Parameters
     ----------
-    g : array
+    grad : array
         ``[L..., *D]``.
     lead_ndim : int
         Number of leading (row) axes, ``len(L)``.
@@ -20,12 +20,12 @@ def event_norm(g, lead_ndim):    # ||g|| per row, over the event dims
     array
         ``[L...]``.
     """
-    xp = namespace(g)
-    return xp.sqrt(xp.sum(g**2, axis=tuple(range(lead_ndim, g.ndim))))
+    xp = namespace(grad)
+    return xp.sqrt(xp.sum(grad**2, axis=tuple(range(lead_ndim, grad.ndim))))
 
 
-def tilt(lam, factor=1.0):       # exact Gaussian tilt by exp(lam <g, x>): shift = factor * Var * lam(t) * g
-    """Guidance scale for the exact Gaussian tilt by ``exp(lam(t) <g, x>)``: ``kappa = factor * Var * lam(t)``.
+def tilt(lam, factor=1.0):       # exact Gaussian tilt by exp(lam <grad, x>): shift = factor * Var * lam(t) * grad
+    """Guidance scale for the exact Gaussian tilt by ``exp(lam(t) <grad, x>)``: ``kappa = factor * Var * lam(t)``.
 
     Parameters
     ----------
@@ -33,31 +33,33 @@ def tilt(lam, factor=1.0):       # exact Gaussian tilt by exp(lam <g, x>): shift
         Tilt strength as a function of ``t``, e.g. ``constant(2.0)`` or ``das_lambda(...)``.
     factor : float, default 1.0
         Extra multiplier. ``tilt(lam, 0.5)`` with ``Langevin`` (variance ``2 h``) gives the reward drift
-        ``h lam g``.
+        ``h lam grad``.
 
     Returns
     -------
     Callable[[array, array, array], array]
-        ``scale(t [L...], g [L..., *D], var [L...]) -> [L...]``, for ``Guided``.
+        ``scale(t [L...], grad [L..., *D], var [L...]) -> [L...]``, for ``Guided``.
     """
-    return lambda t, g, var: factor * var * lam(t)
+    return lambda t, grad, var: factor * var * lam(t)
 
 
-def normalized(gamma, eps=1e-12):   # RpCN inverse problems: shift = gamma(t) * g / ||g||
-    """Normalized-gradient guidance scale ``kappa = gamma(t) / (||g|| + eps)``, so the shift has length ``gamma(t)``.
+def normalized(step_length, norm_floor=1e-12):   # RpCN inverse problems: shift = step_length(t) * grad / ||grad||
+    """Normalized-gradient guidance scale ``kappa = step_length(t) / (||grad|| + norm_floor)``.
+
+    The shift then has length ``step_length(t)``.
 
     Intended for inverse problems with RpCN; use the same guided kernel as both target and proposal.
 
     Parameters
     ----------
-    gamma : Callable[[array], array]
+    step_length : Callable[[array], array]
         Step length as a function of ``t``.
-    eps : float, default 1e-12
+    norm_floor : float, default 1e-12
         Added to the norm to avoid division by zero.
 
     Returns
     -------
     Callable[[array, array, array], array]
-        ``scale(t [L...], g [L..., *D], var [L...]) -> [L...]``, for ``Guided``.
+        ``scale(t [L...], grad [L..., *D], var [L...]) -> [L...]``, for ``Guided``.
     """
-    return lambda t, g, var: gamma(t) / (event_norm(g, var.ndim) + eps)
+    return lambda t, grad, var: step_length(t) / (event_norm(grad, var.ndim) + norm_floor)
