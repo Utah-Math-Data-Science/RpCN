@@ -144,7 +144,7 @@ def _(rng_seed):
 def _(device, n_gmm_modes, n_grid, x_spacing):
     def _build_gmm():
         default_means = {}
-        default_stds = defaultdict(lambda: 3.0)
+        default_stds = defaultdict(lambda: 4.0)
         default_weights = defaultdict(lambda: 1.0)
         if n_gmm_modes.value % 2 == 0:
             gmm_indices = list(range(1, (n_gmm_modes.value // 2) + 1))
@@ -163,8 +163,8 @@ def _(device, n_gmm_modes, n_grid, x_spacing):
         comp = D.Normal(gmm_means, gmm_stds)
         return D.MixtureSameFamily(mix, comp)
     gmm = _build_gmm()
-    _bin_range_low = gmm.component_distribution.loc.min() - 5 * gmm.component_distribution.scale.max()
-    _bin_range_high = gmm.component_distribution.loc.max() + 5 * gmm.component_distribution.scale.max()
+    _bin_range_low = gmm.component_distribution.loc.min() - 5 * 3#gmm.component_distribution.scale.max()
+    _bin_range_high = gmm.component_distribution.loc.max() + 5 * 3#gmm.component_distribution.scale.max()
     bins = np.histogram(np.zeros(2), bins=60, range=(_bin_range_low.item(), _bin_range_high.item()))[1]
     bin_centers = torch.as_tensor(bins[:-1] + np.diff(bins) / 2, device=device)
     x_grid = torch.linspace(_bin_range_low, _bin_range_high, n_grid.value, device=device)
@@ -250,16 +250,16 @@ def _(
     reward_fn,
     training_samples,
 ):
-    bk = TorchBackend(device)
+    backend = TorchBackend(device)
     dtype = training_samples.dtype
     event_shape = tuple(training_samples.shape[1:])
     # Same EDM path as `prob_path` (t = sigma, unit scale), so the denoiser's noise level is ttg's time.
-    sch = ttg.EDM(s_min=prob_path.sigma_min, s_max=prob_path.sigma_max, rho=prob_path.rho)
+    schedule = ttg.EDM(s_min=prob_path.sigma_min, s_max=prob_path.sigma_max, rho=prob_path.rho)
     _denoiser = get_denoiser(vmap_chunk_size=batch_size.value // 16)
     _evaluate_rows = ttg.make_evaluate_torch(
         lambda x, t: _denoiser(t, x),  # the ensemble denoiser predicts x0
         lambda x, t, x0, s: (x0, ttg.eps_from_x0(x, t, x0, s)),
-        sch,
+        schedule,
         ttg.on_x0(reward_fn),  # the builders call reward(x0, x, t); this reward reads x0 only
     )
     def evaluate(x, t, needs, row_chunk_size=batch_size.value):
@@ -278,14 +278,22 @@ def _(
             return evaluate(x, t, needs)
         return counted, lambda: rows[0] / batch_size.value
     # Reverse-SDE Euler-Maruyama step, as in `Euler.step` in toy.model.
-    reverse_step = ttg.EulerMaruyama(ttg.ReverseSDE(sch), ttg.Direction.BACKWARD)
-    return bk, counting, dtype, evaluate, event_shape, reverse_step, sch
+    reverse_step = ttg.EulerMaruyama(ttg.ReverseSDE(schedule), ttg.Direction.BACKWARD)
+    return (
+        backend,
+        counting,
+        dtype,
+        evaluate,
+        event_shape,
+        reverse_step,
+        schedule,
+    )
 
 
 @app.cell
-def _(bk, device, dtype, sm_n_sampling_steps):
+def _(backend, device, dtype, sm_n_sampling_steps):
     # The sampling grid of FK, DAS and RpCN, in its own cell so CREPE (which uses its own levels) doesn't depend on it.
-    u_grid = bk.xp.linspace(1.0, 0.0, sm_n_sampling_steps.value, dtype=dtype, device=device)
+    u_grid = backend.xp.linspace(1.0, 0.0, sm_n_sampling_steps.value, dtype=dtype, device=device)
     return (u_grid,)
 
 
@@ -357,8 +365,8 @@ def _(crepe_expected_nfe, fk_expected_nfe, nfe_budget, rpcn_expected_nfe):
 
 @app.cell
 def _(
+    backend,
     batch_size,
-    bk,
     counting,
     device,
     dtype,
@@ -368,18 +376,18 @@ def _(
     get_metrics,
     reverse_step,
     rng_seed_fk,
-    sch,
+    schedule,
     tilt,
     u_grid,
 ):
     def run_fk(batch_size, ensemble_size, evaluate):
-        key_smc, key_select = bk.split(bk.key(rng_seed_fk), 2)
+        key_smc, key_select = backend.split(backend.key(rng_seed_fk), 2)
         fk = ttg.smc(
-            sch.prior((batch_size, ensemble_size), event_shape, xp=bk.xp, dtype=dtype, device=device),
+            schedule.prior((batch_size, ensemble_size), event_shape, xp=backend.xp, dtype=dtype, device=device),
             u_grid,
-            bk=bk,
+            backend=backend,
             evaluate=evaluate,
-            schedule=sch,
+            schedule=schedule,
             target=reverse_step,
             proposal=reverse_step,
             potential=ttg.FKDiff(ttg.constant(tilt.value)),
@@ -387,7 +395,7 @@ def _(
             key=key_smc,
         )
         # One particle per instance, drawn from the normalized final weights.
-        selected = ttg.categorical(bk, fk.log_w, key_select)
+        selected = ttg.categorical(backend, fk.log_weights, key_select)
         return fk.final.x0[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
     samples_fk = run_fk(batch_size.value, fk_ensemble_size, _evaluate).cpu()
@@ -398,8 +406,8 @@ def _(
 
 @app.cell
 def _(
+    backend,
     batch_size,
-    bk,
     counting,
     das_gamma,
     device,
@@ -410,27 +418,27 @@ def _(
     get_metrics,
     reverse_step,
     rng_seed_das,
-    sch,
+    schedule,
     tilt,
     u_grid,
 ):
     def run_das(batch_size, ensemble_size, evaluate):
-        key_smc, key_select = bk.split(bk.key(rng_seed_das), 2)
+        key_smc, key_select = backend.split(backend.key(rng_seed_das), 2)
         # Tempered tilt that reaches 1 / alpha_kl = beta at the last step.
-        lam = ttg.das_lambda(sch.time(u_grid), gamma=das_gamma.value, alpha_kl=1 / tilt.value)
+        lam = ttg.das_lambda(schedule.time(u_grid), growth=das_gamma.value, alpha_kl=1 / tilt.value)
         das = ttg.smc(
-            sch.prior((batch_size, ensemble_size), event_shape, xp=bk.xp, dtype=dtype, device=device),
+            schedule.prior((batch_size, ensemble_size), event_shape, xp=backend.xp, dtype=dtype, device=device),
             u_grid,
-            bk=bk,
+            backend=backend,
             evaluate=evaluate,
-            schedule=sch,
+            schedule=schedule,
             target=reverse_step,
             proposal=ttg.Guided(reverse_step, ttg.tilt(lam)),
             potential=ttg.FKDiff(lam),
             policy=ttg.ESSBelow(0.5),
             key=key_smc,
         )
-        selected = ttg.categorical(bk, das.log_w, key_select)
+        selected = ttg.categorical(backend, das.log_weights, key_select)
         return das.final.x0[torch.arange(batch_size, device=device), selected]
     _evaluate, _nfe = counting(evaluate)
     samples_das = run_das(batch_size.value, fk_ensemble_size, _evaluate).cpu()
@@ -441,8 +449,8 @@ def _(
 
 @app.cell
 def _(
+    backend,
     batch_size,
-    bk,
     counting,
     crepe_burn_in,
     crepe_fine_steps,
@@ -459,39 +467,39 @@ def _(
     get_metrics,
     reverse_step,
     rng_seed_crepe,
-    sch,
+    schedule,
     tilt,
 ):
     def run_crepe(n_chains, n_levels, fine_steps, n_blocks, evaluate, thin=1, burn_in=0, finish=None):
         # finish: None, or dict(u0=..., n_tail=..., exact=...) to start the levels at u0 > 0 and finish to u = 0
         u0 = 0.0 if finish is None else finish['u0']
         u_levels = tuple(u0 + (1.0 - u0) * m / (n_levels - 1) for m in range(n_levels))
-        lam = ttg.level_lambda(sch.time(bk.xp.asarray(u_levels, dtype=dtype, device=device)), beta=tilt.value, rho=1.0)
+        lam = ttg.level_lambda(schedule.time(backend.xp.asarray(u_levels, dtype=dtype, device=device)), beta=tilt.value, rho=1.0)
         cfg = ttg.CREPEConfig(
             u_levels=u_levels,
-            K=fine_steps,
-            F_P=ttg.Noising(sch),
-            F_Q=ttg.Noising(sch),
-            B_P=reverse_step,
-            B_Q=ttg.Guided(reverse_step, ttg.tilt(lam)),
+            steps_per_gap=fine_steps,
+            model_noising=ttg.Noising(schedule),
+            proposal_noising=ttg.Noising(schedule),
+            model_denoising=reverse_step,
+            proposal_denoising=ttg.Guided(reverse_step, ttg.tilt(lam)),
             lam=lam,
-            local_move=ttg.LangevinMove(ttg.Guided(ttg.Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), ttg.tilt(lam, 0.5))),
+            local_move=ttg.LangevinMove(ttg.Guided(ttg.Langevin(step_size=lambda t: 0.01 * schedule.std(t) ** 2), ttg.tilt(lam, 0.5))),
             local_levels=tuple(range(n_levels - 1)),
         )
-        key_crepe, key_select = bk.split(bk.key(rng_seed_crepe), 2)
+        key_crepe, key_select = backend.split(backend.key(rng_seed_crepe), 2)
         # One instance per chain, its particles the chain's post-burn-in samples at u = 0: finished from u0 (weighted
-        # if exact, resampling only within a chain) when u0 > 0, otherwise CREPE's level-0 samples with log_w = 0.
+        # if exact, resampling only within a chain) when u0 > 0, otherwise CREPE's level-0 samples with log_weights = 0.
         out, _ = ttg.crepe_sample(
             cfg, n_chains, event_shape, n_blocks,
             n_tail=None if finish is None else finish['n_tail'],
             exact=None if finish is None else finish['exact'],
-            bk=bk, evaluate=evaluate, schedule=sch, dtype=dtype, device=device, key=key_crepe,
+            backend=backend, evaluate=evaluate, schedule=schedule, dtype=dtype, device=device, key=key_crepe,
             thin=thin, burn_in=burn_in,
         )
         if finish is None:
             return out.final.x0[:, -1]  # plain CREPE: each chain's last kept sample, denoised
         # One particle per chain, drawn from its normalized weights.
-        selected = ttg.categorical(bk, out.log_w, key_select)
+        selected = ttg.categorical(backend, out.log_weights, key_select)
         return out.final.x0[torch.arange(n_chains, device=device), selected]
     _finish = (
         dict(u0=crepe_u0.value, n_tail=int(crepe_n_tail.value), exact=crepe_finish_exact.value)
@@ -509,8 +517,8 @@ def _(
 
 @app.cell
 def _(
+    backend,
     batch_size,
-    bk,
     counting,
     device,
     dtype,
@@ -521,29 +529,29 @@ def _(
     rng_seed_rpcn,
     rpcn_pcn_steps,
     rpcn_replicas,
-    sch,
+    schedule,
     tilt,
     u_grid,
 ):
     def run_rpcn(batch_size, n_replicas, pcn_steps, evaluate):
         # Temperature ladder 0 = beta_0 < ... < beta_K = beta on the particle axis; no resampling.
-        inverse_temperatures = torch.linspace(0.0, tilt.value, n_replicas, device=device, dtype=dtype)
-        rotations = torch.linspace(math.pi / 2 - 1e-3, 0.05, n_replicas, device=device, dtype=dtype)
+        inverse_temperatures = tilt.value * torch.linspace(0.0, 1, n_replicas, device=device, dtype=dtype)**2
         if n_replicas == 1:
             inverse_temperatures += tilt.value
-            rotations += 0.05
+        step_sizes = torch.full_like(inverse_temperatures, .5)
         rpcn = ttg.smc(
-            sch.prior((batch_size, n_replicas), event_shape, xp=bk.xp, dtype=dtype, device=device),
+            schedule.prior((batch_size, n_replicas), event_shape, xp=backend.xp, dtype=dtype, device=device),
             u_grid,
-            bk=bk,
+            backend=backend,
             evaluate=evaluate,
-            schedule=sch,
+            schedule=schedule,
             target=reverse_step,
             proposal=reverse_step,
             potential=ttg.FKDiff(ttg.ladder(inverse_temperatures)),
             policy=ttg.Never(),
-            move=ttg.PCN(n_steps=pcn_steps, step=ttg.ladder(rotations.sin()), pairs=ttg.SequentialSweep()),
-            key=bk.key(rng_seed_rpcn),
+            move=ttg.PCN(n_proposals=pcn_steps, step_size=ttg.ladder(step_sizes), pairs=ttg.SequentialSweep()),
+            # move_at=lambda s: s >= 2,
+            key=backend.key(rng_seed_rpcn),
         )
         return rpcn.final.x0[:, -1]  # the beta_K = beta replica, denoised
     _evaluate, _nfe = counting(evaluate)
@@ -556,6 +564,7 @@ def _(
 @app.cell
 def _(
     bins,
+    gmm,
     metrics_crepe,
     metrics_das,
     metrics_fk,
@@ -588,6 +597,7 @@ def _(
             for method, (samples, _) in results.items()
         ])
         df_density = pl.DataFrame(tensordict_to(dict(x=x_grid, density=target_density)))
+        df_density_untilted = pl.DataFrame(tensordict_to(dict(x=x_grid, density=gmm.log_prob(x_grid).exp())))
         ax_width = page_width / 4
         aspect = 1
         g = (
@@ -601,12 +611,15 @@ def _(
             )
             .set(
                 xlim=(-13, 13),
+                # ylim=(0, .2),
+                # yscale='log',
             )
             .set_titles('')
         )
         g.map_dataframe(sns.histplot, x='x', bins=bins, stat='density', element='step', lw=.5)
         for ax, (method, (_, metrics)) in zip(g.axes.flat, results.items()):
             sns.lineplot(data=df_density, x='x', y='density', ax=ax, color='tab:orange', lw=1, zorder=-1)
+            # sns.lineplot(data=df_density_untilted, x='x', y='density', ax=ax, color='tab:red', lw=1, zorder=1)
             ax.set_xlabel('')
             xlabel = rf'{method} (KL = ${metrics["kl"]:.3f}$, $\bar{{R}} = {metrics["mean_reward"]:.3f}$)'
             print(xlabel)
