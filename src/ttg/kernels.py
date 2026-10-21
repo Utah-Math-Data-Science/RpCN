@@ -240,7 +240,39 @@ class DDIMStep:                   # eta in (0, 1]; eta = 1 equals PosteriorStep 
 
 
 @dataclass(frozen=True)
-class Langevin:                   # one unadjusted Langevin step at fixed t
+class ReverseDiffusionStep:       # Song et al. (2021) reverse diffusion sampler, with the exact forward transition
+    """Denoising step ``N((2 - m_{s|t}) x + sigma^2_{s|t} score, sigma^2_{s|t})``, for ``t < s``.
+
+    The reverse diffusion sampler of Song et al. (2021), Appendix E: the reverse SDE discretised with the
+    coefficients of the forward transition ``transition(schedule, t, s)``, and ``score = (m_s x0_hat - x) / s_s^2``.
+    The mean agrees with ``PosteriorStep``'s to first order in the step (exactly when ``m == 1``); the variance is
+    larger by ``s_s^2 / s_t^2``. Reads ``X0`` from the source record.
+
+    Parameters
+    ----------
+    schedule : Schedule
+        The noise schedule.
+    """
+
+    schedule: Any
+    requires = frozenset({Feature.X0})
+
+    def at(self, record, t_dst):
+        """Denoise ``record`` (at time ``t_src = record.t``) to the earlier time ``t_dst``. See ``Kernel.at``."""
+        xp = namespace(record.t, t_dst)
+        t_src = record.t
+        mean_src, std_src = self.schedule.mean(t_src), self.schedule.std(t_src)
+        mean_ratio = mean_src / self.schedule.mean(t_dst)                     # m_{s|t}
+        log_snr_diff = self.schedule.log_snr_diff(t_src, t_dst)               # lsnr_s - lsnr_t < 0
+        var_fraction = -xp.expm1(log_snr_diff)                                # v = sigma^2_{s|t} / s_s^2, in (0, 1)
+        # 2 - m_{s|t} - v, as (1 - m_{s|t}) + (1 - v): no cancellation as v -> 1 when m_{s|t} <= 1
+        coeff_x, coeff_x0 = (1 - mean_ratio) + xp.exp(log_snr_diff), mean_src * var_fraction
+        mean = bcast(coeff_x, record.x) * record.x + bcast(coeff_x0, record.x) * record.need(Feature.X0)
+        return Gaussian(mean, std_src**2 * var_fraction)                      # sigma^2_{s|t}
+
+
+@dataclass(frozen=True)
+class Langevin:                  # one unadjusted Langevin step at fixed t
     """One unadjusted Langevin step at fixed time: ``N(x + h score, 2 h)`` with ``h = step_size(t)``.
 
     Reads ``SCORE`` from the source record. Add a reward drift with ``Guided(Langevin(step_size), tilt(lam, 0.5))``.

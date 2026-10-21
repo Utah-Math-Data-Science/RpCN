@@ -7,7 +7,7 @@ from .evaluate import (Evaluate, eps_from_score, eps_from_x0, evaluate_rows, mak
 from .exchange import EvenOdd, Exchange, PairSchedule, SequentialSweep, StateSwap, replica_exchange
 from .guidance import event_norm, normalized, tilt
 from .kernels import (DDIMStep, EulerMaruyama, Gaussian, Guided, Kernel, Langevin, Noising, PosteriorStep,
-                      transition)
+                      ReverseDiffusionStep, transition)
 from .lam import constant, das_lambda, ladder, level_lambda, piecewise_linear, tabulated
 from .moves import PCN, LangevinMove, Move, MoveContext, rescore, tilt_delta
 from .potentials import (FKDiff, FKMax, FKSum, Potential, Relative, ReverseRatio, Sum, TiltDifference,

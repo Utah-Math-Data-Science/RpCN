@@ -44,7 +44,7 @@ All code below is **pseudocode in Python syntax**. It is meant to pin down inter
 
 | stage | modules | done when these pass |
 |---|---|---|
-| 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K13, L1, C1–C2, N2–N3 |
+| 1 | `backend/`, `ops.py`, `schedule.py`, `records.py`, `evaluate.py`, `kernels.py`, `sde.py`, `guidance.py`, `lam.py`, `testing/` (toy model, doubles) | S1–S5, V1–V2, K1–K17, L1, C1–C2, N2–N3 |
 | 2 | `potentials.py`, `resample.py`, `smc.py` (FK, DAS) | P1–P6, R1–R5, E1–E4, N1, N4 |
 | 3 | `moves.py`, `exchange.py` (FK + pCN, RpCN) | M1–M7, E5, §17 counts with moves |
 | 4 | `crepe.py` | X1–X8 |
@@ -79,7 +79,7 @@ Every design choice below exists to keep these true.
 | $\mathrm{lsnr}_t = \log(m_t^2 / s_t^2)$ | log signal-to-noise ratio, strictly decreasing in $t$ | `log_snr(t)`; differences `log_snr_diff(t_a, t_b)` |
 | $\hat x_0,\ \hat\varepsilon,\ \nabla \log p_t$ | denoiser outputs, related by $x = m_t \hat x_0 + s_t \hat\varepsilon$ and $\nabla \log p_t \approx -\hat\varepsilon / s_t$ | `X0`, `EPS`, `SCORE` |
 | $\hat r_t(x) = r(\hat x_0(x)),\ g_t(x) = \nabla_x \hat r_t(x)$ | reward and its gradient through the network | `REWARD`, `REWARD_GRAD` |
-| $F^P,\ B^P$ | model kernels: exact noising, and the model's denoising step | `cfg.model_noising` = `Noising(schedule)`, `cfg.model_denoising` = `PosteriorStep` / `DDIMStep` / `EulerMaruyama(ReverseSDE(schedule), Direction.BACKWARD)` |
+| $F^P,\ B^P$ | model kernels: exact noising, and the model's denoising step | `cfg.model_noising` = `Noising(schedule)`, `cfg.model_denoising` = `PosteriorStep` / `DDIMStep` / `ReverseDiffusionStep` / `EulerMaruyama(ReverseSDE(schedule), Direction.BACKWARD)` |
 | $F^Q,\ B^Q$ | proposal kernels: $F^Q$ in the **noising** direction, $B^Q$ in the **denoising** direction | `cfg.proposal_noising`, `cfg.proposal_denoising` (any `Kernel`) |
 | $\lambda(t),\ \ell_t = \lambda(t)\,\hat r_t$ | tilt strength and log-tilt; may also depend on ladder position | `lam` |
 | $C_t$ | cumulative log-tilt $\log \prod_{s \ge t} G_s$ along a particle's history | `potential.log_tilt(state)` |
@@ -105,7 +105,7 @@ ttg/
   schedule.py    Schedule protocol; ScheduleDefaults (log_snr, log_snr_diff); VPLinear, EDM, ...
   records.py     Feature, Point, Record
   evaluate.py    Evaluate contract, conversions, make_evaluate builders (one per backend), on_x0
-  kernels.py     Gaussian (log_prob, log_ratio); transition; Noising, PosteriorStep, DDIMStep, EulerMaruyama, Langevin, Guided
+  kernels.py     Gaussian (log_prob, log_ratio); transition; Noising, PosteriorStep, DDIMStep, ReverseDiffusionStep, EulerMaruyama, Langevin, Guided
   sde.py         Direction (FORWARD, BACKWARD); SDE protocol; ForwardSDE, ReverseSDE; drift_coeff, diffusion_sq_coeff
   guidance.py    guidance scales: tilt, normalized
   lam.py         constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
@@ -498,6 +498,7 @@ class Kernel(Protocol):
 | `Noising(schedule)` = $F^P$ | forward ($t > s$) | $\mathcal N\!\big(m_{t\mid s} x,\ \sigma^2_{t\mid s}\big)$ | none |
 | `PosteriorStep(schedule)` | backward | $\mathcal N\!\big(\tfrac{m_{s\mid t} s_t^2}{s_s^2} x + \tfrac{m_t \sigma^2_{s\mid t}}{s_s^2}\hat x_0,\ \tau^2\big)$, $\tau^2 = \tfrac{\sigma^2_{s\mid t} s_t^2}{s_s^2}$ | `X0` |
 | `DDIMStep(schedule, eta)`, $0 < \eta \le 1$ | backward | $\mathcal N\!\big(m_t \hat x_0 + \sqrt{s_t^2 - \eta^2 \tau^2}\,\hat\varepsilon,\ \eta^2 \tau^2\big)$ | `X0`, `EPS` |
+| `ReverseDiffusionStep(schedule)` | backward | $\mathcal N\!\big((2 - m_{s\mid t})\,x + \sigma^2_{s\mid t} \nabla \log p_s,\ \sigma^2_{s\mid t}\big)$ with $\nabla \log p_s = (m_s \hat x_0 - x)/s_s^2$, i.e. mean $(2 - m_{s\mid t} - v)\,x + m_s v\,\hat x_0$, $v = \sigma^2_{s\mid t}/s_s^2$ | `X0` |
 | `EulerMaruyama(sde, direction)` | `Direction.FORWARD` or `Direction.BACKWARD` | $\mathcal N\!\big(x + \Delta\, b(x, s),\ \sigma^2_{\mathrm{sde}}(s)\,\lvert\Delta\rvert\big)$, signed $\Delta = t - s$; drift $b$ and diffusion $\sigma^2_{\mathrm{sde}}$ from the injected `SDE` | `sde.requires` |
 | `Langevin(step_size)`, $h$ = `step_size`, a callable of $t$ | stays at $s$ | $\mathcal N\!\big(x + h(s) \nabla \log p,\ 2h(s)\big)$ | `SCORE` |
 | `Guided(base, scale)` | as base | base mean $+\ \kappa\, g$ with $\kappa = \texttt{scale}(t, g, \mathrm{Var}_{\text{base}})$, $g$ **at the source**; same variance | base + `REWARD_GRAD` |
@@ -561,6 +562,21 @@ class DDIMStep:                   # eta in (0, 1]; eta = 1 equals PosteriorStep 
         return Gaussian(mean, var)
 
 @dataclass(frozen=True)
+class ReverseDiffusionStep:       # Song et al. (2021) reverse diffusion sampler, with the exact forward transition
+    schedule: Schedule
+    requires = frozenset({Feature.X0})
+    def at(self, record, t_dst):
+        t_src = record.t
+        mean_src, std_src = self.schedule.mean(t_src), self.schedule.std(t_src)
+        mean_ratio = mean_src / self.schedule.mean(t_dst)                     # m_{s|t}
+        log_snr_diff = self.schedule.log_snr_diff(t_src, t_dst)               # lsnr_s - lsnr_t < 0
+        var_fraction = -xp.expm1(log_snr_diff)                                # v = sigma^2_{s|t} / s_s^2, in (0, 1)
+        # 2 - m_{s|t} - v, as (1 - m_{s|t}) + (1 - v): no cancellation as v -> 1 when m_{s|t} <= 1
+        coeff_x, coeff_x0 = (1 - mean_ratio) + xp.exp(log_snr_diff), mean_src * var_fraction
+        mean = bcast(coeff_x, record.x) * record.x + bcast(coeff_x0, record.x) * record.need(Feature.X0)
+        return Gaussian(mean, std_src**2 * var_fraction)                      # sigma^2_{s|t}
+
+@dataclass(frozen=True)
 class Langevin:                   # one unadjusted Langevin step at fixed t
     step_size: Callable           # h as a function of t, e.g. lambda t: 0.01 * schedule.std(t)**2
     requires = frozenset({Feature.SCORE})
@@ -591,6 +607,11 @@ class Guided:                     # base mean + scale(t, grad, var) * grad, with
 ```
 
 `PosteriorStep` and `DDIMStep` both write $\sigma^2_{s|t}/s_s^2 = -\operatorname{expm1}(\mathrm{lsnr}_s - \mathrm{lsnr}_t)$. In `DDIMStep`, $s_t^2 - \eta^2\tau^2 = s_t^2\,\big(1 - \eta^2 \sigma^2_{s|t}/s_s^2\big)$, which is positive because $\sigma^2_{s|t} < s_s^2$ and $\eta \le 1$.
+
+**`ReverseDiffusionStep`** is the reverse diffusion sampler of Song et al. (2021, Appendix E): the reverse SDE discretised in the same form as the forward step, $x_s = m_{s|t} x_t + \sigma_{s|t} z$, so with drift $(m_{s|t} - 1)\,x$ and noise $\sigma^2_{s|t}$. For VP ($\beta = 1 - m_{s|t}^2$) it is their Algorithm 3 predictor; for VE ($m \equiv 1$) it is Algorithm 2's, and its mean equals `PosteriorStep`'s.
+- **Variance:** $s_s^2 v = \sigma^2_{s|t}$, the same expression as `transition(schedule, t, s)`. It is `PosteriorStep`'s $\tau^2$ times $s_s^2 / s_t^2$, so it lies above every `DDIMStep` variance.
+- **Mean:** agrees with `PosteriorStep`'s and with `EulerMaruyama(ReverseSDE(schedule), Direction.BACKWARD)`'s to first order in the step, while the step is small next to $s_t$ and keeps $m_{s|t}$ near 1.
+- **Numerics:** $2 - m_{s|t} - v$ is computed as $(1 - m_{s|t}) + e^{\mathrm{lsnr}_s - \mathrm{lsnr}_t}$, since $1 - v = e^{\mathrm{lsnr}_s - \mathrm{lsnr}_t}$. With $m_{s|t} \le 1$ (all provided schedules) both terms are non-negative, so nothing cancels when $v \to 1$ (a VE step from $s_s \gg s_t$).
 
 Kernels and SDEs are plain frozen dataclasses (configuration, not pytrees). They never travel through `scan` or `tree_where`; the `Gaussian`s they return do.
 
@@ -1647,6 +1668,10 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | K10 | **`tilt` is the exact Gaussian tilt:** $\log$ `Guided(base, tilt(lam))` $(x) - \log$ `base` $(x) - \lambda \langle g, x \rangle$ is the same for any two $x$ |
 | K12 | `a.log_ratio(b, x)` equals `a.log_prob(x) - b.log_prob(x)` for any means and positive variances; with `a.var` and `b.var` equal, it equals the first term alone, exactly |
 | K13 | `transition` and `PosteriorStep` match the $s_s^2 - m_{s\mid t}^2 s_t^2$ forms of §2 and §7 |
+| K14 | `ReverseDiffusionStep` for `EDM` ($m \equiv 1$): mean $= x + (s_s^2 - s_t^2)(\hat x_0 - x)/s_s^2$, variance $= s_s^2 - s_t^2$, and the mean equals `PosteriorStep`'s |
+| K15 | `ReverseDiffusionStep` for `VPLinear` equals Song et al.'s Algorithm 3 predictor, $\mathcal N\big((2 - \sqrt{1-\beta})\,x + \beta \nabla\log p_s,\ \beta\big)$ with $\beta = 1 - m_{s\mid t}^2$ |
+| K16 | `ReverseDiffusionStep`'s variance equals `transition(schedule, t, s)[1]`, and `PosteriorStep`'s times $s_s^2 / s_t^2$, for any schedule |
+| K17 | `ReverseDiffusionStep`'s coefficients of $x$ and $\hat x_0$ and its variance agree with `EulerMaruyama(ReverseSDE(schedule), Direction.BACKWARD)`'s and `PosteriorStep`'s to first order: halving the gap ($0.01 \to 0.005$ in $u$, source $u \in [0.1, 0.9]$) shrinks every nonzero difference more than 3x, for any schedule |
 
 **Potentials** (pure, no model):
 

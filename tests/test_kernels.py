@@ -1,4 +1,4 @@
-"""K1-K13 (Gaussians and kernels), N2-N3 (precision of log_ratio and log_snr_diff)."""
+"""K1-K17 (Gaussians and kernels), N2-N3 (precision of log_ratio and log_snr_diff)."""
 
 import math
 
@@ -9,8 +9,8 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from ttg import (EDM, DDIMStep, Direction, EulerMaruyama, ForwardSDE, Gaussian, Guided, Langevin, Noising, Point,
-                 PosteriorStep, Record, ReverseSDE, VPLinear, constant, diffusion_sq_coeff, drift_coeff, normalized,
-                 tilt, transition)
+                 PosteriorStep, Record, ReverseDiffusionStep, ReverseSDE, VPLinear, constant, diffusion_sq_coeff,
+                 drift_coeff, normalized, tilt, transition)
 from ttg.ops import bcast
 from ttg.testing import UNIT_ROUNDOFF32, SMALLEST_NORMAL32, oracle
 
@@ -128,6 +128,7 @@ def proposal_kernels(sch):
     lam = constant(1.5)
     return [("noising", Noising(sch), "up"), ("posterior", PosteriorStep(sch), "down"),
             ("ddim0.3", DDIMStep(sch, 0.3), "down"), ("ddim1", DDIMStep(sch, 1.0), "down"),
+            ("reverse_diffusion", ReverseDiffusionStep(sch), "down"),
             ("em_back", em_b, "down"), ("em_fwd", em_f, "up"),
             ("em_back_eta0.5", EulerMaruyama(ReverseSDE(sch, 0.5), Direction.BACKWARD), "down"),
             ("langevin", Langevin(lambda t: 0.01 * sch.std(t) ** 2), "stay"),
@@ -274,6 +275,78 @@ def test_K13_cancellation_free_forms_match_naive(backend, make_schedule, data):
     mean = m_st * st2 / ss2 * x + bcast(sch.mean(t), x) * bcast(naive, x) / ss2 * x0
     assert np.all(np.abs(host(p.mean - mean)) <= 1e-10 * host(xp.abs(x) + xp.abs(x0) + 1))
     assert np.all(np.abs(host(p.var - naive * sch.std(t) ** 2 / sch.std(s) ** 2)) <= 1e-12 * host(sch.std(t) ** 2))
+
+
+@backends
+@given(data=st.data())
+def test_K14_reverse_diffusion_step_ve(backend, data):
+    xp, sch = backend.xp, EDM()
+    B, D, (x, x0, _) = data.draw(problem(backend))
+    u_t, u_s = data.draw(u_pair())
+    t, s = full(backend, B, sch.time(u_t)), full(backend, B, sch.time(u_s))
+    rec = Record(x, s, x0=x0)
+    r, p = ReverseDiffusionStep(sch).at(rec, t), PosteriorStep(sch).at(rec, t)
+    gap = s**2 - t**2                                      # sigma^2_{s|t} for m == 1
+    want = x + bcast(gap / s**2, x) * (x0 - x)
+    scale = host(xp.abs(x) + xp.abs(x0) + 1)
+    assert np.all(np.abs(host(r.mean - want)) <= 1e-12 * scale)
+    assert close(r.var, gap, 1e-12)
+    assert np.all(np.abs(host(r.mean - p.mean)) <= 1e-12 * scale)
+
+
+@backends
+@given(data=st.data())
+def test_K15_reverse_diffusion_step_is_song_vp_predictor(backend, data):
+    xp, sch = backend.xp, VPLinear()
+    B, D, (x, x0, _) = data.draw(problem(backend))
+    u_t, u_s = data.draw(u_pair())
+    t, s = full(backend, B, sch.time(u_t)), full(backend, B, sch.time(u_s))
+    r = ReverseDiffusionStep(sch).at(Record(x, s, x0=x0), t)
+    beta = 1 - (sch.mean(s) / sch.mean(t)) ** 2            # Song et al. (2021), Algorithm 3
+    score = (bcast(sch.mean(s), x) * x0 - x) / bcast(sch.std(s) ** 2, x)
+    want = bcast(2 - xp.sqrt(1 - beta), x) * x + bcast(beta, x) * score
+    assert np.all(np.abs(host(r.mean - want)) <= 1e-12 * host(xp.abs(x) + xp.abs(x0) + 1))
+    assert close(r.var, beta, 1e-10, 1e-15)
+
+
+@backends
+@schedules
+@given(data=st.data())
+def test_K16_reverse_diffusion_step_variance(backend, make_schedule, data):
+    sch = make_schedule()
+    B, D, (x, x0, _) = data.draw(problem(backend))
+    u_t, u_s = data.draw(u_pair())
+    t, s = full(backend, B, sch.time(u_t)), full(backend, B, sch.time(u_s))
+    rec = Record(x, s, x0=x0)
+    var = ReverseDiffusionStep(sch).at(rec, t).var
+    assert close(var, transition(sch, t, s)[1], 1e-12)
+    assert close(var / PosteriorStep(sch).at(rec, t).var, sch.std(s) ** 2 / sch.std(t) ** 2, 1e-12)
+
+
+@backends
+@schedules
+@given(u=st.floats(0.1, 0.9))                   # the step must be small next to s_t and to m_{s|t} - 1
+def test_K17_reverse_diffusion_step_first_order(backend, make_schedule, u):
+    xp, sch = backend.xp, make_schedule()
+    s = xp.asarray([sch.time(u)], dtype=xp.float64)
+    one, zero = xp.ones((1, 1), dtype=xp.float64), xp.zeros((1, 1), dtype=xp.float64)
+
+    def coeffs(kernel, t):                                 # (coefficient of x, of x0_hat, variance)
+        out = []
+        for x, x0 in ((one, zero), (zero, one)):
+            score = (bcast(sch.mean(s), x) * x0 - x) / bcast(sch.std(s) ** 2, x)
+            out.append(host(kernel.at(Record(x, s, x0=x0, score=score), t).mean)[0, 0])
+        return np.array([*out, host(kernel.at(Record(one, s, x0=zero, score=-one), t).var)[0]])
+
+    def diffs(gap):                                        # |ReverseDiffusionStep - other| per coefficient
+        t = xp.asarray([sch.time(u - gap)], dtype=xp.float64)
+        r = coeffs(ReverseDiffusionStep(sch), t)
+        return [np.abs(r - coeffs(k, t)) for k in (EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD),
+                                                    PosteriorStep(sch))]
+
+    for coarse, fine in zip(diffs(0.01), diffs(0.005)):    # halving the gap shrinks the differences ~4x
+        ok = coarse > 1e-13
+        assert np.all(coarse[ok] / fine[ok] > 3.0), (coarse, fine)
 
 
 # ---- precision --------------------------------------------------------------------------------
