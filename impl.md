@@ -102,7 +102,7 @@ Always use the right-hand ($\operatorname{expm1}$) form. The left-hand form canc
 ttg/
   backend/       Backend protocol; jax.py, torch.py (via array-api-compat), strict.py (array_api_strict)
   ops.py         xp-only helpers: bcast, logsumexp, take_rows, flatten/unflatten, take/put_levels, tree_where
-  schedule.py    Schedule protocol; ScheduleDefaults (log_snr, log_snr_diff); VPLinear, EDM, ...
+  schedule.py    Schedule protocol; ScheduleDefaults (log_snr, log_snr_diff); Beta, BetaDefaults, LinearBeta, CosineBeta; VP (VPLinear, VPCosine), EDM, RectifiedFlow
   records.py     Feature, Point, Record
   evaluate.py    Evaluate contract, conversions, make_evaluate builders (one per backend), on_x0
   kernels.py     Gaussian (log_prob, log_ratio); transition; Noising, PosteriorStep, DDIMStep, ReverseDiffusionStep, EulerMaruyama, Langevin, Guided
@@ -275,29 +275,62 @@ class ScheduleDefaults:              # mixin: the two optional methods
 
 **`log_snr_diff`.** The defaults are correct for any schedule. Where a schedule can write the difference as a closed form in $s - t$, override it (as below): the default loses accuracy on very fine grids.
 
-The schedule owns its edge cases by choosing $\tau$'s range. Implement these three:
+The schedule owns its edge cases by choosing $\tau$'s range. Implement these three families, `VP` with any noise rate `Beta`, `EDM` and `RectifiedFlow`. `VP`'s `log_snr_diff` is as accurate as `beta.integral_diff`, so a user-written `Beta` should override it where it has a closed form in $t_a - t_b$:
 
 ```python
+class Beta(Protocol):                # noise rate of a VP schedule: alpha_bar_t = exp(-int_0^t beta)
+    def rate(self, t): ...           # beta(t)
+    def integral(self, t): ...       # int_0^t beta = -log alpha_bar_t
+    def integral_diff(self, t_a, t_b): ...   # integral(t_a) - integral(t_b); default by subtraction
+
+class BetaDefaults:                  # mixin
+    def integral_diff(self, t_a, t_b):   # accurate only to ~eps * |integral|; override for tiny gaps
+        return self.integral(t_a) - self.integral(t_b)
+
 @dataclass(frozen=True)
-class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  alpha_bar = exp(-int beta)
-    beta_0: float = 0.1; beta_1: float = 20.0; t_min: float = 1e-3; t_max: float = 1.0
+class LinearBeta(BetaDefaults):      # beta(t) = beta_0 + t (beta_1 - beta_0)
+    beta_0: float = 0.1; beta_1: float = 20.0
+    def rate(self, t):     return self.beta_0 + t * (self.beta_1 - self.beta_0)
+    def integral(self, t): return self.beta_0 * t + 0.5 * (self.beta_1 - self.beta_0) * t**2
+    def integral_diff(self, t_a, t_b):
+        return (t_a - t_b) * (self.beta_0 + 0.5 * (self.beta_1 - self.beta_0) * (t_a + t_b))
+
+@dataclass(frozen=True)
+class CosineBeta(BetaDefaults):      # alpha_bar_t = cos^2(theta_t) / cos^2(theta_0), theta_t = pi/2 (t + o) / (1 + o)
+    offset: float = 0.008            # alpha_bar_1 = 0: use with t_max < 1
+    def _tan_theta(self, t):         # sin(theta) / sin(pi/2 - theta): both sines are well conditioned on [0, 1)
+        theta = 0.5 * math.pi * (t + self.offset) / (1 + self.offset)
+        phi = 0.5 * math.pi * (1 - t) / (1 + self.offset)            # pi/2 - theta, accurate near t = 1
+        return xp.sin(theta) / xp.sin(phi)
+    def rate(self, t):     return math.pi / (1 + self.offset) * self._tan_theta(t)
+    def integral(self, t): return self.integral_diff(t, xp.zeros_like(t))   # two log cos would cancel near t = 0
+    def integral_diff(self, t_a, t_b):
+        delta = 0.5 * math.pi * (t_a - t_b) / (1 + self.offset)   # theta_a - theta_b
+        # cos(theta_b + delta) / cos(theta_b) = 1 - 2 sin^2(delta / 2) - tan(theta_b) sin(delta)
+        return -2 * xp.log1p(-2 * xp.sin(0.5 * delta) ** 2 - self._tan_theta(t_b) * xp.sin(delta))
+
+@dataclass(frozen=True)
+class VP(ScheduleDefaults):          # alpha_bar = exp(-int_0^t beta), for any noise rate beta
+    beta: Beta; t_min: float = 1e-3; t_max: float = 1.0   # t_max must keep alpha_bar > 0
     def time(self, u):    return self.t_min + u * (self.t_max - self.t_min)
-    def _log_alpha_bar(self, t): return -(self.beta_0 * t + 0.5 * (self.beta_1 - self.beta_0) * t**2)
-    def _beta(self, t):   return self.beta_0 + t * (self.beta_1 - self.beta_0)
-    def mean(self, t):    return xp.exp(0.5 * self._log_alpha_bar(t))
-    def std(self, t):     return xp.sqrt(-xp.expm1(self._log_alpha_bar(t)))
-    def dt_mean(self, t): return -0.5 * self._beta(t) * self.mean(t)
-    def dt_std(self, t):  return 0.5 * self._beta(t) * xp.exp(self._log_alpha_bar(t)) / self.std(t)
+    def mean(self, t):    return xp.exp(-0.5 * self.beta.integral(t))
+    def std(self, t):     return xp.sqrt(-xp.expm1(-self.beta.integral(t)))
+    def dt_mean(self, t): return -0.5 * self.beta.rate(t) * self.mean(t)
+    def dt_std(self, t):  return 0.5 * self.beta.rate(t) * xp.exp(-self.beta.integral(t)) / self.std(t)
     def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):
         return Gaussian(xp.zeros((*leading_shape, *event_shape), dtype=dtype, device=device),
                         xp.ones(leading_shape, dtype=dtype, device=device))
-    def log_snr(self, t): return self._log_alpha_bar(t) - xp.log(-xp.expm1(self._log_alpha_bar(t)))
+    def log_snr(self, t):
+        log_alpha_bar = -self.beta.integral(t)
+        return log_alpha_bar - xp.log(-xp.expm1(log_alpha_bar))
     def log_snr_diff(self, t_a, t_b):
-        # log ab_a - log ab_b, via t_a - t_b
-        log_alpha_bar_diff = -(t_a - t_b) * (self.beta_0 + 0.5 * (self.beta_1 - self.beta_0) * (t_a + t_b))
-        log_alpha_bar_b = self._log_alpha_bar(t_b)
+        log_alpha_bar_diff = -self.beta.integral_diff(t_a, t_b)     # log ab_a - log ab_b
+        log_alpha_bar_b = -self.beta.integral(t_b)
         return log_alpha_bar_diff - xp.log1p(xp.exp(log_alpha_bar_b) * xp.expm1(log_alpha_bar_diff)
                                              / xp.expm1(log_alpha_bar_b))   # minus log((1 - ab_a) / (1 - ab_b))
+
+def VPLinear(beta_0=0.1, beta_1=20.0, t_min=1e-3, t_max=1.0): return VP(LinearBeta(beta_0, beta_1), t_min, t_max)
+def VPCosine(offset=0.008, t_min=1e-3, t_max=0.999):         return VP(CosineBeta(offset), t_min, t_max)
 
 @dataclass(frozen=True)
 class EDM(ScheduleDefaults):         # t = sigma; non-uniform spacing lives in time(u)
@@ -330,7 +363,7 @@ class RectifiedFlow(ScheduleDefaults):  # x_t = (1 - t) x0 + t eps, clipped to [
     def log_snr_diff(self, t_a, t_b): return 2 * (xp.log1p(-(t_a - t_b) / (1 - t_b)) - xp.log1p((t_a - t_b) / t_b))
 ```
 
-All three are used by the tests (`SCHEDULES`, §18).
+`VPLinear`, `VPCosine`, `EDM` and `RectifiedFlow` are used by the tests (`SCHEDULES`, §18).
 
 **Final denoising** is the default. `u = 0` maps to `t_min`, not to clean data, so `smc`, `crepe_finish` and `CREPEConfig` all default `out_needs` to `{X0}`, and `final.x0` gives $\hat x_0$ at the last point. This costs nothing extra, because that point is evaluated anyway. Pass `out_needs=frozenset()` to keep only `x` and the features the run itself needs.
 
@@ -1536,7 +1569,7 @@ def available_backends():              # strict always; jax (with jax_enable_x64
     return out
 
 BACKENDS = available_backends()
-SCHEDULES = [VPLinear, EDM, RectifiedFlow]   # constructors take no arguments; defaults as in §5
+SCHEDULES = [VPLinear, VPCosine, EDM, RectifiedFlow]   # constructors take no arguments; defaults as in §5
 
 def xps_for(backend):                  # Hypothesis may not know the newest standard revision yet:
     return make_strategies_namespace(backend.xp, api_version=max(hypothesis.extra.array_api.RELEASED_VERSIONS))
@@ -1663,7 +1696,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 | K6 | every proposal kernel has `var > 0` on `time([0, 1])` (I6) |
 | K7 | `Guided(base, normalized(step_length))`'s mean shift has norm $\gamma(t)\,\lVert g \rVert / (\lVert g \rVert + 10^{-12})$ (so $\gamma(t)$ up to the guard), for $g \ne 0$ |
 | K8 | `EulerMaruyama` has `var > 0` when used in its configured direction, and `var <= 0` when misused |
-| K9 | `diffusion_sq_coeff` equals $\beta(t)$ for `VPLinear`, and $2t$ for `EDM` |
+| K9 | `diffusion_sq_coeff` equals `beta.rate(t)` for `VPLinear` and `VPCosine`, and $2t$ for `EDM` |
 | K11 | `ForwardSDE` requires nothing; `ReverseSDE(eta=1)` drift equals $f x - \gamma^2 \nabla \log p$; `diffusion_sq > 0` for every provided SDE with $\eta > 0$ |
 | K10 | **`tilt` is the exact Gaussian tilt:** $\log$ `Guided(base, tilt(lam))` $(x) - \log$ `base` $(x) - \lambda \langle g, x \rangle$ is the same for any two $x$ |
 | K12 | `a.log_ratio(b, x)` equals `a.log_prob(x) - b.log_prob(x)` for any means and positive variances; with `a.var` and `b.var` equal, it equals the first term alone, exactly |
@@ -1691,7 +1724,7 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 |---|---|
 | N1 | **increments don't see $C$:** for drawn float32 states with accumulators up to $10^6$ and a non-final record, every FK potential's `increment` is within $4\epsilon\,\big(\lvert \text{inc} \rvert + \lvert\lambda\rvert(\lvert \hat r_{\text{prev}} \rvert + \lvert \hat r \rvert)\big)$ of the oracle. The bound contains no accumulator, so it fails if a $C$ difference ever creeps back in |
 | N2 | **`log_ratio` with shared variance:** for $x$ = mean of `b` plus noise, `a.log_ratio(b, x)` is within $8\epsilon \sum_i \lvert \Delta_i \rvert \big(\lvert y_i \rvert + \lvert \Delta_i \rvert\big) / v$, plus the underflow floor, of the oracle. The bound is independent of $D \log v$ |
-| N3 | **`log_snr_diff` overrides are relatively accurate:** for `VPLinear` and `EDM`, with gaps $s - t$ down to $10^{-6}$ of the range, the float32 result is within $16\epsilon\,\lvert \text{oracle} \rvert$; consequently, `transition` variances are $> 0$ on every such pair (I6) |
+| N3 | **`log_snr_diff` overrides are relatively accurate:** for `VPLinear`, `VPCosine` and `EDM`, with gaps $s - t$ down to $10^{-6}$ of the range, the float32 result is within $16\epsilon\,\lvert \text{oracle} \rvert$; consequently, `transition` variances are $> 0$ on every such pair (I6) |
 | N4 | **structural:** with a spy potential, `smc` calls `log_tilt` only at the start point. `PCN` calls it only when `prev_potential_state is None`, and `StateSwap` (different histories, §12) always does. Everything else goes through `increment`. |
 
 **Resampling:**

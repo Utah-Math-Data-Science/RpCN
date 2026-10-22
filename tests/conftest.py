@@ -5,7 +5,7 @@ import array_api_strict
 import pytest
 from hypothesis import settings
 
-from ttg import EDM, RectifiedFlow, VPLinear
+from ttg import EDM, RectifiedFlow, VPCosine, VPLinear
 from ttg.backend import StrictBackend
 from ttg.ops import importable
 from ttg.testing.strategies import element_bounds, leading_shape, u_pair, xps_for  # noqa: F401  (re-exported for tests)
@@ -36,7 +36,7 @@ def available_backends():              # strict always; jax (with jax_enable_x64
 
 
 BACKENDS = available_backends()
-SCHEDULES = [VPLinear, EDM, RectifiedFlow]   # constructors take no arguments; defaults as in §5
+SCHEDULES = [VPLinear, VPCosine, EDM, RectifiedFlow]   # constructors take no arguments; defaults as in §5
 
 backends = pytest.mark.parametrize("backend", BACKENDS, ids=str)
 schedules = pytest.mark.parametrize("make_schedule", SCHEDULES, ids=lambda c: c.__name__)

@@ -9,8 +9,8 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from ttg import (EDM, DDIMStep, Direction, EulerMaruyama, ForwardSDE, Gaussian, Guided, Langevin, Noising, Point,
-                 PosteriorStep, Record, ReverseDiffusionStep, ReverseSDE, VPLinear, constant, diffusion_sq_coeff,
-                 drift_coeff, normalized, tilt, transition)
+                 PosteriorStep, Record, ReverseDiffusionStep, ReverseSDE, VPCosine, VPLinear, constant,
+                 diffusion_sq_coeff, drift_coeff, normalized, tilt, transition)
 from ttg.ops import bcast
 from ttg.testing import UNIT_ROUNDOFF32, SMALLEST_NORMAL32, oracle
 
@@ -194,9 +194,10 @@ def test_K8_euler_maruyama_direction(backend, make_schedule, data, eta):
 @given(u=st.floats(0.0, 1.0))
 def test_K9_diffusion_sq_coeff_closed_forms(backend, u):
     xp = backend.xp
-    vp, edm = VPLinear(), EDM()
-    t = vp.time(xp.asarray([u], dtype=xp.float64))
-    assert close(diffusion_sq_coeff(vp, t), vp._beta(t), 1e-10)
+    for vp in (VPLinear(), VPCosine()):
+        t = vp.time(xp.asarray([u], dtype=xp.float64))
+        assert close(diffusion_sq_coeff(vp, t), vp.beta.rate(t), 1e-10)
+    edm = EDM()
     t = edm.time(xp.asarray([u], dtype=xp.float64))
     assert close(diffusion_sq_coeff(edm, t), 2 * t, 1e-12)
 
@@ -378,7 +379,7 @@ def test_N2_log_ratio_shared_variance_precision(backend, data):
 
 
 @backends
-@pytest.mark.parametrize("make_schedule", [VPLinear, EDM], ids=lambda c: c.__name__)
+@pytest.mark.parametrize("make_schedule", [VPLinear, VPCosine, EDM], ids=lambda c: c.__name__)
 @given(u=st.floats(0.0, float(np.float32(0.999)), width=32, allow_subnormal=False),   # normal float32 scalars
        log_gap=st.floats(-6.0, -1.0, width=32))
 def test_N3_log_snr_diff_overrides_relatively_accurate(backend, make_schedule, u, log_gap):

@@ -14,7 +14,8 @@ from .potentials import (FKDiff, FKMax, FKSum, Potential, Relative, ReverseRatio
                          TiltEnds, Zero)
 from .records import DuplicateEvaluation, Feature, MissingFeature, PartialRecord, Point, Record
 from .resample import ESSBelow, Every, Never, categorical, ess, masked_resample, systematic
-from .schedule import EDM, RectifiedFlow, Schedule, ScheduleDefaults, VPLinear
+from .schedule import (EDM, VP, Beta, BetaDefaults, CosineBeta, LinearBeta, RectifiedFlow, Schedule, ScheduleDefaults,
+                       VPCosine, VPLinear)
 from .sde import SDE, Direction, ForwardSDE, ReverseSDE, diffusion_sq_coeff, drift_coeff
 from .smc import SMCResult, smc
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .kernels import Gaussian
 from .ops import namespace
@@ -109,12 +110,52 @@ class ScheduleDefaults:
         return self.log_snr(t_a) - self.log_snr(t_b)
 
 
-@dataclass(frozen=True)
-class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  alpha_bar = exp(-int beta)
-    """Variance-preserving schedule with linear ``beta(t) = beta_0 + t (beta_1 - beta_0)``.
+class Beta(Protocol):
+    """A noise rate ``beta(t) >= 0`` for a ``VP`` schedule, with ``alpha_bar_t = exp(-int_0^t beta)``.
 
-    ``m_t = sqrt(alpha_bar_t)``, ``s_t = sqrt(1 - alpha_bar_t)`` with ``alpha_bar_t = exp(-int_0^t beta)``;
-    ``time`` is linear from ``t_min`` to ``t_max``. Prior: ``N(0, 1)``.
+    All methods compute elementwise in the dtype of their input.
+    """
+
+    def rate(self, t):               # beta(t)
+        """Noise rate ``beta(t)``."""
+        ...
+
+    def integral(self, t):           # int_0^t beta = -log alpha_bar_t
+        """Cumulative rate ``int_0^t beta`` (``= -log alpha_bar_t``)."""
+        ...
+
+    def integral_diff(self, t_a, t_b):   # integral(t_a) - integral(t_b)
+        """``integral(t_a) - integral(t_b)``, accurate for small gaps ``t_a - t_b``.
+
+        Parameters
+        ----------
+        t_a, t_b : array
+            Same shape.
+
+        Returns
+        -------
+        array
+            Same shape.
+        """
+        ...
+
+
+class BetaDefaults:
+    """Mixin: default ``integral_diff`` by direct subtraction."""
+
+    def integral_diff(self, t_a, t_b):   # accurate only to ~eps * |integral|; override for tiny gaps
+        """``integral(t_a) - integral(t_b)`` by direct subtraction.
+
+        Notes
+        -----
+        Accurate only to about ``eps * |integral|``; override it to stay relatively accurate for tiny gaps.
+        """
+        return self.integral(t_a) - self.integral(t_b)
+
+
+@dataclass(frozen=True)
+class LinearBeta(BetaDefaults):      # beta(t) = beta_0 + t (beta_1 - beta_0)
+    """Linear noise rate ``beta(t) = beta_0 + t (beta_1 - beta_0)`` (Ho et al., 2020; Song et al., 2021).
 
     Parameters
     ----------
@@ -122,14 +163,79 @@ class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  
         ``beta`` at ``t = 0``.
     beta_1 : float, default 20.0
         ``beta`` at ``t = 1``.
-    t_min : float, default 1e-3
-        ``time(0)``; keeps ``s_t > 0``.
-    t_max : float, default 1.0
-        ``time(1)``.
     """
 
     beta_0: float = 0.1
     beta_1: float = 20.0
+
+    def rate(self, t):
+        """``beta_0 + t (beta_1 - beta_0)``. See ``Beta.rate``."""
+        return self.beta_0 + t * (self.beta_1 - self.beta_0)
+
+    def integral(self, t):
+        """``beta_0 t + (beta_1 - beta_0) t^2 / 2``. See ``Beta.integral``."""
+        return self.beta_0 * t + 0.5 * (self.beta_1 - self.beta_0) * t**2
+
+    def integral_diff(self, t_a, t_b):
+        """``(t_a - t_b) (beta_0 + (beta_1 - beta_0) (t_a + t_b) / 2)``. See ``Beta.integral_diff``."""
+        return (t_a - t_b) * (self.beta_0 + 0.5 * (self.beta_1 - self.beta_0) * (t_a + t_b))
+
+
+@dataclass(frozen=True)
+class CosineBeta(BetaDefaults):      # alpha_bar_t = cos^2(theta_t) / cos^2(theta_0), theta_t = pi/2 (t + o) / (1 + o)
+    """Cosine schedule of Nichol and Dhariwal (2021): ``alpha_bar_t = cos^2(theta_t) / cos^2(theta_0)``.
+
+    ``theta_t = (pi / 2) (t + offset) / (1 + offset)``. ``alpha_bar_1 = 0``, so use it with ``t_max < 1``
+    (``VPCosine`` defaults to 0.999).
+
+    Parameters
+    ----------
+    offset : float, default 0.008
+        Keeps ``beta`` finite near ``t = 0``.
+    """
+
+    offset: float = 0.008
+
+    def _tan_theta(self, t):         # sin(theta) / sin(pi/2 - theta): both sines are well conditioned on [0, 1)
+        xp = namespace(t)
+        theta = 0.5 * math.pi * (t + self.offset) / (1 + self.offset)
+        phi = 0.5 * math.pi * (1 - t) / (1 + self.offset)            # pi/2 - theta, accurate near t = 1
+        return xp.sin(theta) / xp.sin(phi)
+
+    def rate(self, t):
+        """``2 tan(theta_t) dtheta/dt``. See ``Beta.rate``."""
+        return math.pi / (1 + self.offset) * self._tan_theta(t)
+
+    def integral(self, t):
+        """``-2 log(cos(theta_t) / cos(theta_0))``, as ``integral_diff(t, 0)``. See ``Beta.integral``."""
+        return self.integral_diff(t, namespace(t).zeros_like(t))   # two log cos would cancel near t = 0
+
+    def integral_diff(self, t_a, t_b):
+        """``-2 log(cos(theta_a) / cos(theta_b))``, computed through ``t_a - t_b``. See ``Beta.integral_diff``."""
+        xp = namespace(t_a, t_b)
+        delta = 0.5 * math.pi * (t_a - t_b) / (1 + self.offset)   # theta_a - theta_b
+        # cos(theta_b + delta) / cos(theta_b) = 1 - 2 sin^2(delta / 2) - tan(theta_b) sin(delta)
+        return -2 * xp.log1p(-2 * xp.sin(0.5 * delta) ** 2 - self._tan_theta(t_b) * xp.sin(delta))
+
+
+@dataclass(frozen=True)
+class VP(ScheduleDefaults):          # alpha_bar = exp(-int_0^t beta), for any noise rate beta
+    """Variance-preserving schedule ``m_t = sqrt(alpha_bar_t)``, ``s_t = sqrt(1 - alpha_bar_t)``.
+
+    ``alpha_bar_t = exp(-int_0^t beta)`` for the noise rate ``beta``; ``time`` is linear from ``t_min`` to
+    ``t_max``. Prior: ``N(0, 1)``. ``log_snr_diff`` is as accurate as ``beta.integral_diff``.
+
+    Parameters
+    ----------
+    beta : Beta
+        Noise rate, e.g. ``LinearBeta()`` or ``CosineBeta()``.
+    t_min : float, default 1e-3
+        ``time(0)``; keeps ``s_t > 0``.
+    t_max : float, default 1.0
+        ``time(1)``; must keep ``alpha_bar_t > 0``.
+    """
+
+    beta: Any
     t_min: float = 1e-3
     t_max: float = 1.0
 
@@ -137,28 +243,22 @@ class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  
         """``t_min + u (t_max - t_min)``. See ``Schedule.time``."""
         return self.t_min + u * (self.t_max - self.t_min)
 
-    def _log_alpha_bar(self, t):
-        return -(self.beta_0 * t + 0.5 * (self.beta_1 - self.beta_0) * t**2)
-
-    def _beta(self, t):
-        return self.beta_0 + t * (self.beta_1 - self.beta_0)
-
     def mean(self, t):
         """``sqrt(alpha_bar_t)``. See ``Schedule.mean``."""
-        return namespace(t).exp(0.5 * self._log_alpha_bar(t))
+        return namespace(t).exp(-0.5 * self.beta.integral(t))
 
     def std(self, t):
         """``sqrt(1 - alpha_bar_t)``. See ``Schedule.std``."""
         xp = namespace(t)
-        return xp.sqrt(-xp.expm1(self._log_alpha_bar(t)))
+        return xp.sqrt(-xp.expm1(-self.beta.integral(t)))
 
     def dt_mean(self, t):
         """``-beta(t) m_t / 2``. See ``Schedule.dt_mean``."""
-        return -0.5 * self._beta(t) * self.mean(t)
+        return -0.5 * self.beta.rate(t) * self.mean(t)
 
     def dt_std(self, t):
         """``beta(t) alpha_bar_t / (2 s_t)``. See ``Schedule.dt_std``."""
-        return 0.5 * self._beta(t) * namespace(t).exp(self._log_alpha_bar(t)) / self.std(t)
+        return 0.5 * self.beta.rate(t) * namespace(t).exp(-self.beta.integral(t)) / self.std(t)
 
     def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):
         """Return the standard normal ``N(0, 1)``. See ``Schedule.prior``."""
@@ -168,16 +268,50 @@ class VPLinear(ScheduleDefaults):    # beta(t) = beta_0 + t (beta_1 - beta_0),  
     def log_snr(self, t):
         """``log(alpha_bar_t / (1 - alpha_bar_t))``. See ``Schedule.log_snr``."""
         xp = namespace(t)
-        return self._log_alpha_bar(t) - xp.log(-xp.expm1(self._log_alpha_bar(t)))
+        log_alpha_bar = -self.beta.integral(t)
+        return log_alpha_bar - xp.log(-xp.expm1(log_alpha_bar))
 
     def log_snr_diff(self, t_a, t_b):
-        """``log_snr(t_a) - log_snr(t_b)``, computed through ``t_a - t_b``. See ``Schedule.log_snr_diff``."""
+        """``log_snr(t_a) - log_snr(t_b)``, computed through ``beta.integral_diff``. See ``Schedule.log_snr_diff``."""
         xp = namespace(t_a, t_b)
-        # log ab_a - log ab_b, via t_a - t_b
-        log_alpha_bar_diff = -(t_a - t_b) * (self.beta_0 + 0.5 * (self.beta_1 - self.beta_0) * (t_a + t_b))
-        log_alpha_bar_b = self._log_alpha_bar(t_b)
+        log_alpha_bar_diff = -self.beta.integral_diff(t_a, t_b)     # log ab_a - log ab_b
+        log_alpha_bar_b = -self.beta.integral(t_b)
         return log_alpha_bar_diff - xp.log1p(xp.exp(log_alpha_bar_b) * xp.expm1(log_alpha_bar_diff)
                                              / xp.expm1(log_alpha_bar_b))   # minus log((1 - ab_a) / (1 - ab_b))
+
+
+def VPLinear(beta_0=0.1, beta_1=20.0, t_min=1e-3, t_max=1.0):   # noqa: N802  (a schedule constructor)
+    """``VP(LinearBeta(beta_0, beta_1), t_min, t_max)``: the linear-``beta`` VP schedule.
+
+    Parameters
+    ----------
+    beta_0, beta_1 : float
+        See ``LinearBeta``.
+    t_min, t_max : float
+        See ``VP``.
+
+    Returns
+    -------
+    VP
+    """
+    return VP(LinearBeta(beta_0, beta_1), t_min, t_max)
+
+
+def VPCosine(offset=0.008, t_min=1e-3, t_max=0.999):   # noqa: N802  (a schedule constructor)
+    """``VP(CosineBeta(offset), t_min, t_max)``: the cosine VP schedule, stopped short of ``alpha_bar_1 = 0``.
+
+    Parameters
+    ----------
+    offset : float
+        See ``CosineBeta``.
+    t_min, t_max : float
+        See ``VP``.
+
+    Returns
+    -------
+    VP
+    """
+    return VP(CosineBeta(offset), t_min, t_max)
 
 
 @dataclass(frozen=True)
