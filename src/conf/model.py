@@ -101,3 +101,15 @@ class RpCN(Steering):
     chain_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
     pcn_update_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
     tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
+
+
+class CREPE(Steering):
+    tilt: float = orm.make_field(orm.ColumnRequired(sa.Double), default=omegaconf.MISSING)
+    level_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
+    block_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=omegaconf.MISSING)
+    tilt_decay_exponent: float = orm.make_field(orm.ColumnRequired(sa.Double), default=1.)
+    guided_proposal: bool = orm.make_field(orm.ColumnRequired(sa.Boolean), default=False)
+    langevin_step_size: float = orm.make_field(orm.ColumnRequired(sa.Double), default=0.)
+    lowest_level: float = orm.make_field(orm.ColumnRequired(sa.Double), default=0.)
+    finish_step_count: int = orm.make_field(orm.ColumnRequired(sa.Integer), default=0)
+    exact_finish: bool = orm.make_field(orm.ColumnRequired(sa.Boolean), default=False)

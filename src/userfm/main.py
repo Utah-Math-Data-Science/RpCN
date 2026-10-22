@@ -16,8 +16,8 @@ import diffrax
 import lineax
 import lightning.pytorch as pl
 import spt_guidance.jax.spt as spt
-import spt_guidance.jax.fk_steering as fk_steering
-import spt_guidance.jax.rpcn as rpcn
+import ttg
+import ttg.backend
 
 import conf.conf
 import conf.dataset
@@ -27,6 +27,7 @@ import userfm.callbacks
 import userfm.datasets
 import userfm.event_constraints
 import userfm.loggers
+import userfm.schedule
 import userfm.sde_diffusion
 import userfm.utils
 
@@ -98,93 +99,135 @@ class JaxLightning(pl.LightningModule):
                         jnp.linspace(0, self.cfg.steering.tilt, self.cfg.steering.chain_count),
                         jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, self.cfg.steering.chain_count)),
                     )
-                elif isinstance(self.cfg.steering, conf.model.FeynmanKac):
-                    def propose(key, t0, t1, sample):
-                        return self.sample(t0, t1, dt, sample, as_score=True, key=key).ys[-1]
-                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardExpectedSample):
-                        intermediate_reward = fk_steering.IntermediateReward.EXPECTED_SAMPLE
-                        def expected_sample_fn(key, t0, batch):
-                            t0 = t0 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
-                            g2_score = 2 * self.velocity(batch, t0, self.params_ema)
-                            score_multiplier = self.diffusion.sigma(1 - t0)**2 / self.diffusion.g2(1 - t0)
-                            return (batch + score_multiplier * g2_score) / self.diffusion.scale(1 - t0)
-                        kwargs_intermediate_reward = dict(
-                            expected_sample_fn=expected_sample_fn,
-                        )
-                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
-                        intermediate_reward = fk_steering.IntermediateReward.SUB_ENSEMBLE_PUSHFORWARD
-                        kwargs_intermediate_reward = dict(
-                            sub_ensemble_size=self.cfg.steering.intermediate_reward.sub_ensemble_size,
-                            pushforward_fn=lambda key, t0, batch: self.sample(
-                                t0, self.times[-1], dt,
-                                batch,
-                                as_score=True,
-                                key=key,
-                                virtual_brownian_tree=diffrax.VirtualBrownianTree(t0, 1., tol=1e-3, shape=batch.shape, key=key),
-                            ).ys[-1],
-                        )
-                    else:
-                        raise ValueError(f'Unknown Feynman-Kac steering intermediate reward: {self.cfg.steering.intermediate_reward}')
-                    inverse_temperature = self.cfg.steering.tilt
-                    if self.cfg.steering.chain_count > 1:
-                        inverse_temperature = jnp.linspace(
-                            0, self.cfg.steering.tilt, self.cfg.steering.chain_count,
-                        )
-                    self.feynman_kac = fk_steering.FeynmanKac(
-                        init_param_fn=lambda key: self.noise_std * jax.random.normal(key, (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim)),
-                        reward_fn=partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
-                        propose_fn=propose,
-                        resample_fn=fk_steering.ResampleFn.adaptive_resample,
-                        potential=self.cfg.steering.potential,
-                        intermediate_reward=intermediate_reward,
-                        inverse_temperature=inverse_temperature,
-                        kwargs_intermediate_reward=kwargs_intermediate_reward,
-                    )
-                elif isinstance(self.cfg.steering, conf.model.RpCN):
-                    def expected_next_fn(t0, t1, batch):
-                        t0 = t0 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
-                        t1 = t1 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
-                        g2_score = 2 * self.velocity(batch, t0, self.params_ema)
-                        score_multiplier = self.diffusion.sigma2_from_one_step_forward(1 - t1, 1 - t0) / self.diffusion.g2(1 - t0)
-                        return (batch + score_multiplier * g2_score) / self.diffusion.scale(1 - t0)
-                    if isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardExpectedSample):
-                        intermediate_reward = fk_steering.IntermediateReward.EXPECTED_SAMPLE
-                        def expected_sample_fn(key, t0, batch):
-                            t0 = t0 * jnp.ones((self.cfg.dataset.batch_size, 1, 1))
-                            g2_score = 2 * self.velocity(batch, t0, self.params_ema)
-                            score_multiplier = self.diffusion.sigma(1 - t0)**2 / self.diffusion.g2(1 - t0)
-                            return (batch + score_multiplier * g2_score) / self.diffusion.scale(1 - t0)
-                        kwargs_intermediate_reward = dict(
-                            expected_sample_fn=expected_sample_fn,
-                        )
-                    elif isinstance(self.cfg.steering.intermediate_reward, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
-                        intermediate_reward = fk_steering.IntermediateReward.SUB_ENSEMBLE_PUSHFORWARD
-                        kwargs_intermediate_reward = dict(
-                            sub_ensemble_size=self.cfg.steering.intermediate_reward.sub_ensemble_size,
-                            pushforward_fn=lambda key, t0, batch: self.sample(
-                                t0, self.times[-1], dt,
-                                batch,
-                                as_score=True,
-                                key=key,
-                                virtual_brownian_tree=diffrax.VirtualBrownianTree(t0, 1., tol=1e-3, shape=batch.shape, key=key),
-                            ).ys[-1],
-                        )
-                    else:
-                        raise ValueError(f'Unknown intermediate reward: {self.cfg.steering.intermediate_reward}')
-                    self.rpcn = rpcn.ResidualMCMCSteering(
-                        rpcn.KernelPreconditionedCrankNicolson(
-                            (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim),
-                        ),
-                        jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, self.cfg.steering.chain_count)),
-                        inverse_temperature=jnp.linspace(0, self.cfg.steering.tilt, self.cfg.steering.chain_count),
-                        reward_fn=partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
-                        expected_next_fn=expected_next_fn,
-                        std_fn=lambda t0, t1=None: jnp.sqrt(self.diffusion.sigma(1 - t0)**2 - self.diffusion.sigma(1 - t1)**2) if t1 is not None else self.diffusion.sigma(1 - t0),
-                        intermediate_reward=intermediate_reward,
-                        kwargs_intermediate_reward=kwargs_intermediate_reward,
-                    )
+                elif isinstance(self.cfg.steering, (conf.model.FeynmanKac, conf.model.RpCN, conf.model.CREPE)):
+                    self.steer = jax.jit(self.get_ttg_steer_fn())
         else:
             raise ValueError(f'Unknown stage: {stage}')
+
+    def make_evaluate(self, params, reward):
+        """Builds the ttg evaluate function, in the diffusion time tau = 1 - t of ``self.schedule``."""
+        def network(x, tau):
+            return self.velocity(x, (1 - tau)[:, None, None], params)
+        def to_x0_eps(x, tau, velocity, schedule):
+            # the network's velocity is along the model time t = 1 - tau
+            return ttg.x0_eps_from_velocity(x, tau, -velocity, schedule)
+        return ttg.make_evaluate_jax(network, to_x0_eps, self.schedule, reward)
+
+    def get_ttg_steer_fn(self):
+        """Returns ``steer(params, key)``, which samples a batch with FK steering, RpCN or CREPE using ttg."""
+        if not isinstance(self.cfg.get_model().probability_path, conf.model.VarianceExploding):
+            raise ValueError(f'Steering with ttg is only implemented for a VarianceExploding probability path, not {self.cfg.get_model().probability_path.__class__.__name__}.')
+        steering = self.cfg.steering
+        self.schedule = userfm.schedule.VarianceExploding(
+            sigma_min=self.cfg.get_model().probability_path.sigma_min,
+            sigma_max=self.cfg.get_model().probability_path.sigma_max,
+            # u = 1 at the first sample time, u = 0 at the last
+            t_min=float(1 - self.times[-1]),
+            t_max=float(1 - self.times[0]),
+        )
+        backend = ttg.backend.JaxBackend()
+        u_grid = jnp.linspace(1., 0., len(self.times))
+        event_shape = (self.cfg.dataset.len_trajectory, self.cfg.dataset.dim)
+        batch_size = self.cfg.dataset.batch_size
+        reward_fn = partial(self.event_constraint.reward_fn, power=steering.penalization_power)
+        # Song et al.'s reverse diffusion step, shared by RpCN and CREPE; for VE, the posterior mean with the larger variance sigma_s^2 - sigma_t^2
+        reverse_diffusion_step = ttg.ReverseDiffusionStep(self.schedule)
+
+        if isinstance(steering, conf.model.FeynmanKac):
+            if steering.chain_count > 1:
+                raise ValueError(f'Feynman-Kac steering with chain_count > 1 is not supported, got chain_count={steering.chain_count}.')
+            potential = {
+                conf.model.FeynmanKacPotential.DIFFERENCE: ttg.FKDiff,
+                conf.model.FeynmanKacPotential.MAX: ttg.FKMax,
+                conf.model.FeynmanKacPotential.SUM: ttg.FKSum,
+            }[steering.potential](ttg.constant(steering.tilt))
+            # one Euler-Maruyama step of the reverse SDE per grid interval, as self.sample(..., as_score=True)
+            euler_maruyama = ttg.EulerMaruyama(ttg.ReverseSDE(self.schedule), ttg.Direction.BACKWARD)
+            def steer(params, key):
+                result = ttg.smc(
+                    self.schedule.prior((batch_size, steering.ensemble_size), event_shape, xp=jnp, dtype=jnp.float32),
+                    u_grid,
+                    backend=backend,
+                    evaluate=self.make_evaluate(params, ttg.on_x0(reward_fn)),
+                    schedule=self.schedule,
+                    target=euler_maruyama,
+                    proposal=euler_maruyama,
+                    potential=potential,
+                    policy=ttg.ESSBelow(.5),
+                    out_needs=frozenset(),
+                    key=key,
+                )
+                particles = result.final.x
+                best = jnp.argmax(jax.vmap(reward_fn)(particles), axis=1)
+                return jnp.take_along_axis(particles, best[:, None, None, None], axis=1)[:, 0]
+        elif isinstance(steering, conf.model.RpCN):
+            inverse_temperature = jnp.linspace(0, steering.tilt, steering.chain_count)
+            pcn_step_size = jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, steering.chain_count))
+            # pCN updates start after the first 1 / 3.5 of the sampling steps
+            first_pcn_step = int(len(self.times) // 3.5) + 1
+            def steer(params, key):
+                result = ttg.smc(
+                    self.schedule.prior((batch_size, steering.chain_count), event_shape, xp=jnp, dtype=jnp.float32),
+                    u_grid,
+                    backend=backend,
+                    evaluate=self.make_evaluate(params, ttg.on_x0(reward_fn)),
+                    schedule=self.schedule,
+                    target=reverse_diffusion_step,
+                    proposal=reverse_diffusion_step,
+                    potential=ttg.FKDiff(ttg.ladder(inverse_temperature)),
+                    policy=ttg.Never(),
+                    move=ttg.PCN(
+                        n_proposals=steering.pcn_update_count,
+                        step_size=ttg.ladder(pcn_step_size),
+                        pairs=ttg.SequentialSweep(),
+                    ),
+                    # move_at=lambda k: k >= first_pcn_step,
+                    out_needs=frozenset(),
+                    key=key,
+                )
+                # the coldest chain targets the full tilt
+                return result.final.x[:, -1]
+        elif isinstance(steering, conf.model.CREPE):
+            if not 2 <= steering.level_count <= steering.sampling_step_count + 1:
+                raise ValueError(f'CREPE needs 2 <= level_count <= sampling_step_count + 1, not level_count = {steering.level_count} with sampling_step_count = {steering.sampling_step_count}.')
+            fine_step_count = int(steering.sampling_step_count / (steering.level_count - 1))
+            u_levels = tuple(np.linspace(steering.lowest_level, 1., steering.level_count).tolist())
+            lam = ttg.level_lambda(self.schedule.time(jnp.asarray(u_levels)), beta=steering.tilt, rho=steering.tilt_decay_exponent)
+            noising = ttg.Noising(self.schedule)
+            denoising_proposal = reverse_diffusion_step
+            local_move = None
+            if steering.langevin_step_size > 0:
+                langevin = ttg.Langevin(step_size=lambda tau: steering.langevin_step_size * self.schedule.std(tau)**2)
+                local_move = ttg.LangevinMove(langevin)
+            cfg_crepe = ttg.CREPEConfig(
+                u_levels=u_levels,
+                steps_per_gap=fine_step_count,
+                model_noising=noising,
+                proposal_noising=noising,
+                model_denoising=reverse_diffusion_step,
+                proposal_denoising=denoising_proposal,
+                lam=lam,
+                local_move=local_move,
+                local_levels=tuple(range(len(u_levels) - 1)) if local_move is not None else (),
+                out_needs=frozenset(),
+            )
+            def steer(params, key):
+                # only each chain's last sample is kept, so every block but the last is burn-in (emits nothing)
+                result, _ = ttg.crepe_sample(
+                    cfg_crepe, batch_size, event_shape, 1,
+                    n_tail=steering.finish_step_count,
+                    exact=steering.exact_finish,
+                    backend=backend,
+                    evaluate=self.make_evaluate(params, ttg.on_x0(reward_fn)),
+                    schedule=self.schedule,
+                    dtype=jnp.float32,
+                    key=key,
+                    burn_in=steering.block_count - 1,
+                )
+                return result.final.x[:, -1]
+        else:
+            raise ValueError(f'Unknown ttg steering: {steering}')
+        return steer
 
     def model_init(self, key, x_shape, model):
         x = jnp.ones(x_shape)
@@ -269,25 +312,8 @@ class JaxLightning(pl.LightningModule):
             t1 = self.times[-1]
             dt = self.times[1] - self.times[0]
             batch = self.sample(t0, t1, dt, tempered_noise).ys[-1]
-        elif isinstance(self.cfg.steering, conf.model.FeynmanKac):
-            final_particles, _ = self.feynman_kac.run(
-                key, self.times, self.cfg.steering.ensemble_size,
-                batch_size=self.cfg.dataset.batch_size
-            )
-            if self.cfg.steering.chain_count > 1:
-                final_particles = final_particles[-1]
-            batch = fk_steering.SelectFn.highest_reward(
-                final_particles,
-                partial(self.event_constraint.reward_fn, power=self.cfg.steering.penalization_power),
-            )
-        elif isinstance(self.cfg.steering, conf.model.RpCN):
-            batch = self.rpcn.run(
-                key,
-                self.times,
-                pcn_should_update_fn=lambda time_step, *_: time_step >= len(self.times) // 3.5 ,
-                pcn_update_count=self.cfg.steering.pcn_update_count,
-                batch_size=self.cfg.dataset.batch_size,
-            )[-1]
+        elif isinstance(self.cfg.steering, (conf.model.FeynmanKac, conf.model.RpCN, conf.model.CREPE)):
+            batch = self.steer(self.params_ema, key)
         else:
             raise ValueError(f'Unknown steering: {self.cfg.steering}')
         self._predict_state = dict(batch=batch, event_constraint=self.event_constraint)

@@ -62,7 +62,7 @@ class Conf(orm.InheritableTable):
         '_self_',
     ])
     root_dir: str = field(default=str(userfm.utils.DIR_ROOT.resolve()))
-    out_dir: str = field(default=str((userfm.utils.DIR_ROOT/'..'/'..'/'out'/'rpcn-user-defined-events').resolve()))
+    out_dir: str = field(default=str((userfm.utils.DIR_ROOT/'..'/'..'/'..'/'out'/'rpcn-camera-ready').resolve()))
     run_subdir: str = field(default='runs')
     prediction_filename: str = field(default='output')
     device: str = field(default='cuda')
@@ -132,7 +132,7 @@ for model in (Trained, conf.model.FlowMatching,):
     orm.store_config(model, group=TrainingAndEvaluation.model.key)
 for probability_path in (conf.model.ConditionalOT, conf.model.VarianceExploding):
     orm.store_config(probability_path, group=f'{TrainingAndEvaluation.model.key}/{conf.model.FlowMatching.probability_path.key}')
-for steering in (conf.model.NoSteering, conf.model.SourceParallelTempering, conf.model.FeynmanKac, conf.model.RpCN):
+for steering in (conf.model.NoSteering, conf.model.SourceParallelTempering, conf.model.FeynmanKac, conf.model.RpCN, conf.model.CREPE):
     orm.store_config(steering, group=TrainingAndEvaluation.steering.key)
-for intermediate_reward in (conf.model.FeynmanKacIntermediateRewardExpectedSample, conf.model.FeynmanKacIntermediateRewardSubEnsemblePushforward):
+for intermediate_reward in (conf.model.FeynmanKacIntermediateRewardExpectedSample,):
     orm.store_config(intermediate_reward, group=f'{TrainingAndEvaluation.steering.key}/{conf.model.FeynmanKac.intermediate_reward.key}')
