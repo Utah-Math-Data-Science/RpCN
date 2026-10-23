@@ -161,10 +161,8 @@ class JaxLightning(pl.LightningModule):
                 best = jnp.argmax(jax.vmap(reward_fn)(particles), axis=1)
                 return jnp.take_along_axis(particles, best[:, None, None, None], axis=1)[:, 0]
         elif isinstance(steering, conf.model.RpCN):
-            inverse_temperature = jnp.linspace(0, steering.tilt, steering.chain_count)
-            pcn_step_size = jnp.sin(jnp.linspace(jnp.pi / 2 - 1e-3, .05, steering.chain_count))
-            # pCN updates start after the first 1 / 3.5 of the sampling steps
-            first_pcn_step = int(len(self.times) // 3.5) + 1
+            inverse_temperature = steering.tilt * jnp.linspace(0, 1, steering.chain_count)**2
+            pcn_step_size = jnp.full(steering.chain_count, .98)
             def steer(params, key):
                 result = ttg.smc(
                     self.schedule.prior((batch_size, steering.chain_count), event_shape, xp=jnp, dtype=jnp.float32),
