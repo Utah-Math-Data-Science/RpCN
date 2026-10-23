@@ -108,7 +108,7 @@ def _(duckdb_conn):
         where true
         and log_constraint_values
         and chain_count in (2, 4, 6, 8)
-        and pcn_update_count in (1, 2, 4, 8)
+        and pcn_update_count in (1, 2, 4)
         """,
         engine=duckdb_conn
     )
@@ -144,7 +144,7 @@ def _(duckdb_conn):
     return (exp_rows_fk,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(duckdb_conn):
     exp_rows_crepe = mo.sql(
         f"""
@@ -163,7 +163,7 @@ def _(duckdb_conn):
         --and not log_constraint_values
         and tilt in (select tilt from SweepDynamicalSystem)
         and level_count in (2, 4, 6, 8)
-        and block_count in (4, 8, 16, 32)
+        and block_count in (4, 8, 16)
         order by dataset_name, level_count, block_count
         """,
         engine=duckdb_conn
@@ -373,10 +373,10 @@ def _(
         dict(dataset_name='FitzHughNagumo', model='FKSteering', alt_id='njucaaba'),
         # dict(dataset_name='Lorenz63', model='SPT', alt_id='7xd4aup5'),
         # dict(dataset_name='FitzHughNagumo', model='SPT', alt_id='5utbygnl'),
-        dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=32)['alt_id'][0]),
-        dict(dataset_name='FitzHughNagumo', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='FitzHughNagumo', level_count=2, block_count=32)['alt_id'][0]),
-        dict(dataset_name='Lorenz63', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='Lorenz63', chain_count=8, pcn_update_count=8)['alt_id'][0]),
-        dict(dataset_name='FitzHughNagumo', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='FitzHughNagumo', chain_count=8, pcn_update_count=8)['alt_id'][0]),
+        dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=16)['alt_id'][0]),
+        dict(dataset_name='FitzHughNagumo', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='FitzHughNagumo', level_count=2, block_count=16)['alt_id'][0]),
+        dict(dataset_name='Lorenz63', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='Lorenz63', chain_count=8, pcn_update_count=4)['alt_id'][0]),
+        dict(dataset_name='FitzHughNagumo', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='FitzHughNagumo', chain_count=8, pcn_update_count=4)['alt_id'][0]),
     ])
     _to_plot = alt_ids_to_logged_metrics(_exp_rows)
     histogram_kl_divergences = get_kl_divergences(_to_plot).join(_exp_rows, on='alt_id')
@@ -402,8 +402,8 @@ def _(
                 hue='model',
                 palette={
                     'FKSteering': 'tab:blue',
-                    'RpCN': 'tab:orange',
                     'CREPE': 'tab:green',
+                    'RpCN': 'tab:orange',
                 },
                 common_norm=False,
                 alpha=.50,
@@ -434,8 +434,8 @@ def _(
         custom_legend_items = {
             'Dormand-Prince': mpatches.Patch(color='tab:gray', alpha=1),
             'FK Steering': mpatches.Patch(color='tab:blue', alpha=0.5),
-            'RpCN': mpatches.Patch(color='tab:orange', alpha=0.5),
             'CREPE': mpatches.Patch(color='tab:green', alpha=0.5),
+            'RpCN': mpatches.Patch(color='tab:orange', alpha=0.5),
         }
         _plot.add_legend(legend_data=custom_legend_items, title='')
         sns.move_legend(

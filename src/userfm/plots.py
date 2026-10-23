@@ -41,7 +41,7 @@ def save_all_subfigures(plot, plot_name, format='pdf', renaming=None, metadata_d
         pp.savefig(save_name, format=format)
 
 
-def get_logged_metrics_file_paths(connection, conf_rows, file_path_format='~/out/rpcn-user-defined-events-reviews/runs/{}/metrics.csv'):
+def get_logged_metrics_file_paths(connection, conf_rows, file_path_format='~/out/rpcn-camera-ready/runs/{}/metrics.csv'):
     paths = connection.sql(f"""
         select format({file_path_format!r}, alt_id) as path from conf_rows
     """).pl()
