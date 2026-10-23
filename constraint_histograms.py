@@ -131,6 +131,7 @@ def _(duckdb_conn):
         join DynamicalSystem on Dataset.id = DynamicalSystem.id
         where true
         and symmetric_binary_reward
+        and penalization_power = 0
         and not log_constraint_values
         and tilt in (select tilt from SweepDynamicalSystem)
         and chain_count = 1
@@ -143,20 +144,43 @@ def _(duckdb_conn):
     return (exp_rows_fk,)
 
 
+@app.cell(hide_code=True)
+def _(duckdb_conn):
+    exp_rows_crepe = mo.sql(
+        f"""
+        select
+            alt_id,
+            CREPE.*,
+            Dataset.sa_inheritance as dataset_name,
+        from Conf
+        join TrainingAndEvaluation on Conf.id = TrainingAndEvaluation.id
+        join Steering on Steering.id = TrainingAndEvaluation.Steering
+        join CREPE on Steering.id = CREPE.id
+        join Dataset on TrainingAndEvaluation.Dataset = Dataset.id
+        join DynamicalSystem on Dataset.id = DynamicalSystem.id
+        where true
+        and symmetric_binary_reward
+        --and not log_constraint_values
+        and tilt in (select tilt from SweepDynamicalSystem)
+        and level_count in (2, 4, 6, 8)
+        and block_count in (4, 8, 16, 32)
+        order by dataset_name, level_count, block_count
+        """,
+        engine=duckdb_conn
+    )
+    return (exp_rows_crepe,)
+
+
 @app.cell
-def _(alt_ids_to_logged_metrics, exp_rows_fk, exp_rows_rpcn):
+def _(alt_ids_to_logged_metrics, exp_rows_crepe, exp_rows_fk, exp_rows_rpcn):
     to_plot = alt_ids_to_logged_metrics(exp_rows_rpcn)
     to_plot_fk = alt_ids_to_logged_metrics(exp_rows_fk, has_constraint_values=False).join(exp_rows_fk, on='alt_id').sort('alt_id')
-    return (to_plot,)
+    to_plot_crepe = alt_ids_to_logged_metrics(exp_rows_crepe, has_constraint_values=True).join(exp_rows_crepe, on='alt_id').sort('alt_id')
+    return
 
 
 @app.cell
-def _(
-    dataset_constraint_values,
-    dataset_histogram_bins,
-    exp_rows_rpcn,
-    to_plot,
-):
+def _(dataset_constraint_values, dataset_histogram_bins):
     def get_kl_divergences(to_plot):
         kl_divergences = []
         for _dataset_name in dataset_constraint_values['dataset_name'].unique():
@@ -173,8 +197,8 @@ def _(
                 kl_divergences.append(dict(dataset_name=_dataset_name, alt_id=_alt_id, kl_divergence=_kl_divergence.sum()))
         kl_divergences = pl.DataFrame(kl_divergences)
         return kl_divergences
-    kl_divergences = get_kl_divergences(to_plot).join(exp_rows_rpcn, on='alt_id').sort('alt_id')
-    kl_divergences
+    # kl_divergences = get_kl_divergences(to_plot).join(exp_rows_rpcn, on='alt_id').sort('alt_id')
+    # kl_divergences
     return (get_kl_divergences,)
 
 
@@ -233,70 +257,101 @@ def _(duckdb_conn):
 
 
 @app.cell
-def _(pivoted):
-    pivoted_pd = pivoted.to_pandas().set_index("chain_count")
-    pivoted_pd.columns = pivoted_pd.columns.rename("$M$")
+def _(duckdb_conn):
+    pivoted_crepe = mo.sql(
+        f"""
+        select
+            *
+        from (
+            pivot to_plot_crepe
+            on block_count
+            using mean(satisfactory_sample_count) / 500
+            group by dataset_name, level_count
+            order by level_count desc
+        )
+        """,
+        engine=duckdb_conn
+    )
+    return (pivoted_crepe,)
+
+
+@app.function
+def pivoted_to_pandas(pivoted, index, columns_name):
+    pivoted_pd = pivoted.to_pandas().set_index(index)
+    pivoted_pd.columns = pivoted_pd.columns.rename(columns_name)
     pivoted_pd = pivoted_pd.sort_index(axis=1)
+    # pivot column names are strings, so sort numerical ones by value (e.g., '16' after '8')
+    numerical_columns = [c for c in pivoted_pd.columns if str(c).lstrip('-').replace('.', '', 1).isdigit()]
+    other_columns = [c for c in pivoted_pd.columns if c not in numerical_columns]
+    return pivoted_pd[other_columns + sorted(numerical_columns, key=float)]
+
+
+@app.function
+def plot_heatmaps(pivoted_pd, ylabel, save_dir, model_name):
+    fig_width = page_width / 3
+    axes = []
+    for dataset_name in pivoted_pd['dataset_name'].unique():
+        fig, ax = plt.subplots(figsize=(fig_width, fig_width / golden_ratio / 1.0))
+        fig.set_layout_engine(layout="constrained",  h_pad=0.01, w_pad=0.01)
+        (
+            sns.heatmap(
+                data=pivoted_pd[pivoted_pd['dataset_name'] == dataset_name].drop(columns='dataset_name'),
+                vmin=0,
+                vmax=1,
+                annot=True,
+                ax=ax,
+                fmt='.2f',
+                cbar=False,
+                cmap='viridis',
+                cbar_kws=dict(shrink=.85, aspect=7),
+            )
+            .set(ylabel=ylabel)
+        )
+        fig.savefig(save_dir/'ablation'/f'Heatmap.SR.{model_name}.{dataset_name}.pdf', format='pdf')
+        axes.append(ax)
+    return axes
+
+
+@app.cell
+def _(pivoted):
+    pivoted_pd = pivoted_to_pandas(pivoted, index='chain_count', columns_name='$M$')
     pivoted_pd
     return (pivoted_pd,)
 
 
 @app.cell
 def _(pivoted_fk):
-    pivoted_pd_fk = pivoted_fk.to_pandas().set_index("ensemble_size")
-    pivoted_pd_fk.columns = pivoted_pd_fk.columns.rename("Potential")
-    pivoted_pd_fk = pivoted_pd_fk.sort_index(axis=1)
+    pivoted_pd_fk = pivoted_to_pandas(pivoted_fk, index='ensemble_size', columns_name='Potential')
     pivoted_pd_fk
     return (pivoted_pd_fk,)
 
 
 @app.cell
+def _(pivoted_crepe):
+    pivoted_pd_crepe = pivoted_to_pandas(pivoted_crepe, index='level_count', columns_name='Even-odd swaps')
+    pivoted_pd_crepe
+    return (pivoted_pd_crepe,)
+
+
+@app.cell
 def _(SAVE_DIR, pivoted_pd):
-    _fig_width = page_width / 4
-    for _dataset_name in pivoted_pd['dataset_name'].unique():
-        _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 1.0))
-        _fig.set_layout_engine(layout="constrained",  h_pad=0.01, w_pad=0.01)
-        (
-            sns.heatmap(
-                data=pivoted_pd[pivoted_pd['dataset_name'] == _dataset_name].drop(columns='dataset_name'),
-                vmin=0,
-                vmax=1,
-                annot=True,
-                ax=_ax,
-                fmt='.2f',
-                cbar=False,
-                cmap='viridis',
-                cbar_kws=dict(shrink=.85, aspect=7),
-            )
-            .set(ylabel='$K+1$')
-        )
-        _ax.get_figure().savefig(SAVE_DIR/'ablation'/f'Heatmap.SR.RpCN.{_dataset_name}.pdf', format='pdf')
-    _ax
+    _axes = plot_heatmaps(pivoted_pd, ylabel='$K+1$', save_dir=SAVE_DIR, model_name='RpCN')
+    mo.hstack(_axes)
     return
 
 
 @app.cell
 def _(SAVE_DIR, pivoted_pd_fk):
-    _fig_width = page_width / 4
-    for _dataset_name in pivoted_pd_fk['dataset_name'].unique():
-        _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 1.0))
-        _fig.set_layout_engine(layout="constrained",  h_pad=0.01, w_pad=0.01)
-        (
-            sns.heatmap(
-                data=pivoted_pd_fk[pivoted_pd_fk['dataset_name'] == _dataset_name].drop(columns='dataset_name'),
-                vmin=0,
-                vmax=1,
-                annot=True,
-                ax=_ax,
-                fmt='.2f',
-                cbar=False,
-                cmap='viridis',
-                cbar_kws=dict(shrink=.85, aspect=7),
-            )
-            .set(ylabel='Ens. size')
-        )
-        _ax.get_figure().savefig(SAVE_DIR/'ablation'/f'Heatmap.SR.FKSteering.{_dataset_name}.pdf', format='pdf')
-    _ax
+    _axes = plot_heatmaps(pivoted_pd_fk, ylabel='Ensemble size', save_dir=SAVE_DIR, model_name='FKSteering')
+    mo.hstack(_axes)
+    return
+
+
+@app.cell
+def _(SAVE_DIR, pivoted_pd_crepe):
+
+    _axes = plot_heatmaps(pivoted_pd_crepe, ylabel='Marginals', save_dir=SAVE_DIR, model_name='CREPE')
+    mo.hstack(_axes)
     return
 
 
@@ -306,17 +361,20 @@ def _(
     alt_ids_to_logged_metrics,
     dataset_constraint_values,
     dataset_histogram_bins,
+    exp_rows_crepe,
     exp_rows_rpcn,
     get_kl_divergences,
 ):
     # _fig_width = page_width * (1 - 1 / 2.45) / 2
-    _fig_width = page_width / 4
+    _fig_width = page_width / 3
     # _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 3.0))
     _exp_rows = pl.DataFrame([
         dict(dataset_name='Lorenz63', model='FKSteering', alt_id='4574bsrr'),
         dict(dataset_name='FitzHughNagumo', model='FKSteering', alt_id='njucaaba'),
-        dict(dataset_name='Lorenz63', model='SPT', alt_id='7xd4aup5'),
-        dict(dataset_name='FitzHughNagumo', model='SPT', alt_id='5utbygnl'),
+        # dict(dataset_name='Lorenz63', model='SPT', alt_id='7xd4aup5'),
+        # dict(dataset_name='FitzHughNagumo', model='SPT', alt_id='5utbygnl'),
+        dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=32)['alt_id'][0]),
+        dict(dataset_name='FitzHughNagumo', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='FitzHughNagumo', level_count=2, block_count=32)['alt_id'][0]),
         dict(dataset_name='Lorenz63', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='Lorenz63', chain_count=8, pcn_update_count=8)['alt_id'][0]),
         dict(dataset_name='FitzHughNagumo', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='FitzHughNagumo', chain_count=8, pcn_update_count=8)['alt_id'][0]),
     ])
@@ -340,10 +398,12 @@ def _(
                 data=_to_plot_filtered,
                 **_common_kws,
                 col='model',
+                col_order=['FKSteering', 'CREPE', 'RpCN'],
                 hue='model',
                 palette={
                     'FKSteering': 'tab:blue',
                     'RpCN': 'tab:orange',
+                    'CREPE': 'tab:green',
                 },
                 common_norm=False,
                 alpha=.50,
@@ -375,6 +435,7 @@ def _(
             'Dormand-Prince': mpatches.Patch(color='tab:gray', alpha=1),
             'FK Steering': mpatches.Patch(color='tab:blue', alpha=0.5),
             'RpCN': mpatches.Patch(color='tab:orange', alpha=0.5),
+            'CREPE': mpatches.Patch(color='tab:green', alpha=0.5),
         }
         _plot.add_legend(legend_data=custom_legend_items, title='')
         sns.move_legend(
@@ -399,13 +460,14 @@ def _(
         _plots.append(_plot)
         userfm.plots.save_all_subfigures(_plot, SAVE_DIR/'ConstraintHistogram'/_dataset_name/f'NiceHistogram')
         # userfm.plots.save_all_subfigures(_plot, f'Histogram.{_dataset_name}')
-    mo.hstack(_plots)
+    mo.vstack(_plots)
     return (histogram_kl_divergences,)
 
 
 @app.cell
 def _(histogram_kl_divergences):
     histogram_kl_divergences.write_csv('hist.csv')
+    histogram_kl_divergences
     return
 
 
