@@ -4,21 +4,34 @@ from utils import load_image_by_id
 import numpy as np 
 from torch.func import grad
 
-def guidance_schedule(t, num_timesteps, start_frac=0.5):
-    """
-    Returns a scalar coeff in [0, 1] for guidance strength at timestep t.
-    Reverse loop convention: t goes from (T-1) ... 0.
-    Coeff increases as t decreases (later denoising => stronger guidance).
-    """
-    T = int(num_timesteps)
-    if T <= 1:
-        return 1.0
-    # u: 0 at start (t=T-1), 1 at end (t=0)
-    u = 1.0 - (float(t) / float(T - 1))
-    u = max(0.0, min(1.0, u))
 
-    # hard turn-on after halfway point 
-    return 1.0 if u >= float(start_frac) else 0.0
+def guidance_schedule(t, num_timesteps, schedule):
+    progress = 1.0 - float(t) / (num_timesteps - 1)
+    if schedule == "none":
+        return 0.0
+    if schedule == "constant":
+        return 1.0
+    if schedule == "early":
+        return 1.0 - progress
+    if schedule == "middle":
+        return 4.0 * progress * (1.0 - progress)
+    if schedule == "late":
+        return progress
+    if schedule == "late_quadratic":
+        return progress ** 2
+    if schedule == "late_cubic":
+        return progress ** 3
+    if schedule == "late_quartic":
+        return progress ** 4
+    if schedule == "late_sextic":
+        return progress ** 6
+    if schedule == "late_octic":
+        return progress ** 8
+    if schedule == "last_half":
+        return float(progress >= 0.5)
+    raise ValueError(f"Unknown guidance schedule: {schedule}")
+
+
 
 
 
@@ -31,6 +44,10 @@ class inverse_utils:
         batch_size = 1,
         resampling=10,
         guidance_schedule="late",
+        guidance_scale=0.03,
+        guidance_scaling="std",
+        grad_clip_norm=2.5,
+        guidance_residual_floor=None,
         grad_norm=True,
         image_id=60000,
         operator="gaussian_blur",
@@ -45,12 +62,16 @@ class inverse_utils:
         self.ref_image = load_image_by_id(path_to_validation_imgs, image_id, device=device, save=True).detach().to(self.device, self.dtype)
 
         self.operator = get_operator(operator)
-        self.y = self.operator(self.ref_image).detach().to(self.device, self.dtype)
-
+        # self.y = self.operator(self.ref_image).detach().to(self.device, self.dtype)
+        self.y = self.operator.measure(self.ref_image).detach().to(self.device, self.dtype)
         self.batch_size = batch_size
         self.data_dim = (3, 256, 256)
 
         self.guidance_schedule = guidance_schedule
+        self.guidance_scale = guidance_scale
+        self.guidance_scaling = guidance_scaling
+        self.grad_clip_norm = grad_clip_norm
+        self.guidance_residual_floor = guidance_residual_floor
         self.grad_norm = grad_norm
         self.alphas_cumprod = torch.from_numpy(self.sampler.alphas_cumprod).to(self.device, self.dtype)        
         self.check_every = resampling
@@ -79,40 +100,57 @@ class inverse_utils:
         
         return alpha_bar_t, alpha_bar_t_prev, alpha_t, beta_t
 
+
+
     @torch.enable_grad()
     def get_reward_gradient(self, xt, t):
         def scalar_reward(z):
-            z = z
             t_batch = t.expand(1).long()
-
             x0 = self.get_tweedie(t_batch, z)
             return self.operator.log_likelihood(x0, self.y).sum()
 
         g = grad(scalar_reward)(xt)
-        return g / g.flatten().norm().clamp_min(1e-8)
-    
+
+        rms = g.flatten(1).square().mean(1).sqrt().clamp_min(1e-8)
+        scale = (self.grad_clip_norm / rms).clamp(max=1.0)
+        return g * scale.view(-1, *([1] * (g.ndim - 1)))
 
     def expected_next_fn(self, t, t_prev, x):
         x = x.to(device=self.device, dtype=self.dtype)
 
-        alpha_bar_t, alpha_bar_t_prev, alpha_t, beta_t = self.get_coeffecients_by_t(t, t_prev)
+        alpha_bar_t, alpha_bar_t_prev, alpha_t, beta_t = (
+            self.get_coeffecients_by_t(t, t_prev)
+        )
 
         t_batch = self.make_t_batch(t, x.size(0))
         t_in = self.sampler._scale_timesteps(t_batch)
-
         noise_pred = self.model(x, t_in)
-
-        noise_pred, predicted_variance = torch.chunk(noise_pred, 2, dim=1)
-
+        noise_pred, _ = torch.chunk(noise_pred, 2, dim=1)
         mu = (1.0 / torch.sqrt(alpha_t)) * (
-            x - ((1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)) * noise_pred
+            x - (beta_t / torch.sqrt(1.0 - alpha_bar_t)) * noise_pred
         )
 
-        grad = self.get_reward_gradient(x, t_batch)
+        sigma = self.std_fn(t, t_prev)
+        schedule_scale = guidance_schedule(
+            t, self.sampler.num_timesteps, self.guidance_schedule
+        )
+        if schedule_scale == 0.0:
+            return mu
 
-        return mu +  guidance_schedule(
-            t, self.sampler.num_timesteps
-        ) * grad
+        g = self.get_reward_gradient(x, t_batch)
+        if self.guidance_residual_floor is not None:
+            with torch.no_grad():
+                x0 = self.get_tweedie(t_batch, x)
+                residual = (self.operator(x0) - self.y).flatten(1).square().mean(1)
+                guide = residual > self.guidance_residual_floor
+            g = g * guide.view(-1, *([1] * (g.ndim - 1)))
+        if self.guidance_scaling == "direct":
+            noise_scale = 1.0
+        elif self.guidance_scaling == "std":
+            noise_scale = sigma
+        else:
+            noise_scale = sigma.square()
+        return mu + self.guidance_scale * schedule_scale * noise_scale * g
 
 
     def std_fn(self, t, t1=None):
@@ -129,9 +167,7 @@ class inverse_utils:
 
 
         noise_pred = self.model(latents, t_batch)
-        noise_pred, predicted_variance = torch.chunk(noise_pred, 2, dim=1)
-
-        return  (1/alpha_bar_t.sqrt()) * (latents - (1  - alpha_bar_t).sqrt() * noise_pred)
-
-
-
+        noise_pred, _ = torch.chunk(noise_pred, 2, dim=1)
+        return (1 / alpha_bar_t.sqrt()) * (
+            latents - (1 - alpha_bar_t).sqrt() * noise_pred
+        )

@@ -50,11 +50,44 @@ python RpCN_sample.py --operator motion_blur
 Supported operators include:
 
 ```text
-super_resolution
+down_sampling (super resolution)
 gaussian_blur
 motion_blur
 random_inpainting
 ```
+
+## Guidance ablation
+
+`guidance_ablation.sh` runs early, middle, late, and constant schedules at
+guidance strengths `0.25`, `0.5`, `1.25`, `2.5`, and `5.0`. Preview the 240
+commands for the 12 IDs in `ids.csv` without running them:
+
+```bash
+./guidance_ablation.sh --operator down_sampling --dry-run
+```
+
+Execute the matrix on one or more GPUs. Each GPU receives a sequential queue,
+and completed tensors are skipped when the command is resumed:
+
+```bash
+./guidance_ablation.sh \
+    --operator down_sampling \
+    --gpus 0,1,2,3
+```
+
+Results are stored under
+`generated/ablations/<operator>/<configuration>/tensors`. Evaluate all complete
+configurations with:
+
+```bash
+python analysis/guidance_ablation_metrics.py \
+    --operator down_sampling \
+    --output generated/ablations/down_sampling/metrics.csv
+```
+
+Use `--limit 3` for a cheaper screening pass. Override the default strengths
+with, for example, `--strengths "0.5 1.0 2.0"`. The script resumes by skipping
+existing tensors; pass `--rerun` to replace them.
 
 ## External Assets and Attribution
 
