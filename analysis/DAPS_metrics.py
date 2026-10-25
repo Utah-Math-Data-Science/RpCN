@@ -7,7 +7,7 @@ from PIL import Image
 from piq import FID, LPIPS, psnr, ssim
 from tabulate import tabulate
 from torchvision.models import Inception_V3_Weights, inception_v3
-from torchvision.transforms.functional import pil_to_tensor
+from torchvision.transforms.functional import center_crop, pil_to_tensor, resize
 
 
 OPERATORS = (
@@ -18,7 +18,7 @@ OPERATORS = (
 )
 DEFAULT_TRUE_DIR = (
     Path.home()
-    / ".cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples"
+    / "DAPS/dataset/test-ffhq"
 )
 
 
@@ -124,6 +124,7 @@ def load_true_tensor(true_dir, image_id):
         raise FileNotFoundError(f"Ground-truth image not found: {path}")
     with Image.open(path) as image:
         tensor = pil_to_tensor(image.convert("RGB")).float() / 255
+    tensor = center_crop(resize(tensor, 256, antialias=True), 256)
     return tensor * 2 - 1
 
 

@@ -51,7 +51,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Solve a noiseless FFHQ inverse problem with the packaged CREPE solver."
     )
-    parser.add_argument("--img_id", type=int, default=60000)
+    parser.add_argument("--img_id", type=int, default=49000)
     parser.add_argument("--seed", type=int, default=31)
     parser.add_argument(
         "--operator",
@@ -100,7 +100,7 @@ def main():
     device = torch.device("cuda")
     dtype = torch.float32
     data_shape = (3, 256, 256)
-    validation_path = "~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples"
+    validation_path = "~/DAPS/dataset/test-ffhq"
 
     effective_seed = args.seed + 2435 * args.img_id
     torch.manual_seed(effective_seed)

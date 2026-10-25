@@ -1,6 +1,6 @@
 source ~/.bashrc
 
-job_slot_to_gpu=(-1 2 3 4 5 7)
+job_slot_to_gpu=(-1 1 2 3 4 5 6 7)
 
 env_parallel \
     --delay 3 \
@@ -9,12 +9,14 @@ env_parallel \
     --header : \
     --colsep , \
     CUDA_VISIBLE_DEVICES='${job_slot_to_gpu[(( ({%} % (${#job_slot_to_gpu[@]} - 1) ) + 1 ))]}' \
-    python RpCN_sample.py \
+    python {method}.py \
         --save \
         --plot \
         --seed {seed} \
+        --operator_seed 42 \
         --img_id {id} \
         --operator {op} \
-    ::: seed 31 \
-    ::: op gaussian_blur motion_blur down_sampling\
-    :::: ids.csv
+    ::: seed 42 \
+    ::: op inpainting_random\
+    ::: method RpCN_sample_noiseless DAS_sample_noiseless\
+    :::: ids.csv \

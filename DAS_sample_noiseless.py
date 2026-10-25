@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import time
 
@@ -26,12 +27,28 @@ from rewards.DAPS_operators import get_operator
 from utils import load_image_by_id, load_model_and_sampler, normalize_tensor, plot_samples
 
 
+def degradation_sha256(operator):
+    artifact = getattr(operator, "mask", None)
+    if artifact is None and hasattr(operator, "conv"):
+        artifact = operator.conv.seq[1].weight
+    if artifact is None:
+        return None
+    data = artifact.detach().cpu().contiguous().numpy().tobytes()
+    return hashlib.sha256(data).hexdigest()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Solve a noiseless FFHQ inverse problem with the packaged DAS solver."
     )
-    parser.add_argument("--img_id", type=int, default=60000)
-    parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--img_id", type=int, default=49000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--operator_seed",
+        type=int,
+        default=42,
+        help="Global NumPy seed used to reproduce the DAPS degradation.",
+    )
     parser.add_argument(
         "--operator",
         choices=("down_sampling", "gaussian_blur", "motion_blur", "inpainting_random"),
@@ -70,18 +87,21 @@ def main():
     device = torch.device("cuda")
     dtype = torch.float32
     data_shape = (3, 256, 256)
-    validation_path = "~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples"
+    validation_path = "~/DAPS/dataset/test-ffhq"
 
     effective_seed = args.seed + 2435 * args.img_id
     torch.manual_seed(effective_seed)
-    np.random.seed(effective_seed % (2**32))
 
     model, ddpm = load_model_and_sampler()
     reference = load_image_by_id(
         validation_path, args.img_id, device=device, save=True
     ).detach().to(dtype=dtype)
+    np.random.seed(args.operator_seed % (2**32))
     operator = get_operator(args.operator, device=device)
     measurement = operator(reference).detach()
+    fingerprint = degradation_sha256(operator)
+    if fingerprint is not None:
+        print(f"Degradation SHA256: {fingerprint}")
     schedule = DiscreteVPSchedule(
         torch.as_tensor(ddpm.alphas_cumprod, device=device, dtype=dtype)
     )

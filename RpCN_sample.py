@@ -15,7 +15,7 @@ import numpy as np
 if __name__ == "__main__":
     start = time.time()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--img_id', type=int, default=60000, help="Which validation image do you want to sample?")
+    parser.add_argument('--img_id', type=int, default=49000, help="Which validation image do you want to sample?")
     parser.add_argument('--seed', type=int, default=31, help="Which validation image do you want to sample?")
     parser.add_argument('--operator', type=str, default="motion_blur", help="What forward operator are you using?")
     parser.add_argument(
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     ### kwargs
     batch_size = 1
 
-    path_to_validation = '~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples'
+    path_to_validation = '~/DAPS/dataset/test-ffhq'
 
     def seed_function(seed, id):
         random = seed + 2435* id

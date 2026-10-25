@@ -13,8 +13,9 @@ env_parallel \
         --save \
         --plot \
         --seed {seed} \
+        --operator_seed 42 \
         --img_id {id} \
         --operator {op} \
-    ::: seed 31 \
+    ::: seed 42 \
     ::: op gaussian_blur motion_blur down_sampling inpainting_random\
     :::: ids.csv

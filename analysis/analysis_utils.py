@@ -71,7 +71,7 @@ def seed_function(seed, id):
 
 def load_true_images(id_range): 
     # Expand '~' to the full home directory path
-    path = os.path.expanduser('~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples')
+    path = os.path.expanduser('~/DAPS/dataset/test-ffhq')
     
     # Define the transformation: Convert PIL image to PyTorch Tensor
     # This also scales pixels to the range [0.0, 1.0]
@@ -84,7 +84,7 @@ def load_true_images(id_range):
         # Construct the filename. 
         # Note: Check if your files are named '0.png' or '00000.png' 
         # This assumes simple '0.png', '1.png', etc.
-        img_name = f"{60000+ i}.png"
+        img_name = f"{49000+ i}.png"
         img_path = os.path.join(path, img_name)
         
         if os.path.exists(img_path):
@@ -112,7 +112,7 @@ def normalize_tensor(x):
 
 def load_specific_image(id): 
     # Expand '~' to the full home directory path
-    path = os.path.expanduser('~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples')
+    path = os.path.expanduser('~/DAPS/dataset/test-ffhq')
     
     # Define the transformation: Convert PIL image to PyTorch Tensor
     # This also scales pixels to the range [0.0, 1.0]
@@ -165,7 +165,7 @@ def load_tensor_by_1_id(path, id):
 @torch.no_grad()
 def load_true_tensors_by_id(): 
     # Expand '~' to the full home directory path
-    path = os.path.expanduser('~/.cache/kagglehub/datasets/weideng056/ffhq-1k-valid/versions/1/samples')
+    path = os.path.expanduser('~/DAPS/dataset/test-ffhq')
     img_ids = pd.read_csv('../ids.csv')['id'].tolist()
 
     # Define the transformation: Convert PIL image to PyTorch Tensor

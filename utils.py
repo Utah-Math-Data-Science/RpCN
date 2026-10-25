@@ -232,25 +232,33 @@ def normalize_tensor(x):
     return img
 
 
-def load_image_by_id(path, id=60000, device = "cuda", save=False): 
-    transform = T.Compose([T.ToTensor(), T.Normalize(mean=[0.5] * 3, std=[0.5] * 3)])
+def load_image_by_id(path, id=49000, device = "cuda", save=False):
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Resize(256),
+        T.CenterCrop(256),
+        T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
+    ])
 
     dataset_path = Path(path).expanduser()
     
-    # Construct the file path (e.g., .../samples/60000.png)
+    # Construct the file path (e.g., .../test-ffhq/49000.png)
     image_file = dataset_path / f"{id}.png"
     
     if image_file.exists():
-        img = Image.open(image_file)
+        with Image.open(image_file) as image:
+            img = transform(image.convert("RGB"))
     else:
         raise FileNotFoundError(f"No image found for ID: {id} at {image_file}")
     
     if save==True: 
         save_directory = 'generated/figures'
         os.makedirs(save_directory, exist_ok=True)
-        img.save(f'{save_directory}/{id}_ground_truth.pdf', "PDF")
+        T.ToPILImage()((img + 1) * 0.5).save(
+            f'{save_directory}/{id}_ground_truth.pdf', "PDF"
+        )
 
-    return transform(img).unsqueeze(0).to(device)
+    return img.unsqueeze(0).to(device)
 
 
 
@@ -264,4 +272,3 @@ def plot_samples(img, id, operator, seed=None):
     else: 
         plt.savefig(f'{save_directory}/{id}_{operator}.pdf', bbox_inches='tight', pad_inches=0.0)
     plt.close() 
-
