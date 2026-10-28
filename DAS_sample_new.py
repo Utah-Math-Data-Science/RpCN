@@ -14,7 +14,31 @@ from sampling_common import (
     get_prompt_by_id,
     save_results,
 )
-from ttg import DDIMStep, ESSBelow, FKDiff, Guided, das_lambda, smc, tilt
+from ttg import DDIMStep, ESSBelow, FKDiff, Guided, Record, das_lambda, smc, ssp, tilt
+
+
+def microbatch_evaluate(evaluate, batch_size):
+    def evaluate_in_batches(x, t, needs):
+        if x.shape[0] <= batch_size:
+            return evaluate(x, t, needs)
+
+        records = [
+            evaluate(x[start : start + batch_size], t[start : start + batch_size], needs)
+            for start in range(0, x.shape[0], batch_size)
+        ]
+
+        def concatenate(field):
+            values = [getattr(record, field) for record in records]
+            return None if values[0] is None else torch.cat(values, dim=0)
+
+        return Record(
+            **{
+                field: concatenate(field)
+                for field in ("x", "t", "x0", "eps", "score", "reward", "reward_grad")
+            }
+        )
+
+    return evaluate_in_batches
 
 
 def main():
@@ -30,7 +54,7 @@ def main():
     )
     parser.add_argument(
         "--alpha_kl",
-        default=0.01,
+        default=0.1,
         type=float,
         help="KL regularization strength",
     )
@@ -39,6 +63,20 @@ def main():
         default=0.5,
         type=float,
         help="Resample when ESS falls below this fraction of the particle count",
+    )
+    parser.add_argument(
+        "--gradient_batch_size",
+        default=1,
+        type=int,
+        help="Number of particles evaluated together during DAS gradient computation",
+    )
+    parser.add_argument('' \
+    '--batch_size', type=int, default=4, help='Number of samples to generate'
+    )
+    parser.add_argument(
+        "--output_label",
+        default="DAS",
+        help="Output directory label",
     )
     args = parser.parse_args()
 
@@ -51,13 +89,15 @@ def main():
         raise ValueError("--alpha_kl must be positive")
     if not 0 < args.ess_threshold <= 1:
         raise ValueError("--ess_threshold must be in (0, 1]")
+    if args.gradient_batch_size <= 0:
+        raise ValueError("--gradient_batch_size must be positive")
 
     seed = compute_seed(args.img_id, 31)
     torch.manual_seed(seed)
 
     image_class = StableDiffusionContext(
         prompt=prompt,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         num_inference_steps=NUM_INFERENCE_STEPS,
         model=args.model,
     )
@@ -67,13 +107,17 @@ def main():
     image_class.pipe.text_encoder.requires_grad_(False)
     image_class.ir_model.requires_grad_(False)
 
-    backend, schedule, evaluate = build_sampling_components(image_class)
+    state_dtype = torch.float32
+    backend, schedule, evaluate = build_sampling_components(
+        image_class, state_dtype=state_dtype
+    )
+    evaluate = microbatch_evaluate(evaluate, args.gradient_batch_size)
     xp = backend.xp
     u_grid = xp.linspace(
         1.0,
         0.0,
         NUM_INFERENCE_STEPS,
-        dtype=image_class.dtype,
+        dtype=state_dtype,
         device=image_class.device,
     )
     lam = das_lambda(
@@ -85,10 +129,10 @@ def main():
     start_time = time.time()
     result = smc(
         schedule.prior(
-            (1, BATCH_SIZE),
+            (1, args.batch_size),
             image_class.data_dim,
             xp=xp,
-            dtype=image_class.dtype,
+            dtype=state_dtype,
             device=image_class.device,
         ),
         u_grid,
@@ -99,6 +143,7 @@ def main():
         proposal=Guided(target, tilt(lam)),
         potential=FKDiff(lam),
         policy=ESSBelow(args.ess_threshold),
+        resampler=ssp,
         key=backend.key(seed),
     )
 
@@ -115,7 +160,7 @@ def main():
         f"{args.img_id}_das",
         decoded_images,
         rewards,
-        "DAS",
+        args.output_label,
     )
 
 

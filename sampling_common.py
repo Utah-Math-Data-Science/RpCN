@@ -205,12 +205,12 @@ def build_evaluate(image_class, schedule):
     return make_evaluate_torch(eps_network, to_x0_eps, schedule, on_x0(reward))
 
 
-def build_sampling_components(image_class):
+def build_sampling_components(image_class, state_dtype=None):
     backend = TorchBackend(device=image_class.device)
     schedule = DiffusersSchedule(
         image_class.scheduler,
         image_class.device,
-        image_class.dtype,
+        state_dtype or image_class.dtype,
     )
     return backend, schedule, build_evaluate(image_class, schedule)
 
@@ -242,8 +242,8 @@ def save_rewards_to_csv(csv_path, rewards):
 
 
 def save_results(model, stem, decoded_images, rewards, label):
-    img_dir = f"generated/{model}/{label}/images"
-    csv_dir = f"generated/{model}/{label}/csv"
+    img_dir = f"generated/{model}_2/{label}/images"
+    csv_dir = f"generated/{model}_2/{label}/csv"
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(csv_dir, exist_ok=True)
 
