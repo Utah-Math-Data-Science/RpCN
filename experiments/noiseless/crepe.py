@@ -1,21 +1,16 @@
 import argparse
 import os
 import time
-from RpCN_sample_noiseless import DiscreteVPSchedule
+from pathlib import Path
 
-
-import numpy as np
 import torch
 from ttg import (
     CREPEConfig,
-    Direction,
-    EulerMaruyama,
     Guided,
     normalized,
     Langevin,
     LangevinMove,
     Noising,
-    ReverseSDE,
     crepe_sample,
     DDIMStep,
     level_lambda,
@@ -25,9 +20,16 @@ from ttg import (
     x0_from_eps,
 )
 from ttg.backend import TorchBackend
-from ttg.kernels import Gaussian
 
-from rewards.DAPS_operators import get_operator
+from experiments.common import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_ROOT,
+    DiscreteVPSchedule,
+    effective_sample_seed,
+    measurement_metrics,
+    output_dir,
+    prepare_problem,
+)
 from utils import load_image_by_id, load_model_and_sampler, normalize_tensor, plot_samples
 
 
@@ -53,6 +55,8 @@ def parse_args():
     )
     parser.add_argument("--img_id", type=int, default=49000)
     parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--data_dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--operator_seed", type=int, default=42)
     parser.add_argument(
         "--operator",
         choices=("down_sampling", "gaussian_blur", "motion_blur", "inpainting_random"),
@@ -66,17 +70,21 @@ def parse_args():
     # parser.add_argument("--steps_per_gap", type=int, default=1000/ len(args.levels) - 1)
     parser.add_argument("--tail_steps", type=int, default=50)
     # parser.add_argument("--exact_tail", action="store_true")
-    parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--lambda_rho", type=float, default=1.0)
-    parser.add_argument("--langevin_scale", type=float, default=0.01)
-    parser.add_argument("--no_local_move", action="store_true")
+    parser.add_argument("--beta", type=float, default=10.0)
+    parser.add_argument("--lambda_rho", type=float, default=0.5)
     parser.add_argument(
-        "--reward_sigma",
-        type=float,
-        default=0.05,
-        help="Scale of the squared-residual reward; no noise is added to measurements.",
+        "--guidance",
+        choices=("tilt", "clipped_tilt", "normalized", "none"),
+        default="clipped_tilt",
     )
-    parser.add_argument("--output_dir", default="generated/tensors/CREPE")
+    parser.add_argument("--proposal_scale", type=float, default=0.3)
+    parser.add_argument("--max_shift_norm", type=float, default=1.0)
+    parser.add_argument(
+        "--clamp_x0", action=argparse.BooleanOptionalAction, default=False
+    )
+    parser.add_argument("--langevin_scale", type=float, default=0.01)
+    parser.add_argument("--local_move", action="store_true")
+    parser.add_argument("--output_root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
@@ -90,6 +98,10 @@ def parse_args():
         parser.error("--lambda_rho must be positive")
     if args.langevin_scale <= 0:
         parser.error("--langevin_scale must be positive")
+    if args.proposal_scale < 0:
+        parser.error("--proposal_scale must be nonnegative")
+    if args.max_shift_norm <= 0:
+        parser.error("--max_shift_norm must be positive")
 
     return args
 
@@ -100,18 +112,20 @@ def main():
     device = torch.device("cuda")
     dtype = torch.float32
     data_shape = (3, 256, 256)
-    validation_path = "~/DAPS/dataset/test-ffhq"
-
-    effective_seed = args.seed + 2435 * args.img_id
+    effective_seed = effective_sample_seed(args.seed, args.img_id)
     torch.manual_seed(effective_seed)
-    np.random.seed(effective_seed % (2**32))
 
     model, ddpm = load_model_and_sampler()
     reference = load_image_by_id(
-        validation_path, args.img_id, device=device, save=True
+        args.data_dir, args.img_id, device=device, save=True
     ).detach().to(dtype=dtype)
-    operator = get_operator(args.operator, device=device, sigma=args.reward_sigma)
-    measurement = operator(reference).detach()
+    operator, measurement, _ = prepare_problem(
+        reference,
+        args.operator,
+        operator_seed=args.operator_seed,
+        noisy=False,
+        image_id=args.img_id,
+    )
 
     schedule = DiscreteVPSchedule(
         torch.as_tensor(ddpm.alphas_cumprod, device=device, dtype=dtype)
@@ -125,9 +139,15 @@ def main():
     def reward(x0):
         return - operator.loss(x0, measurement)
 
+    def to_x0_eps(x, t, eps, sch):
+        x0 = x0_from_eps(x, t, eps, sch)
+        if args.clamp_x0:
+            x0 = x0.clamp(-1, 1)
+        return x0, eps
+
     evaluate = make_evaluate_torch(
         epsilon_network,
-        lambda x, t, eps, sch: (x0_from_eps(x, t, eps, sch), eps),
+        to_x0_eps,
         schedule,
         on_x0(reward),
     )
@@ -137,12 +157,30 @@ def main():
     model_noising = Noising(schedule)
     model_denoising = DDIMStep(schedule, eta=1.0)
 
-    proposal_denoising = Guided(model_denoising, tilt(lam))
-    # proposal_denoising = Guided(model_denoising, normalized(lam))
+    if args.guidance == "tilt":
+        proposal_denoising = Guided(
+            model_denoising, tilt(lam, factor=args.proposal_scale)
+        )
+    elif args.guidance == "clipped_tilt":
+        def clipped_tilt(t, grad, var):
+            raw_scale = args.proposal_scale * var * lam(t)
+            event_dims = tuple(range(var.ndim, grad.ndim))
+            grad_norm = torch.linalg.vector_norm(grad, dim=event_dims)
+            capped_scale = args.max_shift_norm / grad_norm.clamp_min(1e-12)
+            return torch.minimum(raw_scale, capped_scale)
+
+        proposal_denoising = Guided(model_denoising, clipped_tilt)
+    elif args.guidance == "normalized":
+        def normalized_step(t):
+            return args.proposal_scale * lam(t) / args.beta
+
+        proposal_denoising = Guided(model_denoising, normalized(normalized_step))
+    else:
+        proposal_denoising = model_denoising
 
     local_move = None
     local_levels = ()
-    if not args.no_local_move:
+    if args.local_move:
         local_move = LangevinMove(
             Guided(
                 Langevin(lambda t: args.langevin_scale * schedule.std(t).square()),
@@ -169,6 +207,12 @@ def main():
         f"Generating noiseless CREPE reconstruction for FFHQ image {args.img_id} "
         f"under operator {args.operator}"
     )
+    print(
+        f"Gradient config: guidance={args.guidance}, "
+        f"proposal_scale={args.proposal_scale:g}, "
+        f"max_shift_norm={args.max_shift_norm:g}, beta={args.beta:g}, "
+        f"rho={args.lambda_rho:g}, local_move={args.local_move}"
+    )
     needs_tail = args.levels[0] > 0
     result, _ = crepe_sample(
         config,
@@ -193,18 +237,20 @@ def main():
     reference_01 = (reference * 0.5 + 0.5).clamp(0, 1)
     mse = torch.mean((reconstruction - reference_01) ** 2)
     psnr = -10 * torch.log10(mse)
-    # measurement_mse = torch.mean((operator(final_sample) - measurement) ** 2)
+    metrics = measurement_metrics(operator, final_sample, measurement)
+    outside_range = (final_sample.abs() > 1).float().mean()
     print(f"Emitted samples per chain: {result.final.x0.shape[1]}")
     print(f"PSNR: {psnr.item():.4f} dB")
-    # print(f"Measurement MSE: {measurement_mse.item():.8f}")
+    print(f"Measurement MSE: {metrics['measurement_mse'].item():.8f}")
+    print(f"Fraction outside [-1, 1]: {outside_range.item():.8f}")
     print(f"Total time: {time.time() - started_at:.2f} seconds")
 
     if args.save:
-        os.makedirs(args.output_dir, exist_ok=True)
-        save_path = os.path.join(
-            args.output_dir,
-            f"{args.img_id}_{args.operator}_noiseless_crepe_{effective_seed}.pt",
+        save_dir = output_dir(
+            args.output_root, "noiseless", "CREPE", args.operator, args.seed
         )
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = save_dir / f"{args.img_id}.pt"
         torch.save(final_sample, save_path)
 
     if args.plot:

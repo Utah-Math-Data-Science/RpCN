@@ -1,19 +1,16 @@
 import argparse
-import hashlib
 import os
 import time
+from pathlib import Path
 
-import numpy as np
 import torch
 from ttg import (
     FKDiff,
     Guided,
     Never,
     PCN,
-    PosteriorStep,
     DDIMStep,
     SequentialSweep,
-    constant,
     ladder,
     make_evaluate_torch,
     normalized,
@@ -22,55 +19,19 @@ from ttg import (
     x0_from_eps,
 )
 from ttg.backend import TorchBackend
-from ttg.kernels import Gaussian
 
-from rewards.DAPS_operators import get_operator
+from experiments.common import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_ROOT,
+    DiscreteVPSchedule,
+    degradation_sha256,
+    effective_sample_seed,
+    measurement_metrics,
+    output_dir,
+    prepare_problem,
+)
 from utils import load_image_by_id, normalize_tensor, plot_samples
 from utils import load_model_and_sampler
-
-
-def degradation_sha256(operator):
-    artifact = getattr(operator, "mask", None)
-    if artifact is None and hasattr(operator, "conv"):
-        artifact = operator.conv.seq[1].weight
-    if artifact is None:
-        return None
-    data = artifact.detach().cpu().contiguous().numpy().tobytes()
-    return hashlib.sha256(data).hexdigest()
-
-
-class DiscreteVPSchedule:
-    """Expose the trained DDPM's discrete VP schedule through the ttg API."""
-
-    def __init__(self, alphas_cumprod):
-        self.alphas_cumprod = alphas_cumprod
-        self.num_timesteps = alphas_cumprod.shape[0]
-
-    def time(self, u):
-        return u * (self.num_timesteps - 1)
-
-    def _alpha_bar(self, t):
-        index = torch.round(t).to(torch.long).clamp(0, self.num_timesteps - 1)
-        return self.alphas_cumprod[index]
-
-    def mean(self, t):
-        return self._alpha_bar(t).sqrt()
-
-    def std(self, t):
-        return (1.0 - self._alpha_bar(t)).sqrt()
-
-    def log_snr(self, t):
-        alpha_bar = self._alpha_bar(t)
-        return torch.log(alpha_bar) - torch.log1p(-alpha_bar)
-
-    def log_snr_diff(self, t_a, t_b):
-        return self.log_snr(t_a) - self.log_snr(t_b)
-
-    def prior(self, leading_shape, event_shape, *, xp, dtype, device=None):
-        return Gaussian(
-            xp.zeros((*leading_shape, *event_shape), dtype=dtype, device=device),
-            xp.ones(tuple(leading_shape), dtype=dtype, device=device),
-        )
 
 
 def parse_args():
@@ -79,6 +40,7 @@ def parse_args():
     )
     parser.add_argument("--img_id", type=int, default=49000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--data_dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument(
         "--operator_seed",
         type=int,
@@ -113,7 +75,7 @@ def parse_args():
         default=0.5,
         help="Denoising progress in [0, 1] at which normalized guidance starts.",
     )
-    parser.add_argument("--output_dir", default="generated/tensors/RpCN")
+    parser.add_argument("--output_root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
@@ -141,18 +103,20 @@ def main():
     device = torch.device("cuda")
     dtype = torch.float32
     data_shape = (3, 256, 256)
-    validation_path = "~/DAPS/dataset/test-ffhq"
-
-    effective_seed = args.seed + 2435 * args.img_id
+    effective_seed = effective_sample_seed(args.seed, args.img_id)
     torch.manual_seed(effective_seed)
 
     model, ddpm = load_model_and_sampler()
     reference = load_image_by_id(
-        validation_path, args.img_id, device=device, save=True
+        args.data_dir, args.img_id, device=device, save=True
     ).detach().to(dtype=dtype)
-    np.random.seed(args.operator_seed % (2**32))
-    operator = get_operator(args.operator, device=device)
-    measurement = operator(reference).detach()
+    operator, measurement, _ = prepare_problem(
+        reference,
+        args.operator,
+        operator_seed=args.operator_seed,
+        noisy=False,
+        image_id=args.img_id,
+    )
     fingerprint = degradation_sha256(operator)
     if fingerprint is not None:
         print(f"Degradation SHA256: {fingerprint}")
@@ -169,12 +133,10 @@ def main():
     def reward(x0):
         return - operator.loss(x0, measurement)
 
-    # to_x0_eps = lambda x, t, eps, sch: (x0_from_eps(x, t, eps, sch), eps)
-
-    def to_x0_eps(x,t,eps, schedule): 
+    def to_x0_eps(x, t, eps, schedule):
         x0 = x0_from_eps(x, t, eps, schedule).clamp(-1, 1)
         return x0, eps
-    
+
     evaluate = make_evaluate_torch(
         epsilon_network, to_x0_eps, schedule, on_x0(reward)
     )
@@ -191,10 +153,10 @@ def main():
         args.n_chains,
         device=device,
         dtype=dtype,
-    ).pow(2.0) 
+    ).pow(2.0)
 
-    pcn_step_sizes =  0.5 * torch.ones(
-       args.n_chains,
+    pcn_step_sizes = 0.5 * torch.ones(
+        args.n_chains,
         device=device,
         dtype=dtype,
     )
@@ -202,7 +164,7 @@ def main():
     base_kernel = DDIMStep(schedule, eta=1.0)
 
     guided_kernel = Guided(base_kernel, normalized(guidance_step_length))
-    
+
     move = PCN(
         n_proposals=args.pcn_update_count,
         step_size=ladder(pcn_step_sizes),
@@ -235,16 +197,16 @@ def main():
     )
 
     final_sample = result.final.x0[:, -1]
-
-
+    metrics = measurement_metrics(operator, final_sample, measurement)
+    print(f"Measurement MSE: {metrics['measurement_mse'].item():.8f}")
     print(f"Total time: {time.time() - started_at:.2f} seconds")
 
     if args.save:
-        os.makedirs(args.output_dir, exist_ok=True)
-        save_path = os.path.join(
-            args.output_dir,
-            f"{args.img_id}_{args.operator}_noiseless_rpcn_{effective_seed}.pt",
+        save_dir = output_dir(
+            args.output_root, "noiseless", "RpCN", args.operator, args.seed
         )
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = save_dir / f"{args.img_id}.pt"
         torch.save(final_sample, save_path)
 
     if args.plot:

@@ -1,40 +1,34 @@
 import argparse
-import hashlib
 import os
 import time
+from pathlib import Path
 
-import numpy as np
 import torch
 from ttg import (
     ESSBelow,
     FKDiff,
     Guided,
-    PosteriorStep,
     normalized,
     DDIMStep,
     das_lambda,
     make_evaluate_torch,
     on_x0,
     smc,
-    tilt,
     x0_from_eps,
     categorical
 )
 from ttg.backend import TorchBackend
 
-from RpCN_sample_noiseless import DiscreteVPSchedule
-from rewards.DAPS_operators import get_operator
+from experiments.common import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_ROOT,
+    DiscreteVPSchedule,
+    degradation_sha256,
+    effective_sample_seed,
+    output_dir,
+    prepare_problem,
+)
 from utils import load_image_by_id, load_model_and_sampler, normalize_tensor, plot_samples
-
-
-def degradation_sha256(operator):
-    artifact = getattr(operator, "mask", None)
-    if artifact is None and hasattr(operator, "conv"):
-        artifact = operator.conv.seq[1].weight
-    if artifact is None:
-        return None
-    data = artifact.detach().cpu().contiguous().numpy().tobytes()
-    return hashlib.sha256(data).hexdigest()
 
 
 def parse_args():
@@ -43,6 +37,7 @@ def parse_args():
     )
     parser.add_argument("--img_id", type=int, default=49000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--data_dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument(
         "--operator_seed",
         type=int,
@@ -64,7 +59,7 @@ def parse_args():
         help="Max inverse temperature from RpCN, 1/alpha in DAS",
     )
     parser.add_argument("--ess_threshold", type=float, default=0.5)
-    parser.add_argument("--output_dir", default="generated/tensors/DAS")
+    parser.add_argument("--output_root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
@@ -87,18 +82,20 @@ def main():
     device = torch.device("cuda")
     dtype = torch.float32
     data_shape = (3, 256, 256)
-    validation_path = "~/DAPS/dataset/test-ffhq"
-
-    effective_seed = args.seed + 2435 * args.img_id
+    effective_seed = effective_sample_seed(args.seed, args.img_id)
     torch.manual_seed(effective_seed)
 
     model, ddpm = load_model_and_sampler()
     reference = load_image_by_id(
-        validation_path, args.img_id, device=device, save=True
+        args.data_dir, args.img_id, device=device, save=True
     ).detach().to(dtype=dtype)
-    np.random.seed(args.operator_seed % (2**32))
-    operator = get_operator(args.operator, device=device)
-    measurement = operator(reference).detach()
+    operator, measurement, _ = prepare_problem(
+        reference,
+        args.operator,
+        operator_seed=args.operator_seed,
+        noisy=False,
+        image_id=args.img_id,
+    )
     fingerprint = degradation_sha256(operator)
     if fingerprint is not None:
         print(f"Degradation SHA256: {fingerprint}")
@@ -114,7 +111,7 @@ def main():
     def reward(x0):
         return - operator.loss(x0, measurement)
 
-    def to_x0_eps(x,t,eps, schedule): 
+    def to_x0_eps(x, t, eps, schedule):
         x0 = x0_from_eps(x, t, eps, schedule).clamp(-1, 1)
         return x0, eps
     
@@ -162,7 +159,7 @@ def main():
         policy=ESSBelow(args.ess_threshold),
         key=key_smc,
     )
-    print(f'final img stats')
+    print("final img stats")
     print(result.final.x0.max(), result.final.x0.min())
 
     selected = categorical(backend, result.log_weights, key_select)
@@ -178,11 +175,11 @@ def main():
     print(f"Total time: {time.time() - started_at:.2f} seconds")
 
     if args.save:
-        os.makedirs(args.output_dir, exist_ok=True)
-        save_path = os.path.join(
-            args.output_dir,
-            f"{args.img_id}_{args.operator}_noiseless_das_{effective_seed}.pt",
+        save_dir = output_dir(
+            args.output_root, "noiseless", "DAS", args.operator, args.seed
         )
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = save_dir / f"{args.img_id}.pt"
         torch.save(final_sample, save_path)
 
     if args.plot:

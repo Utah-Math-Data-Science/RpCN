@@ -237,7 +237,6 @@ def load_image_by_id(path, id=49000, device = "cuda", save=False):
         T.ToTensor(),
         T.Resize(256),
         T.CenterCrop(256),
-        T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
     ])
 
     dataset_path = Path(path).expanduser()
@@ -251,6 +250,8 @@ def load_image_by_id(path, id=49000, device = "cuda", save=False):
     else:
         raise FileNotFoundError(f"No image found for ID: {id} at {image_file}")
     
+    img = img * 2 - 1
+
     if save==True: 
         save_directory = 'generated/figures'
         os.makedirs(save_directory, exist_ok=True)

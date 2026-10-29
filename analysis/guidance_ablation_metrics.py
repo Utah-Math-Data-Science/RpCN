@@ -25,8 +25,12 @@ def parse_args():
     )
     parser.add_argument("--operator", default="down_sampling")
     parser.add_argument(
-        "--ablation-root", type=Path, default=ROOT / "generated/ablations"
+        "--ablation-root",
+        type=Path,
+        default=ROOT / "generated/ablations/noisy_rpcn",
     )
+    parser.add_argument("--noise-sigma", type=float, default=0.05)
+    parser.add_argument("--sample-seed", type=int, default=31)
     parser.add_argument(
         "--configs",
         type=Path,
@@ -54,23 +58,32 @@ def load_config_names(path):
 
 def main():
     args = parse_args()
-    operator_root = args.ablation_root / args.operator
     if args.configs is None:
         config_names = sorted(
             path.name
-            for path in operator_root.iterdir()
-            if (path / "tensors").is_dir()
+            for path in args.ablation_root.iterdir()
+            if (path / "noisy").is_dir()
         )
     else:
         config_names = load_config_names(args.configs)
     if not config_names:
-        raise FileNotFoundError(f"No ablation configurations found in {operator_root}")
+        raise FileNotFoundError(
+            f"No ablation configurations found in {args.ablation_root}"
+        )
     config_files = {}
     expected_ids = None
 
     for name in config_names:
-        tensor_dir = args.ablation_root / args.operator / name / "tensors"
-        files = discover_tensor_files(tensor_dir, args.operator)
+        tensor_dir = (
+            args.ablation_root
+            / name
+            / "noisy"
+            / f"sigma_{args.noise_sigma:g}"
+            / "RpCN"
+            / args.operator
+            / f"sample_seed_{args.sample_seed}"
+        )
+        files = discover_tensor_files(tensor_dir)
         image_ids = set(files)
         if expected_ids is None:
             expected_ids = image_ids

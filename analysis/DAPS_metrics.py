@@ -16,6 +16,7 @@ OPERATORS = (
     ("gaussian_blur", "deblur_gauss"),
     ("motion_blur", "deblur_motion"),
 )
+METHODS = ("DAS", "RpCN")
 DEFAULT_TRUE_DIR = (
     Path.home()
     / "DAPS/dataset/test-ffhq"
@@ -31,14 +32,12 @@ def parse_args():
     parser.add_argument(
         "--tensors-dir",
         type=Path,
-        default=project_dir / "generated" / "tensors",
-        help="Root directory containing one subdirectory per sampling method.",
+        default=project_dir / "generated" / "inverse_problems",
+        help="Root directory containing noisy and noiseless experiment outputs.",
     )
-    parser.add_argument(
-        "--method",
-        default="RpCN",
-        help="Sampling method subdirectory to evaluate (for example, RpCN or DAS).",
-    )
+    parser.add_argument("--regime", choices=("noisy", "noiseless"), default="noisy")
+    parser.add_argument("--noise-sigma", type=float, default=0.05)
+    parser.add_argument("--sample-seed", type=int, default=42)
     parser.add_argument(
         "--true-dir",
         type=Path,
@@ -60,28 +59,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def discover_tensor_files(tensors_dir, operator):
+def discover_tensor_files(tensors_dir):
     files_by_id = {}
-    for path in tensors_dir.glob(f"*_{operator}_*.pt"):
+    for path in tensors_dir.glob("*.pt"):
         try:
-            image_id = int(path.name.split("_", 1)[0])
+            image_id = int(path.stem)
         except ValueError as error:
             raise ValueError(f"Could not read an image ID from {path.name}") from error
         if image_id in files_by_id:
             raise ValueError(
-                f"Multiple tensors found for {operator}, image {image_id}: "
+                f"Multiple tensors found for image {image_id}: "
                 f"{files_by_id[image_id].name} and {path.name}"
             )
         files_by_id[image_id] = path
 
     if not files_by_id:
-        raise FileNotFoundError(f"No tensors found for {operator} in {tensors_dir}")
+        raise FileNotFoundError(f"No tensors found in {tensors_dir}")
     return files_by_id
 
 
-def validate_and_select_files(tensors_dir, limit):
+def validate_and_select_files(tensors_dir, sample_seed, limit):
     operator_files = {
-        operator: discover_tensor_files(tensors_dir, operator)
+        operator: discover_tensor_files(
+            tensors_dir / operator / f"sample_seed_{sample_seed}"
+        )
         for operator, _ in OPERATORS
     }
     reference_operator = OPERATORS[0][0]
@@ -188,14 +189,40 @@ def calculate_psnr_ssim(real_images, generated_images, device, batch_size):
 
 def main():
     args = parse_args()
-    method_dir = args.tensors_dir / args.method
-    if not method_dir.is_dir():
-        raise FileNotFoundError(
-            f"Tensor directory for method {args.method!r} not found: {method_dir}"
+    regime_dir = args.tensors_dir / args.regime
+    if args.regime == "noisy":
+        regime_dir /= f"sigma_{args.noise_sigma:g}"
+
+    files_by_method = {}
+    expected_ids = None
+    for method in METHODS:
+        method_dir = regime_dir / method
+        if not method_dir.is_dir():
+            raise FileNotFoundError(
+                f"Tensor directory for method {method!r} not found: {method_dir}"
+            )
+        operator_files, method_ids = validate_and_select_files(
+            method_dir, args.sample_seed, limit=None
         )
-    operator_files, image_ids = validate_and_select_files(method_dir, args.limit)
+        method_ids = set(method_ids)
+        if expected_ids is None:
+            expected_ids = method_ids
+        elif method_ids != expected_ids:
+            missing = sorted(expected_ids - method_ids)
+            extra = sorted(method_ids - expected_ids)
+            raise ValueError(
+                f"Tensor IDs for {method} do not match {METHODS[0]}. "
+                f"Missing: {missing}; extra: {extra}"
+            )
+        files_by_method[method] = operator_files
+
+    image_ids = sorted(expected_ids)
+    if args.limit is not None:
+        if args.limit < 1:
+            raise ValueError("--limit must be at least 1")
+        image_ids = image_ids[: args.limit]
     print(
-        f"Evaluating {args.method}: {len(image_ids)} images per operator "
+        f"Evaluating DAS and RpCN: {len(image_ids)} images per operator "
         f"on {args.device}..."
     )
 
@@ -210,40 +237,48 @@ def main():
 
     real_features = extract_features(real_images, inception, args.device, args.batch_size)
     rows = []
-    for operator, display_name in OPERATORS:
-        generated_images = torch.stack(
-            [load_generated_tensor(operator_files[operator][image_id]) for image_id in image_ids]
-        )
-        if generated_images.shape != real_images.shape:
-            raise ValueError(
-                f"Shape mismatch for {operator}: generated {tuple(generated_images.shape)}, "
-                f"ground truth {tuple(real_images.shape)}"
+    for method in METHODS:
+        operator_files = files_by_method[method]
+        for operator, display_name in OPERATORS:
+            generated_images = torch.stack(
+                [
+                    load_generated_tensor(operator_files[operator][image_id])
+                    for image_id in image_ids
+                ]
             )
+            if generated_images.shape != real_images.shape:
+                raise ValueError(
+                    f"Shape mismatch for {method}/{operator}: generated "
+                    f"{tuple(generated_images.shape)}, ground truth "
+                    f"{tuple(real_images.shape)}"
+                )
 
-        generated_features = extract_features(
-            generated_images, inception, args.device, args.batch_size
-        )
-        fid_score = fid.compute_metric(real_features, generated_features).item()
-        psnr_score, ssim_score = calculate_psnr_ssim(
-            real_images, generated_images, args.device, args.batch_size
-        )
-        lpips_score = calculate_lpips(
-            real_images, generated_images, lpips, args.device, args.batch_size
-        )
-        rows.append(
-            {
-                "operator": display_name,
-                "psnr": psnr_score,
-                "ssim": ssim_score,
-                "lpips": lpips_score,
-                "fid": fid_score,
-            }
-        )
+            generated_features = extract_features(
+                generated_images, inception, args.device, args.batch_size
+            )
+            fid_score = fid.compute_metric(real_features, generated_features).item()
+            psnr_score, ssim_score = calculate_psnr_ssim(
+                real_images, generated_images, args.device, args.batch_size
+            )
+            lpips_score = calculate_lpips(
+                real_images, generated_images, lpips, args.device, args.batch_size
+            )
+            rows.append(
+                {
+                    "method": method,
+                    "operator": display_name,
+                    "psnr": psnr_score,
+                    "ssim": ssim_score,
+                    "lpips": lpips_score,
+                    "fid": fid_score,
+                }
+            )
 
     print(
         tabulate(
             rows,
             headers={
+                "method": "Method",
                 "operator": "Operator",
                 "psnr": "PSNR",
                 "ssim": "SSIM",

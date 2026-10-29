@@ -1,6 +1,11 @@
-source ~/.bashrc
+#!/usr/bin/env bash
+set -euo pipefail
 
-job_slot_to_gpu=(-1 0 1 2 3 4 7)
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
+source ~/.bashrc
+cd "$repo_root"
+
+job_slot_to_gpu=(-1 1 2 3 4 5 6 7)
 
 env_parallel \
     --delay 3 \
@@ -9,7 +14,7 @@ env_parallel \
     --header : \
     --colsep , \
     CUDA_VISIBLE_DEVICES='${job_slot_to_gpu[(( ({%} % (${#job_slot_to_gpu[@]} - 1) ) + 1 ))]}' \
-    python DAS_sample_noiseless.py \
+    python -m experiments.noiseless.{method} \
         --save \
         --plot \
         --seed {seed} \
@@ -17,5 +22,6 @@ env_parallel \
         --img_id {id} \
         --operator {op} \
     ::: seed 42 \
-    ::: op gaussian_blur motion_blur down_sampling inpainting_random\
-    :::: ids.csv
+    ::: op gaussian_blur motion_blur down_sampling inpainting_random \
+    ::: method rpcn das crepe \
+    :::: "$repo_root/ids.csv"

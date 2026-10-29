@@ -1,4 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 source ~/.bashrc
+cd "$repo_root"
 
 job_slot_to_gpu=(-1 0 1 2 3 4 7)
 
@@ -9,7 +14,7 @@ env_parallel \
     --header : \
     --colsep , \
     CUDA_VISIBLE_DEVICES='${job_slot_to_gpu[(( ({%} % (${#job_slot_to_gpu[@]} - 1) ) + 1 ))]}' \
-    python RpCN_sample_noiseless.py \
+    python -m experiments.noiseless.rpcn \
         --save \
         --plot \
         --seed {seed} \
@@ -18,4 +23,4 @@ env_parallel \
         --operator {op} \
     ::: seed 42 \
     ::: op gaussian_blur motion_blur down_sampling inpainting_random\
-    :::: ids.csv
+    :::: "$repo_root/ids.csv"
