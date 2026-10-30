@@ -1,7 +1,10 @@
 __pycache__/
 *.pyc
 *.sqlite
-generated/
+generated/*
+!generated/compute_diversity.py
+!generated/compute_reward.py
+!generated/prompt_ids.csv
 */generated/
 *.png
 *.jpg

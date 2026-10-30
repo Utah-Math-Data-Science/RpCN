@@ -55,6 +55,41 @@ v1.5
 v2.1
 ```
 
+## DAS Experiments
+
+Run the complete RpCN, CREPE, and DAS sweep with:
+
+```bash
+bash image_gen_job.sh
+```
+
+The job runs all three Stable Diffusion models. DAS is run with both
+`alpha_kl=0.1` and `alpha_kl=0.01`.
+
+Results are kept separate by configuration:
+
+```text
+generated/<model>_2/DAS_0.1/
+generated/<model>_2/DAS_0.01/
+```
+
+For a single prompt, `--output_label` is optional because it is derived from
+`--alpha_kl`:
+
+```bash
+python DAS_sample_new.py --model v1.5 --img_id 004971-0071 --alpha_kl 0.01
+```
+
+Evaluate all methods and configurations in ordered tables with:
+
+```bash
+python evaluate_results.py
+```
+
+The evaluator reports the mean of each prompt's maximum image reward and the
+mean pairwise CLIP diversity among its four samples. It requires every prompt
+to be complete by default; pass `--allow_missing` to evaluate partial runs.
+
 
 ## Reward Model
 

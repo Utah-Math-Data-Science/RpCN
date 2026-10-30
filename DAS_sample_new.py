@@ -75,8 +75,8 @@ def main():
     )
     parser.add_argument(
         "--output_label",
-        default="DAS",
-        help="Output directory label",
+        default=None,
+        help="Output directory label (default: DAS_<alpha_kl>)",
     )
     args = parser.parse_args()
 
@@ -91,6 +91,8 @@ def main():
         raise ValueError("--ess_threshold must be in (0, 1]")
     if args.gradient_batch_size <= 0:
         raise ValueError("--gradient_batch_size must be positive")
+
+    output_label = args.output_label or f"DAS_{args.alpha_kl:g}"
 
     seed = compute_seed(args.img_id, 31)
     torch.manual_seed(seed)
@@ -160,7 +162,7 @@ def main():
         f"{args.img_id}_das",
         decoded_images,
         rewards,
-        args.output_label,
+        output_label,
     )
 
 

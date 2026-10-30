@@ -15,5 +15,7 @@ matplotlib
 tqdm
 
 image-reward>=1.5
+tabulate
+clip @ git+https://github.com/openai/CLIP.git
 
 hydra-orm @ git+https://github.com/reepoi/hydra-orm.git@09f72ba522e5fd74f2df7dc86ebd8ab594d15a29
