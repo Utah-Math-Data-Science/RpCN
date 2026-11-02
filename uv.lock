@@ -1336,7 +1336,7 @@ requires-dist = [
     { name = "polars", extras = ["pyarrow"], specifier = ">=1.40.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "torch", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "ttg", editable = "../new-pkg-impl" },
+    { name = "ttg", git = "https://github.com/Utah-Math-Data-Science/RpCN?branch=main" },
 ]
 
 [[package]]
@@ -1357,24 +1357,9 @@ wheels = [
 [[package]]
 name = "ttg"
 version = "0.1.0"
-source = { editable = "../new-pkg-impl" }
+source = { git = "https://github.com/Utah-Math-Data-Science/RpCN?branch=main#21047ae0a71e06fc685c80ccea98711934d6d682" }
 dependencies = [
     { name = "array-api-compat" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "array-api-compat", specifier = ">=1.14" },
-    { name = "jax", marker = "extra == 'jax'", specifier = ">=0.4.26" },
-    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
-]
-provides-extras = ["jax", "torch"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "array-api-strict", specifier = ">=2.5" },
-    { name = "hypothesis", specifier = ">=6.100" },
-    { name = "pytest", specifier = ">=8" },
 ]
 
 [[package]]

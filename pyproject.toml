@@ -27,7 +27,7 @@ torch = [
     { index = "pytorch" },
 ]
 ttg = [
-    { path = "../new-pkg-impl", editable = true },
+    { git = "https://github.com/Utah-Math-Data-Science/RpCN", branch = "main" },
 ]
 
 [[tool.uv.index]]
