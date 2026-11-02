@@ -1,5 +1,5 @@
-Residual preconditioned Crank-Nicolson Toy Example
-==================================================
+Residual preconditioned Crank-Nicolson Synthetic Example
+========================================================
 
 Installation
 ============
