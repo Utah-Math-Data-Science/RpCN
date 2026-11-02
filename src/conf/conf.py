@@ -62,7 +62,7 @@ class Conf(orm.InheritableTable):
         '_self_',
     ])
     root_dir: str = field(default=str(userfm.utils.DIR_ROOT.resolve()))
-    out_dir: str = field(default=str((userfm.utils.DIR_ROOT/'..'/'..'/'..'/'out'/'rpcn-camera-ready').resolve()))
+    out_dir: str = field(default=str((userfm.utils.DIR_ROOT/'..'/'..'/'..'/'out'/'rpcn').resolve()))
     run_subdir: str = field(default='runs')
     prediction_filename: str = field(default='output')
     device: str = field(default='cuda')
