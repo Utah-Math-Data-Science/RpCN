@@ -2247,7 +2247,7 @@ wheels = [
 [[package]]
 name = "spt-guidance"
 version = "0.1.0"
-source = { editable = "../main" }
+source = { git = "https://github.com/Utah-Math-Data-Science/SPT?branch=main#8ac7bf010593c69c2562460ecc83eb8818c87a26" }
 
 [[package]]
 name = "sqlalchemy"
@@ -2445,24 +2445,9 @@ wheels = [
 [[package]]
 name = "ttg"
 version = "0.1.0"
-source = { editable = "../new-pkg-impl" }
+source = { git = "https://github.com/Utah-Math-Data-Science/RpCN?branch=main#21047ae0a71e06fc685c80ccea98711934d6d682" }
 dependencies = [
     { name = "array-api-compat" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "array-api-compat", specifier = ">=1.14" },
-    { name = "jax", marker = "extra == 'jax'", specifier = ">=0.4.26" },
-    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
-]
-provides-extras = ["jax", "torch"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "array-api-strict", specifier = ">=2.5" },
-    { name = "hypothesis", specifier = ">=6.100" },
-    { name = "pytest", specifier = ">=8" },
 ]
 
 [[package]]
@@ -2524,9 +2509,9 @@ requires-dist = [
     { name = "orbax-checkpoint", specifier = ">=0.11.31" },
     { name = "polars", extras = ["pyarrow"], specifier = ">=1.37.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
-    { name = "spt-guidance", editable = "../main" },
+    { name = "spt-guidance", git = "https://github.com/Utah-Math-Data-Science/SPT?branch=main" },
     { name = "torch", specifier = ">=2.9.1", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "ttg", editable = "../new-pkg-impl" },
+    { name = "ttg", git = "https://github.com/Utah-Math-Data-Science/RpCN?branch=main" },
 ]
 
 [[package]]

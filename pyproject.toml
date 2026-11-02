@@ -41,8 +41,8 @@ torch = [
 hydra-orm = [
     { git = "https://github.com/reepoi/hydra-orm", tag = "v0.2.0" },
 ]
-spt-guidance = { path = '../main', editable = true }
-ttg = { path = "../new-pkg-impl", editable = true }
+spt-guidance = { git = "https://github.com/Utah-Math-Data-Science/SPT", branch = "main" }
+ttg = { git = "https://github.com/Utah-Math-Data-Science/RpCN", branch = "main" }
 
 [[tool.uv.index]]
 name = "pytorch"
