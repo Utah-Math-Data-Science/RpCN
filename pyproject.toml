@@ -18,6 +18,7 @@ dependencies = [
     "spt-guidance>=0.1.0",
     "torch>=2.11.0",
     "tqdm>=4.67.1",
+    "ttg>=0.1.0",
 ]
 
 [project.scripts]
@@ -36,7 +37,10 @@ hydra-orm = [
     { git = "https://github.com/reepoi/hydra-orm" },
 ]
 spt-guidance = [
-    { path = "../Mean_Flow_Steering", editable = true },
+    { path = "../main", editable = true },
+]
+ttg = [
+    { path = "../new-pkg-impl", editable = true },
 ]
 
 [[tool.uv.index]]
@@ -45,8 +49,8 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
