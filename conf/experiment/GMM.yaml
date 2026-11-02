@@ -1,5 +1,0 @@
-# @package _global_
-
-defaults:
-  - /setting@setting: GMMExperiment
-  - _self_

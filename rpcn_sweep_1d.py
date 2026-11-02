@@ -12,7 +12,7 @@ with app.setup:
     import seaborn as sns
     import torch
 
-    # ttg_1d.py lives next to this notebook.
+    # ttg_1d.py and the helper modules live next to this notebook.
     if str(mo.notebook_dir()) not in sys.path:
         sys.path.insert(0, str(mo.notebook_dir()))
     from ttg_1d import build_problem, measure, rpcn_nfe, run_rpcn
@@ -46,7 +46,7 @@ def _():
     sweep_batch_size = mo.ui.number(start=128, stop=32768, step=128, value=9984, label='Batch size')
 
     sweep_replicas = mo.ui.text(value='1,2,3,4', label='Replicas $K$')
-    sweep_pcn_steps = mo.ui.text(value='1,3,5,7,9', label='pCN steps $M$')
+    sweep_pcn_steps = mo.ui.text(value='5,7,9', label='pCN steps $M$')
     sweep_run = mo.ui.run_button(label='Run sweep')
 
     mo.vstack([
@@ -140,7 +140,7 @@ def _(
 
 @app.cell
 def _(df_sweep):
-    from toy.plots import save_all_subfigures
+    from plots import save_all_subfigures
     from pathlib import Path
     SAVE_DIR = Path('~/Overleaf/RpCN/imgs/toy_example').expanduser()
     def _heatmaps():

@@ -21,8 +21,8 @@ with app.setup:
     import ttg
     from ttg.backend import TorchBackend
 
-    import toy.prob_path
-    from toy.model import EnsembleDenoiser
+    from model import EnsembleDenoiser
+    from prob_path import EDM
 
     pt = 1/72.27
     page_width = 397.48499*pt
@@ -182,7 +182,7 @@ def build_problem(
     with torch.random.fork_rng(devices=[device]):
         torch.manual_seed(seed=seeds['training_samples'])
         training_samples = gmm.sample((n_training_samples,))[:, None]
-    prob_path = toy.prob_path.EDM(data_std=gmm.stddev, sigma_min=1e-3, sigma_max=10)
+    prob_path = EDM(data_std=gmm.stddev, sigma_min=1e-3, sigma_max=10)
     # Batched over (noise level, particle), the `network(x [B, *D], t [B])` shape ttg expects.
     denoiser = torch.vmap(
         partial(EnsembleDenoiser.denoise, training_samples, smoothing_std=0.0, generator=torch.Generator(device=device).manual_seed(seeds['denoiser'])),
@@ -223,7 +223,7 @@ def build_problem(
         dtype=training_samples.dtype,
         event_shape=tuple(training_samples.shape[1:]),
         schedule=schedule,
-        # Reverse-SDE Euler-Maruyama step, as in `Euler.step` in toy.model.
+        # Reverse-SDE Euler-Maruyama step, as in `Euler.step` in model.py.
         reverse_step=ttg.EulerMaruyama(ttg.ReverseSDE(schedule), ttg.Direction.BACKWARD),
         evaluate=evaluate,
     )
@@ -620,7 +620,7 @@ def _(
     samples_fk,
     samples_rpcn,
 ):
-    from toy.plots import save_all_subfigures
+    from plots import save_all_subfigures
     from pathlib import Path
     SAVE_DIR = Path('~/Overleaf/RpCN/imgs/toy_example').expanduser()
     def _methods_plot():

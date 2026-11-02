@@ -2,42 +2,29 @@
 name = "toy"
 version = "0.1.0"
 description = "RpCN toy example"
-readme = "README.rst"
-license = { file = "LICENSE" }
 authors = [
     { name = "Taos Transue", email = "taos.transue@utah.edu" }
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "duckdb>=1.5.2",
     "einops>=0.8.2",
-    "hydra-orm>=0.1.0",
-    "marimo[sql]>=0.23.3",
+    "marimo>=0.23.3",
+    "matplotlib>=3.10",
+    "numpy>=2.0",
     "polars[pyarrow]>=1.40.1",
     "seaborn>=0.13.2",
-    "spt-guidance>=0.1.0",
     "torch>=2.11.0",
-    "tqdm>=4.67.1",
     "ttg>=0.1.0",
 ]
 
-[project.scripts]
-toy = "toy:main"
-toy-train = "toy.train_toy.train:main"
-
 [tool.uv]
+package = false
 index-strategy = "unsafe-best-match"
 link-mode = "symlink"
 
 [tool.uv.sources]
 torch = [
     { index = "pytorch" },
-]
-hydra-orm = [
-    { git = "https://github.com/reepoi/hydra-orm" },
-]
-spt-guidance = [
-    { path = "../main", editable = true },
 ]
 ttg = [
     { path = "../new-pkg-impl", editable = true },
@@ -47,13 +34,3 @@ ttg = [
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
-
-[build-system]
-requires = ["uv_build>=0.13.1,<0.14.0"]
-build-backend = "uv_build"
-
-[dependency-groups]
-dev = [
-    "marimo>=0.11.10",
-    "pytest>=8.0.0",
-]
