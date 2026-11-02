@@ -1,5 +1,5 @@
 Residual preconditioned Crank-Nicolson for Dynamical Systems
-===============================================
+============================================================
 
 Installation
 ============
@@ -32,6 +32,7 @@ Supplementary Documentation
 * `Hydra <https://hydra.cc/docs/1.3/intro/>`_: Command-line inferface configuration library for configuring the experiments in this project.
 * `Hydra ORM <https://github.com/reepoi/hydra-orm>`_: Library for saving experiment configurations to an `SQLite <https://sqlite.org/>`_ database.
 * `PyTorch Lightning <https://lightning.ai/docs/pytorch/2.6.0/>`_: Library for handling model training and evaluation loops.
+* `marimo <https://docs.marimo.io/>`_: Reactive Python notebook library used for plotting the results of the experiments.
 
 Training the models
 ===================
@@ -88,3 +89,22 @@ CREPE
 
    python src/userfm/main.py log_constraint_values=true +experiment=SteerLorenz63 steering=CREPE steering.level_count=6 steering.block_count=16 steering.penalization_power=0 steering.tilt=8.29 model.conf=o53qnpz8
    python src/userfm/main.py log_constraint_values=true +experiment=SteerFitzHughNagumo steering=CREPE steering.level_count=2 steering.block_count=16 steering.penalization_power=0 steering.tilt=10.27 model.conf=aezlb9vb
+
+Plotting the results
+====================
+
+The plots are made with marimo notebooks.
+Run them from the repository root, since ``style.mplstyle``, ``runs.sqlite``, and the ground truth constraint values are loaded by relative paths.
+
+Constraint Histograms and Ablations
+-----------------------------------
+
+Change ``SAVE_DIR`` in ``constraint_histograms.py`` to the directory where figures should be saved.
+The ground truth constraint values, computed with the Dormand-Prince solver, are included in the repository as ``Lorenz63SolverConstraintValues.csv`` and ``FitzHughNagumoSolverConstraintValues.csv``.
+
+* The constraint histograms compare Feynman-Kac, CREPE, and Residual preconditioned Crank-Nicolson steering against the Dormand-Prince solver.
+* The ablation heatmaps show the fraction of event trajectories generated for each steering algorithm's hyperparameter sweep (``run_sweep_rpcn.sh``, ``run_sweep_fk.sh``, and ``run_sweep_crepe.sh``).
+
+.. code:: bash
+
+   uv run marimo edit constraint_histograms.py
