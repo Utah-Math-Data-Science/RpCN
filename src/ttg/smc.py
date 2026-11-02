@@ -10,7 +10,7 @@ from .kernels import Gaussian
 from .moves import MoveContext
 from .ops import device_of, leading_shape_of, namespace, steps_first
 from .records import Feature, Point, Record
-from .resample import masked_resample
+from .resample import masked_resample, systematic
 
 Array = Any
 
@@ -32,7 +32,7 @@ class SMCResult:
     log_weights: Array     # [I, N] unnormalised
 
 
-def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potential, policy,
+def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potential, policy, sampler=systematic,
         move=None, move_at=lambda step_index: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """Run sequential Monte Carlo along a grid of times: FK steering, DAS, RpCN, and CREPE's paths.
 
@@ -66,6 +66,8 @@ def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potenti
         The log-tilt whose increments are added to the log-weights (e.g. `FKDiff`; `Zero` for none).
     policy : Never, Every or ESSBelow
         When to resample. Called before each proposal with the step index k.
+    sampler : Callable[[Backend, array, key], array], optional
+        How to draw ancestors when resampling: `systematic` (default) or `ssp`. See `masked_resample`.
     move : Move, optional
         An MCMC move (e.g. `PCN`) applied after each step where `move_at` is true; it leaves the weights
         unchanged. None for no move.
@@ -130,7 +132,8 @@ def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potenti
         record, state, log_weights, n_moves = carry
         key_resample, key_propose, key_move = backend.split(key, 3)
         (record, state), log_weights = masked_resample(backend, (record, state), log_weights,
-                                                       policy.should_resample(log_weights, step_index), key_resample)
+                                                       policy.should_resample(log_weights, step_index), key_resample,
+                                                       sampler)
         target_dist = target.at(record, t_next)                       # also the pCN reference
         proposal_dist = target_dist if proposal is target else proposal.at(record, t_next)
         x = proposal_dist.sample(key_propose, backend)

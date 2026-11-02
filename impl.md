@@ -110,7 +110,7 @@ ttg/
   guidance.py    guidance scales: tilt, normalized
   lam.py         constant, ladder, tabulated, piecewise_linear, das_lambda, level_lambda
   potentials.py  TiltDifference (default increment); Zero, FKDiff, FKMax, FKSum, TiltEnds, ReverseRatio, Sum, Relative
-  resample.py    ess, systematic, categorical, masked_resample; policies Never, Every, ESSBelow
+  resample.py    ess, systematic, ssp, categorical, masked_resample; policies Never, Every, ESSBelow
   moves.py       MoveContext, rescore, tilt_delta, PCN, LangevinMove
   exchange.py    PairSchedule (SequentialSweep, EvenOdd), Exchange (StateSwap), replica_exchange
   smc.py         smc()
@@ -249,7 +249,7 @@ def leading_shape_of(start):                     # Gaussian -> var.shape; Point 
 - `cumulative_sum`;
 - `take` with `axis`.
 
-Nothing uses `searchsorted` (some backends accept only a 1-D sorted first argument and contiguous needles). Sorted lookups count instead: the index of `v` in sorted `a` (side `"left"`) is `sum(a < v)` over `a`'s axis. Systematic and categorical resampling (§10) and `piecewise_linear` (§8) all do this.
+Nothing uses `searchsorted` (some backends accept only a 1-D sorted first argument and contiguous needles). Sorted lookups count instead: the index of `v` in sorted `a` (side `"left"`) is `sum(a < v)` over `a`'s axis. Systematic, SSP and categorical resampling (§10) and `piecewise_linear` (§8) all do this.
 
 ## 5. Schedule
 
@@ -927,6 +927,43 @@ def systematic(backend, log_weights, key):        # [I, N] -> ancestors [I, N]
     ancestors = xp.sum(xp.astype(cdf[:, None, :] < positions[:, :, None], xp.int64), axis=2)   # O(N^2); avoids 2-D searchsorted
     return xp.clip(ancestors, max=N - 1)
 
+def ssp(backend, log_weights, key):               # [I, N] -> ancestors [I, N]: Srinivasan Sampling Process
+    I, N = log_weights.shape
+    device = device_of(log_weights)
+    if N == 1:                                    # static: nothing to pair
+        return xp.zeros((I, 1), dtype=xp.int64, device=device)
+    expected = N * xp.exp(log_weights - logsumexp(log_weights, axis=1, keepdims=True))
+    whole = xp.floor(expected)
+    fraction = expected - whole                   # [I, N] in [0, 1)
+    uniforms = backend.uniform(key, (N - 1, I), fraction.dtype, device=device)
+    columns = xp.arange(1, N, dtype=xp.int64, device=device)
+
+    def pair(carry, step):                        # carry: open index and fraction, [I] each
+        open_index, a = carry
+        column, b, uniform = step
+        total = a + b
+        below_one = total < 1
+        # P(open keeps the mass): a / (a + b) if a + b < 1, else P(open does not become 1) = (1 - a) / (2 - a - b)
+        keep_prob = xp.where(below_one, a / xp.where(total > 0, total, 1.0), (1 - a) / (2 - total))
+        keep_open = uniform < keep_prob
+        resolved_index = xp.where(keep_open, column, open_index)
+        resolved_value = xp.astype(~below_one, total.dtype)
+        open_index = xp.where(keep_open, open_index, column)
+        return (open_index, xp.where(below_one, total, total - 1)), (resolved_index, resolved_value)
+
+    start = (xp.zeros((I,), dtype=xp.int64, device=device), fraction[:, 0])
+    steps = (xp.broadcast_to(columns[:, None], (N - 1, I)), xp.permute_dims(fraction[:, 1:], (1, 0)), uniforms)
+    (open_index, leftover), (resolved_index, resolved_value) = backend.scan(pair, start, steps)
+    resolved_index = xp.concat([resolved_index, open_index[None, :]], axis=0)                   # [N, I]
+    resolved_value = xp.concat([resolved_value, xp.round(leftover)[None, :]], axis=0)          # last one: 0 or 1
+    all_index = xp.arange(N, dtype=xp.int64, device=device)
+    extra = xp.sum(xp.where(resolved_index[:, :, None] == all_index[None, None, :], resolved_value[:, :, None],
+                            xp.zeros_like(resolved_value[:, :, None])), axis=0)                # [I, N]
+    counts = xp.astype(xp.round(whole + extra), xp.int64)
+    ends = xp.cumulative_sum(counts, axis=1)      # copies of index n fill [ends[n-1], ends[n])
+    ancestors = xp.sum(xp.astype(ends[:, None, :] <= all_index[None, :, None], xp.int64), axis=2)   # O(N^2)
+    return xp.clip(ancestors, max=N - 1)
+
 def categorical(backend, log_weights, key):       # [I, N] -> ancestors [I]: one draw per instance, by CDF inversion
     I, N = log_weights.shape
     cdf = _cdf(log_weights)
@@ -934,10 +971,10 @@ def categorical(backend, log_weights, key):       # [I, N] -> ancestors [I]: one
     ancestors = xp.sum(xp.astype(cdf < uniform, xp.int64), axis=1)
     return xp.clip(ancestors, max=N - 1)
 
-def masked_resample(backend, tree, log_weights, resample_mask, key):    # resample_mask: [I] bool
+def masked_resample(backend, tree, log_weights, resample_mask, key, sampler=systematic):   # resample_mask: [I] bool
     I, N = log_weights.shape
     own_index = xp.arange(N, dtype=xp.int64, device=device_of(log_weights))[None, :]
-    ancestors = xp.where(resample_mask[:, None], systematic(backend, log_weights, key), own_index)
+    ancestors = xp.where(resample_mask[:, None], sampler(backend, log_weights, key), own_index)
     tree = tree_map(lambda a: take_rows(a, ancestors), tree)
     return tree, xp.where(resample_mask[:, None], xp.zeros_like(log_weights), log_weights)
 
@@ -958,6 +995,11 @@ class ESSBelow:
     fraction: float
     def should_resample(self, log_weights, step_index): return ess(log_weights) < self.fraction * log_weights.shape[1]
 ```
+
+**Samplers.** A sampler maps `(backend, log_weights, key)` to `[I, N]` ancestor indices, non-decreasing along axis 1; `masked_resample` and `smc` take one as `sampler` (default `systematic`). Both samplers here are unbiased ($\mathbb E[\text{count}_n] = N w_n$).
+
+- `systematic`: one uniform per instance, fully vectorised. Each count is within 1 of $N w_n$.
+- `ssp` (Srinivasan Sampling Process; Srinivasan, 2001; Gerber, Chopin and Whiteley, 2019): each count is $\lfloor N w_n \rfloor$ or $\lceil N w_n \rceil$, and the counts are negatively associated. Index $n$ first gets $\lfloor N w_n \rfloor$ copies; the fractional parts are then made integral two at a time in index order. The open fraction $a$ meets the next fraction $b$: if $a + b < 1$, one of them becomes 0 and the other $a + b$ (the open one keeps it with probability $a / (a + b)$); otherwise one becomes 1 and the other $a + b - 1$ (the open one becomes 1 with probability $(1 - b) / (2 - a - b)$). Either rule keeps each fraction's mean. The pairings are a `backend.scan` of $N - 1$ steps, vectorised over instances; the fractions sum to an integer, so the last open one is rounded to 0 or 1.
 
 **Picking one particle.** To select a single particle per instance (e.g. from an `smc` run's final `log_weights`), use `categorical`. A fixed column of `systematic` is not such a draw: column $j$ always falls in the $j$-th $1/N$ stratum of the CDF.
 
@@ -1156,7 +1198,7 @@ class SMCResult:
     final: Record          # [I, N, ...], carries potential.requires | move.requires | out_needs
     log_weights: Array     # [I, N] unnormalised
 
-def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potential, policy,
+def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potential, policy, sampler=systematic,
         move=None, move_at=lambda step_index: True, out_needs=frozenset({Feature.X0}), key) -> SMCResult:
     """start: Gaussian (sampled, and the first move's reference), Point, or Record; leading axes [I, N].
     u_grid: [S] (shared) or [I, N, S] (per row; increasing or decreasing -- the runner doesn't care)."""
@@ -1195,7 +1237,8 @@ def smc(start, u_grid, *, backend, evaluate, schedule, target, proposal, potenti
         record, state, log_weights, n_moves = carry
         key_resample, key_propose, key_move = backend.split(key, 3)
         (record, state), log_weights = masked_resample(backend, (record, state), log_weights,
-                                                       policy.should_resample(log_weights, step_index), key_resample)
+                                                       policy.should_resample(log_weights, step_index), key_resample,
+                                                       sampler)
         target_dist = target.at(record, t_next)                       # also the pCN reference
         proposal_dist = target_dist if proposal is target else proposal.at(record, t_next)
         x = proposal_dist.sample(key_propose, backend)
@@ -1733,9 +1776,11 @@ The toy target is Gaussian, so tilting by $e^{\lambda \langle w, x_0 \rangle}$ h
 |---|---|
 | R1 | systematic counts: each index count is within 1 of $N w_i$, per instance |
 | R2 | `resample_mask = False` gives an identical tree and identical `log_weights` |
-| R3 | alignment: a tree with fields $a$ and $b = f(a)$ still satisfies $b = f(a)$ after resampling; `None` leaves stay `None` |
+| R3 | alignment: a tree with fields $a$ and $b = f(a)$ still satisfies $b = f(a)$ after resampling, with either sampler; `None` leaves stay `None` |
 | R4 | `ess` lies in $[1, N]$; it equals $N$ for uniform weights and $1$ for a one-hot |
 | R5 | `categorical` returns `[I]` indices in $[0, N)$, always $j$ for a one-hot at $j$; with $I = 20000$ rows of unnormalised weights $\propto (0.1, 0.2, 0.3, 0.4)$, each frequency is within $5$ standard errors of its weight |
+| R6 | `ssp` returns `[I, N]` indices in $[0, N)$, non-decreasing along axis 1, and each index count is $\lfloor N w_n \rfloor$ or $\lceil N w_n \rceil$; with $I = 20000$ rows of unnormalised weights $\propto (0.05, 0.3, 0.15, 0.25, 0.1, 0.15)$, every row's counts sum to $N$ and each mean count is within $5$ standard errors of $N w_n$ |
+| R7 | `ssp` matches an independent SSP implementation (explicit left/right pivotal pair, uniforms drawn `[I, N - 1]`) in distribution, not draw for draw: for a drawn weight row with $N \le 6$, repeated over $I = 20000$ rows with independent keys, every joint count vector's frequency agrees between the two within $6$ pooled standard errors |
 
 **Moves and replica exchange:**
 

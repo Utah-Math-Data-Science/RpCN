@@ -46,11 +46,12 @@ the estimate alone:
    from ttg import (CREPEConfig, DDIMStep, Direction, ESSBelow, EulerMaruyama, EvenOdd, Every,
                     FKDiff, Guided, Langevin, LangevinMove, Never, Noising, PCN, PosteriorStep,
                     SequentialSweep, ReverseSDE, VPLinear, constant, crepe, crepe_sample,
-                    das_lambda, ladder, level_lambda, make_evaluate_torch, on_x0, smc, tilt, x0_from_eps)
+                    das_lambda, ladder, level_lambda, make_evaluate_torch, on_x0, smc, ssp, tilt,
+                    x0_from_eps)
    from ttg.backend import TorchBackend
 
-   bk = TorchBackend()
-   xp = bk.xp                                        # array_api_compat.torch
+   backend = TorchBackend()
+   xp = backend.xp                                   # array_api_compat.torch
    sch = VPLinear()
    D = (3, 32, 32)                                   # event shape of one sample
    I, N = 4, 16                                      # independent instances x particles
@@ -60,23 +61,23 @@ the estimate alone:
    u = xp.linspace(1.0, 0.0, 100, dtype=xp.float32)  # schedule coordinate, noise (1) to data (0)
    P = PosteriorStep(sch)
    start = sch.prior((I, N), D, xp=xp, dtype=xp.float32)
-   key = bk.key(0)
+   key = backend.key(0)
 
 **FK steering**
 
 .. code:: python
 
-   fk = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=P,
+   fk = smc(start, u, backend=backend, evaluate=evaluate, schedule=sch, target=P, proposal=P,
             potential=FKDiff(constant(10.0)), policy=Every(5), key=key)
-   x0, log_w = fk.final.x0, fk.log_w                 # [I, N, *D] samples, [I, N] log-weights
+   x0, log_weights = fk.final.x0, fk.log_weights     # [I, N, *D] samples, [I, N] log-weights
 
 **DAS**
 
 .. code:: python
 
-   lam = das_lambda(sch.time(u), gamma=0.008, alpha_kl=0.01)
-   das = smc(start, u, bk=bk, evaluate=evaluate, schedule=sch, target=P, proposal=Guided(P, tilt(lam)),
-             potential=FKDiff(lam), policy=ESSBelow(0.5), key=key)
+   lam = das_lambda(sch.time(u), growth=0.008, alpha_kl=0.01)
+   das = smc(start, u, backend=backend, evaluate=evaluate, schedule=sch, target=P,
+             proposal=Guided(P, tilt(lam)), potential=FKDiff(lam), policy=ESSBelow(0.5), sampler=ssp, key=key)
 
 **RpCN** — the particle axis is a temperature ladder :math:`0 = \beta_0 < \dots < \beta_K = \beta`;
 there is no resampling.
@@ -86,9 +87,9 @@ there is no resampling.
    K, beta = 3, 10.0
    betas = xp.linspace(0.0, beta, K + 1, dtype=xp.float32)
    P = DDIMStep(sch, eta=1.0)
-   rpcn = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, bk=bk, evaluate=evaluate, schedule=sch,
-              target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
-              move=PCN(n_steps=20, step=constant(0.95), pairs=SequentialSweep()),
+   rpcn = smc(sch.prior((I, K + 1), D, xp=xp, dtype=xp.float32), u, backend=backend, evaluate=evaluate,
+              schedule=sch, target=P, proposal=P, potential=FKDiff(ladder(betas)), policy=Never(),
+              move=PCN(n_proposals=20, step_size=constant(0.95), pairs=SequentialSweep()),
               key=key)
    coldest = rpcn.final.x0[:, K]                     # [I, *D]: the beta_K = beta replica
 
@@ -98,15 +99,17 @@ there is no resampling.
 
    u_levels = (0.0, 0.25, 0.5, 0.75, 1.0)
    lam = level_lambda(sch.time(xp.asarray(u_levels, dtype=xp.float32)), beta=10.0, rho=1.0)
-   B_P = EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD)
-   cfg = CREPEConfig(u_levels=u_levels, K=10, F_P=Noising(sch), F_Q=Noising(sch), B_P=B_P,
-                     B_Q=Guided(B_P, tilt(lam)), lam=lam,
-                     local_move=LangevinMove(Guided(Langevin(h=lambda t: 0.01 * sch.std(t) ** 2), tilt(lam, 0.5))),
-                     local_levels=(0, 1, 2, 3))
-   samples, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
+   noising = Noising(sch)                            # one object for both: the forward terms cancel statically
+   denoising = EulerMaruyama(ReverseSDE(sch), Direction.BACKWARD)
+   langevin = Langevin(step_size=lambda t: 0.01 * sch.std(t) ** 2)
+   cfg = CREPEConfig(u_levels=u_levels, steps_per_gap=10, model_noising=noising, model_denoising=denoising,
+                     proposal_noising=noising, proposal_denoising=Guided(denoising, tilt(lam)), lam=lam,
+                     local_move=LangevinMove(Guided(langevin, tilt(lam, 0.5))), local_levels=(0, 1, 2, 3))
+   samples, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, backend=backend, evaluate=evaluate, schedule=sch,
                              dtype=xp.float32, key=key)   # samples: [100, period, I, 1, *D]
-   more, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, bk=bk, evaluate=evaluate, schedule=sch,
-                          dtype=xp.float32, key=bk.key(1), R0=replicas)   # continue: no re-initialisation
+   more, replicas = crepe(cfg, I, D, 100, lambda r: r.x0, backend=backend, evaluate=evaluate, schedule=sch,
+                          dtype=xp.float32, key=backend.key(1),
+                          initial_ladder=replicas)          # continue: no re-initialisation
 
 ``crepe_sample`` runs CREPE end to end and returns an ``SMCResult`` with one instance per chain. With the lowest
 level above the data end (:math:`u_0 > 0`), it also finishes the level-0 samples the rest of the way to
@@ -115,13 +118,15 @@ level above the data end (:math:`u_0 > 0`), it also finishes the level-0 samples
 .. code:: python
 
    cfg = CREPEConfig(u_levels=(0.25, 0.5, 0.75, 1.0), ...)       # as above, with lam on these levels
-   out, replicas = crepe_sample(cfg, I, D, 80, n_tail=10, exact=False, bk=bk, evaluate=evaluate, schedule=sch,
-                                dtype=xp.float32, key=key, thin=4, burn_in=20)   # 80 samples, 1 per 4 sweeps
-   x0, log_w = out.final.x0, out.log_w                           # [I, 80, *D], [I, 80]
+   out, replicas = crepe_sample(cfg, I, D, 80, n_tail=10, exact=False, backend=backend, evaluate=evaluate,
+                                schedule=sch, dtype=xp.float32, key=key, thin=4,
+                                burn_in=20)                      # 80 samples, 1 per 4 sweeps
+   x0, log_weights = out.final.x0, out.log_weights               # [I, 80, *D], [I, 80]
 
 ``crepe``, ``pool_samples`` and ``crepe_finish`` remain available for custom ``emit`` functions. ``thin`` keeps
 every ``thin``-th sweep's sample, so the particles the finish pays ``n_tail`` evaluations for are closer to
 independent; set it to about twice the autocorrelation time of a cheap emitted scalar such
-as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``R0`` usually needs none.
+as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``initial_ladder`` usually
+needs none.
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.

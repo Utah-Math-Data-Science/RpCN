@@ -13,7 +13,7 @@ from .moves import PCN, LangevinMove, Move, MoveContext, rescore, tilt_delta
 from .potentials import (FKDiff, FKMax, FKSum, Potential, Relative, ReverseRatio, Sum, TiltDifference,
                          TiltEnds, Zero)
 from .records import DuplicateEvaluation, Feature, MissingFeature, PartialRecord, Point, Record
-from .resample import ESSBelow, Every, Never, categorical, ess, masked_resample, systematic
+from .resample import ESSBelow, Every, Never, categorical, ess, masked_resample, ssp, systematic
 from .schedule import (EDM, VP, Beta, BetaDefaults, CosineBeta, LinearBeta, RectifiedFlow, Schedule, ScheduleDefaults,
                        VPCosine, VPLinear)
 from .sde import SDE, Direction, ForwardSDE, ReverseSDE, diffusion_sq_coeff, drift_coeff

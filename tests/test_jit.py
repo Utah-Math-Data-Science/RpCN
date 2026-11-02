@@ -7,7 +7,7 @@ from helpers import toy
 
 from ttg import (PCN, CREPEConfig, Direction, ESSBelow, EulerMaruyama, EvenOdd, Feature, FKMax, Guided, Langevin,
                  LangevinMove, Noising, PosteriorStep, ReverseSDE, VPLinear, constant, crepe, ladder, level_lambda,
-                 smc, tilt)
+                 smc, ssp, systematic, tilt)
 
 JAX = [backend for backend in BACKENDS if backend.name == "jax"]
 pytestmark = pytest.mark.skipif(not JAX, reason="needs JAX")
@@ -21,7 +21,8 @@ def both(f, key):
     return eager, jax.jit(f)(key)
 
 
-def test_smc_jit_matches_eager():
+@pytest.mark.parametrize("sampler", [systematic, ssp], ids=lambda sampler: sampler.__name__)
+def test_smc_jit_matches_eager(sampler):
     backend = JAX[0]
     xp, sch = backend.xp, VPLinear()
     ev, _, _ = toy(backend, sch)
@@ -32,7 +33,7 @@ def test_smc_jit_matches_eager():
     def f(key):
         out = smc(sch.prior((2, 4), (2,), xp=xp, dtype=xp.float64), xp.linspace(1.0, 0.0, 7, dtype=xp.float64),
                   backend=backend, evaluate=ev, schedule=sch, target=P, proposal=Guided(P, tilt(constant(0.5))),
-                  potential=FKMax(ladder(betas)), policy=ESSBelow(0.5),
+                  potential=FKMax(ladder(betas)), policy=ESSBelow(0.5), sampler=sampler,
                   move=PCN(2, ladder(steps), pairs=EvenOdd()), move_at=lambda k: k % 2 == 0,
                   out_needs={Feature.X0}, key=key)
         return out.log_weights, out.final.x, out.final.x0
