@@ -16,40 +16,39 @@ Installation
 
       uv sync
 
-#. Change ``Conf.out_dir`` in ``conf/conf.py`` to the directory where the outputs of all experiments should be stored.
-
-#. Create a ``runs`` directory inside ``Conf.out_dir``.
+#. Change ``SAVE_DIR`` in ``ttg_1d.py`` and ``rpcn_sweep_1d.py`` to the directory where figures should be saved.
+   It defaults to ``~/Overleaf/RpCN/imgs/toy_example``.
 
 Supplementary Documentation
 ===========================
 
-* `Hydra <https://hydra.cc/docs/1.3/intro/>`_: Command-line inferface configuration library for configuring the experiments in this project.
-* `Hydra ORM <https://github.com/reepoi/hydra-orm>`_: Library for saving experiment configurations to an `SQLite <https://sqlite.org/>`_ database.
-* `PyTorch Lightning <https://lightning.ai/docs/pytorch/2.6.0/>`_: Library for handling model training and evaluation loops.
+* `marimo <https://docs.marimo.io/>`_: Reactive Python notebook library used for the experiments in this project.
+* `PyTorch <https://docs.pytorch.org/docs/stable/index.html>`_: Library used for the denoiser and sampling.
 
-Evaluating the models
-=====================
+Running the experiments
+=======================
 
-Below are example experiments of generating samples using a steering algorithm.
-By default, the experiment logs samples to ``{Conf.out_dir}/runs/{Conf.alt_id}/samples.csv``.
+The experiments are marimo notebooks.
+Run them from the repository root, since ``style.mplstyle`` is loaded by a relative path.
+Both notebooks use ``device='cuda'`` by default.
+Experiment parameters (e.g., the RNG seed, number of GMM modes, reward tilt, and NFE budget) are set with the notebook's UI controls.
 
-Metropolis-Hastings Reference
------------------------------
+Steering Comparison
+-------------------
 
-.. code:: bash
-
-   python src/toy/main.py +experiment=GMM steering=MH
-
-Residual preconditioned Crank-Nicolson
---------------------------------------
+Compares Feynman-Kac, DAS, CREPE, and Residual preconditioned Crank-Nicolson steering on a 1D Gaussian mixture model at a matched NFE budget.
+The histograms are saved to ``{SAVE_DIR}/NiceHistogram``.
 
 .. code:: bash
 
-   python src/toy/main.py +experiment=GMM steering=RpCN steering.pcn_update_count=5 steering.n_chains=4
+   uv run marimo edit ttg_1d.py
 
-Feynmann-Kac
-------------
+Residual preconditioned Crank-Nicolson Ablation
+-----------------------------------------------
+
+Sweeps the number of replicas and pCN steps of Residual preconditioned Crank-Nicolson.
+The heatmaps are saved to ``{SAVE_DIR}/Ablation``.
 
 .. code:: bash
 
-   python src/toy/main.py +experiment=GMM steering=FK steering.potential=DIFFERENCE steering.n_chains=20
+   uv run marimo edit rpcn_sweep_1d.py
