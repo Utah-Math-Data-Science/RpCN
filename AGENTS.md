@@ -10,7 +10,7 @@
 
 ## Setup
 - Python `>=3.13`; install with `uv sync`.
-- `ttg` is a local editable dependency at `../new-pkg-impl`; the sibling repo must exist.
+- `ttg` is a git dependency on the `main` branch of `https://github.com/Utah-Math-Data-Science/RpCN` (see `[tool.uv.sources]` in `pyproject.toml`).
 - `torch` is pinned to the custom `pytorch` index in `pyproject.toml`.
 
 ## Running
