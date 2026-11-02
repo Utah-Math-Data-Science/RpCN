@@ -436,6 +436,7 @@ def _(
             proposal=ttg.Guided(reverse_step, ttg.tilt(lam)),
             potential=ttg.FKDiff(lam),
             policy=ttg.ESSBelow(0.5),
+            sampler=ttg.ssp,
             key=key_smc,
         )
         selected = ttg.categorical(backend, das.log_weights, key_select)
@@ -621,7 +622,7 @@ def _(
             sns.lineplot(data=df_density, x='x', y='density', ax=ax, color='tab:orange', lw=1, zorder=-1)
             # sns.lineplot(data=df_density_untilted, x='x', y='density', ax=ax, color='tab:red', lw=1, zorder=1)
             ax.set_xlabel('')
-            xlabel = rf'{method} (KL = ${metrics["kl"]:.3f}$, $\bar{{R}} = {metrics["mean_reward"]:.3f}$)'
+            xlabel = rf'{method} (KL = ${metrics["kl"]:.3e}$, $\bar{{R}} = {metrics["mean_reward"]:.3e}$)'
             print(xlabel)
             # ax.set_xlabel(xlabel)
         g.set(ylabel='')
