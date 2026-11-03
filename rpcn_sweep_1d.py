@@ -46,7 +46,7 @@ def _():
     sweep_batch_size = mo.ui.number(start=128, stop=32768, step=128, value=9984, label='Batch size')
 
     sweep_replicas = mo.ui.text(value='1,2,3,4', label='Replicas $K$')
-    sweep_pcn_steps = mo.ui.text(value='5,7,9', label='pCN steps $M$')
+    sweep_pcn_steps = mo.ui.text(value='1,3,5,7,9', label='pCN steps $M$')
     sweep_run = mo.ui.run_button(label='Run sweep')
 
     mo.vstack([
@@ -144,18 +144,19 @@ def _(df_sweep):
     from pathlib import Path
     SAVE_DIR = Path('~/Overleaf/RpCN/imgs/toy_example').expanduser()
     def _heatmaps():
-        _df_sweep = df_sweep.filter(pl.col('pcn_steps').is_in([1, 3]).not_())
+        # _df_sweep = df_sweep.filter(pl.col('pcn_steps').is_in([1, 3]).not_())
+        _df_sweep = df_sweep
         replicas = _df_sweep['replicas'].unique().sort().to_list()
         pcn_steps = _df_sweep['pcn_steps'].unique().sort().to_list()
         scale = 1e-2  # both heatmaps are in units of 10^-2
         # Font sizes (pt) for the half-page-width figure; cell values are smallest so 3 decimals fit a cell.
-        title_size, label_size, annot_size = 8, 8, 8
+        title_size, label_size, annot_size = 10, 10, 10
         kl_max = _df_sweep['kl'].max() / scale
         panels = {
             # (title, cmap, fmt, extra heatmap kwargs)
             # Color range anchored at 0; vmax as a fraction of the largest KL sets the saturation.
             'kl': (r'KL divergence', 'Purples', '.3f', dict(vmin=0, vmax=.50 * kl_max)),
-            'mean_reward': (r'Mean reward', 'Blues', '.3f', {}),
+            'mean_reward': (r'Mean reward', 'Blues_r', '.3f', {}),
         }
         # One facet per metric, so save_all_subfigures writes each heatmap to its own file.
         df_long = _df_sweep.unpivot(
@@ -172,8 +173,8 @@ def _(df_sweep):
                 **heatmap_kwargs,
             )
         # Both panels side by side within half the page width.
-        fig_width = page_width / 2
-        height = fig_width / golden_ratio
+        fig_width = page_width#/ 2
+        height = fig_width / golden_ratio / 2
         g = sns.FacetGrid(
             df_long, col='metric', col_order=list(panels),
             height=height, aspect=fig_width / 2 / height,
