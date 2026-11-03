@@ -141,6 +141,12 @@ def daps_metric_preprocess(images):
     return (images * 0.5 + 0.5).clamp(0, 1)
 
 
+def daps_fid_quantize(images):
+    images = daps_metric_preprocess(images)
+    images = (images * 255).to(torch.uint8).float() / 255
+    return images * 2 - 1
+
+
 @torch.inference_mode()
 def extract_features(images, model, device, batch_size):
     features = []
@@ -254,7 +260,10 @@ def main():
                 )
 
             generated_features = extract_features(
-                generated_images, inception, args.device, args.batch_size
+                daps_fid_quantize(generated_images),
+                inception,
+                args.device,
+                args.batch_size,
             )
             fid_score = fid.compute_metric(real_features, generated_features).item()
             psnr_score, ssim_score = calculate_psnr_ssim(
