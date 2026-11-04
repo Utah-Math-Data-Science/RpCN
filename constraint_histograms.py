@@ -370,7 +370,7 @@ def _(
     # _fig, _ax = plt.subplots(figsize=(_fig_width, _fig_width / golden_ratio / 3.0))
     _exp_rows = pl.DataFrame([
         dict(dataset_name='Lorenz63', model='FKSteering', alt_id='4574bsrr'),
-        dict(dataset_name='FitzHughNagumo', model='FKSteering', alt_id='njucaaba'),
+        dict(dataset_name='FitzHughNagumo', model='FKSteering', alt_id='apxxdxcd'),
         # dict(dataset_name='Lorenz63', model='SPT', alt_id='7xd4aup5'),
         # dict(dataset_name='FitzHughNagumo', model='SPT', alt_id='5utbygnl'),
         dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=16)['alt_id'][0]),
