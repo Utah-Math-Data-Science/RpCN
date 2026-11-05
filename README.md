@@ -2,24 +2,10 @@
 
 This branch provides an implementation of **RpCN** for **text-to-image generation with Stable Diffusion**.
 
-## Installation
+## Virtual Environment
 
-RpCN requires Python 3.12. Install the generation commands and their pinned,
-known-working dependencies with:
-
-```bash
-python -m pip install .
-```
-
-Install the CLIP-based evaluation command as well with:
-
-```bash
-python -m pip install ".[evaluation]"
-```
-
-PyTorch is pinned to the version used by this branch. If your CUDA setup needs
-a platform-specific PyTorch wheel, install that wheel first using the
-appropriate PyTorch package index.
+Setup a virtual environment with all required dependencies by running 
+```uv sync ``` 
 
 ## Usage
 
@@ -59,25 +45,6 @@ bash image_gen_job.sh
 ```
 
 
-
-Before running the script, ensure that the `--model` argument is set to the desired Stable Diffusion variant.
-
-Supported model options include:
-
-```text
-v1.4
-v1.5
-v2.1
-```
-
-## DAS Experiments
-
-Run the complete RpCN, CREPE, and DAS sweep with:
-
-```bash
-bash image_gen_job.sh
-```
-
 The job runs all three Stable Diffusion models. DAS is run with both
 `alpha_kl=0.1` and `alpha_kl=0.01`.
 
@@ -88,12 +55,7 @@ generated/<model>/DAS_0.1/
 generated/<model>/DAS_0.01/
 ```
 
-For a single prompt, `--output_label` is optional because it is derived from
-`--alpha_kl`:
-
-```bash
-das-sample --model v1.5 --img_id 004971-0071 --alpha_kl 0.01
-```
+## Evaluation
 
 Evaluate all methods and configurations in ordered tables with:
 
