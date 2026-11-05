@@ -28,9 +28,8 @@ Clone the repository and install using ``pip`` or ``uv``:
 Usage
 ====
 
-Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN in one codebase, written against
-the Array API standard (2025.12). It runs on JAX, PyTorch (through `array-api-compat`) and `array_api_strict`.
-The specification is `../impl.md`.
+Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN, written against the Array API standard (2025.12).
+It runs on JAX, PyTorch (through `array-api-compat`) and `array_api_strict`.
 
 Examples
 --------
@@ -123,10 +122,8 @@ level above the data end (:math:`u_0 > 0`), it also finishes the level-0 samples
                                 burn_in=20)                      # 80 samples, 1 per 4 sweeps
    x0, log_weights = out.final.x0, out.log_weights               # [I, 80, *D], [I, 80]
 
-``crepe``, ``pool_samples`` and ``crepe_finish`` remain available for custom ``emit`` functions. ``thin`` keeps
-every ``thin``-th sweep's sample, so the particles the finish pays ``n_tail`` evaluations for are closer to
-independent; set it to about twice the autocorrelation time of a cheap emitted scalar such
-as the reward. ``burn_in`` blocks run first and store nothing; a run continued with ``initial_ladder`` usually
-needs none.
+``crepe``, ``pool_samples`` and ``crepe_finish`` remain available for custom ``emit`` functions.
+``thin`` keeps every ``thin``-th sweep's sample.
+``burn_in`` blocks run first and store nothing.
 
 The results are ``torch.Tensor`` objects. On JAX, the same calls can be wrapped in ``jax.jit``.
