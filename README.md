@@ -24,7 +24,7 @@ experiments/
 ## Virtual Environment 
 
 To setup a virtual environment for this branch run 
-```bash    uv sync   ```
+``` uv sync   ```
 
 
 ## Pretrained Model 
