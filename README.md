@@ -52,8 +52,7 @@ python -m experiments.noisy.crepe --img_id 49000 --operator motion_blur --save
 ```
 
 Noisy samplers require the cached batched observation and fail if it is
-missing. This prevents accidental fallback to a per-image RNG scheme that
-would not match DAPS.
+missing.
 
 Run the corresponding noiseless methods with:
 
