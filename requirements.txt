@@ -1,3 +1,0 @@
-# Install the package and its evaluation commands using the pinned versions in
-# pyproject.toml. This file is retained as a convenience for pip workflows.
--e .[evaluation]
