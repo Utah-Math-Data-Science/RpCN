@@ -163,7 +163,8 @@ def _(duckdb_conn):
         --and not log_constraint_values
         and tilt in (select tilt from SweepDynamicalSystem)
         and level_count in (2, 4, 6, 8)
-        and block_count in (4, 8, 16)
+        --and block_count in (4, 8, 16)
+        and block_count in (8, 12, 20)
         order by dataset_name, level_count, block_count
         """,
         engine=duckdb_conn
@@ -328,7 +329,7 @@ def _(pivoted_fk):
 
 @app.cell
 def _(pivoted_crepe):
-    pivoted_pd_crepe = pivoted_to_pandas(pivoted_crepe, index='level_count', columns_name='Even-odd swaps')
+    pivoted_pd_crepe = pivoted_to_pandas(pivoted_crepe, index='level_count', columns_name='Blocks')
     pivoted_pd_crepe
     return (pivoted_pd_crepe,)
 
@@ -342,15 +343,14 @@ def _(SAVE_DIR, pivoted_pd):
 
 @app.cell
 def _(SAVE_DIR, pivoted_pd_fk):
-    _axes = plot_heatmaps(pivoted_pd_fk, ylabel='Ensemble size', save_dir=SAVE_DIR, model_name='FKSteering')
+    _axes = plot_heatmaps(pivoted_pd_fk, ylabel='Particles', save_dir=SAVE_DIR, model_name='FKSteering')
     mo.hstack(_axes)
     return
 
 
 @app.cell
 def _(SAVE_DIR, pivoted_pd_crepe):
-
-    _axes = plot_heatmaps(pivoted_pd_crepe, ylabel='Marginals', save_dir=SAVE_DIR, model_name='CREPE')
+    _axes = plot_heatmaps(pivoted_pd_crepe, ylabel='Replicas', save_dir=SAVE_DIR, model_name='CREPE')
     mo.hstack(_axes)
     return
 
@@ -373,8 +373,8 @@ def _(
         dict(dataset_name='FitzHughNagumo', model='FKSteering', alt_id='apxxdxcd'),
         # dict(dataset_name='Lorenz63', model='SPT', alt_id='7xd4aup5'),
         # dict(dataset_name='FitzHughNagumo', model='SPT', alt_id='5utbygnl'),
-        dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=16)['alt_id'][0]),
-        dict(dataset_name='FitzHughNagumo', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='FitzHughNagumo', level_count=2, block_count=16)['alt_id'][0]),
+        dict(dataset_name='Lorenz63', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='Lorenz63', level_count=6, block_count=20)['alt_id'][0]),
+        dict(dataset_name='FitzHughNagumo', model='CREPE', alt_id=exp_rows_crepe.filter(dataset_name='FitzHughNagumo', level_count=2, block_count=20)['alt_id'][0]),
         dict(dataset_name='Lorenz63', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='Lorenz63', chain_count=8, pcn_update_count=4)['alt_id'][0]),
         dict(dataset_name='FitzHughNagumo', model='RpCN', alt_id=exp_rows_rpcn.filter(dataset_name='FitzHughNagumo', chain_count=8, pcn_update_count=4)['alt_id'][0]),
     ])
