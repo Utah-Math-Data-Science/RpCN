@@ -315,7 +315,7 @@ def plot_heatmaps(pivoted_pd, ylabel, save_dir, model_name):
 
 @app.cell
 def _(pivoted):
-    pivoted_pd = pivoted_to_pandas(pivoted, index='chain_count', columns_name='$M$')
+    pivoted_pd = pivoted_to_pandas(pivoted, index='chain_count', columns_name='pCN steps $M$')
     pivoted_pd
     return (pivoted_pd,)
 
@@ -336,7 +336,7 @@ def _(pivoted_crepe):
 
 @app.cell
 def _(SAVE_DIR, pivoted_pd):
-    _axes = plot_heatmaps(pivoted_pd, ylabel='$K+1$', save_dir=SAVE_DIR, model_name='RpCN')
+    _axes = plot_heatmaps(pivoted_pd, ylabel='Replicas $K+1$', save_dir=SAVE_DIR, model_name='RpCN')
     mo.hstack(_axes)
     return
 
