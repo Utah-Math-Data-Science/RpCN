@@ -8,6 +8,7 @@ import argparse
 import csv
 import os
 import time 
+from importlib.resources import files
 
 
 
@@ -45,7 +46,10 @@ if __name__ == "__main__":
     parser.add_argument("--pCN_ct", default = 10, type=int, help="How many pCN steps do you want to take?")
     args = parser.parse_args()
 
-    prompt = get_prompt_by_id(json_path = "prompts/prompts.json", img_id = args.img_id)
+    prompt = get_prompt_by_id(
+        json_path=files("rpcn.data").joinpath("prompts.json"),
+        img_id=args.img_id,
+    )
 
     torch.manual_seed(compute_seed(args.img_id, 31))
     
@@ -113,4 +117,3 @@ if __name__ == "__main__":
         print(f'Saving images to: {img_dir}')
         for i, img in enumerate(decoded_images):
             img.save(f"{img_dir}/{args.img_id}_{i}.png")
-

@@ -4,7 +4,22 @@ This branch provides an implementation of **RpCN** for **text-to-image generatio
 
 ## Installation
 
-Install the RpCN package by running ``pip install ../main/.``
+RpCN requires Python 3.12. Install the generation commands and their pinned,
+known-working dependencies with:
+
+```bash
+python -m pip install .
+```
+
+Install the CLIP-based evaluation command as well with:
+
+```bash
+python -m pip install ".[evaluation]"
+```
+
+PyTorch is pinned to the version used by this branch. If your CUDA setup needs
+a platform-specific PyTorch wheel, install that wheel first using the
+appropriate PyTorch package index.
 
 ## Usage
 
@@ -16,7 +31,7 @@ To run the sampling procedure with the hyperparameters used in the paper, specif
 For example:
 
 ```bash
-python RpCN_sample.py --model v1.5 --img_id 004971-0071
+rpcn-sample --model v1.5 --img_id 004971-0071
 ```
 
 ## Reproducing Paper Figures
@@ -24,8 +39,8 @@ python RpCN_sample.py --model v1.5 --img_id 004971-0071
 To reproduce the qualitative image-generation examples from the paper, run:
 
 ```bash
-python RpCN_sample.py --model v1.5 --img_id 004971-0071
-python RpCN_sample.py --model v1.5 --img_id 000562-0011
+rpcn-sample --model v1.5 --img_id 004971-0071
+rpcn-sample --model v1.5 --img_id 000562-0011
 ```
 
 These commands generate samples for the following prompts:
@@ -33,14 +48,14 @@ These commands generate samples for the following prompts:
 | Prompt ID | Prompt |
 |---|---|
 | `004971-0071` | `a sports car, motion blur` |
-| `000562-0011` | `a coffee cup made of cardboard` |
+| `000562-0011` | `a coffee mug made of cardboard` |
 
 ## Reproducing Paper Results
 
 To reproduce the quantitative image-generation results reported in the paper, run:
 
 ```bash
-bash bash_scripts/image_gen_job.sh
+bash image_gen_job.sh
 ```
 
 
@@ -69,21 +84,21 @@ The job runs all three Stable Diffusion models. DAS is run with both
 Results are kept separate by configuration:
 
 ```text
-generated/<model>_2/DAS_0.1/
-generated/<model>_2/DAS_0.01/
+generated/<model>/DAS_0.1/
+generated/<model>/DAS_0.01/
 ```
 
 For a single prompt, `--output_label` is optional because it is derived from
 `--alpha_kl`:
 
 ```bash
-python DAS_sample_new.py --model v1.5 --img_id 004971-0071 --alpha_kl 0.01
+das-sample --model v1.5 --img_id 004971-0071 --alpha_kl 0.01
 ```
 
 Evaluate all methods and configurations in ordered tables with:
 
 ```bash
-python evaluate_results.py
+rpcn-evaluate
 ```
 
 The evaluator reports the mean of each prompt's maximum image reward and the

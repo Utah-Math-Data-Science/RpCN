@@ -1,4 +1,5 @@
 import pandas as pd
+from importlib.resources import files
 import torch
 from PIL import Image
 import clip
@@ -9,7 +10,7 @@ model, preprocess = clip.load("ViT-L/14", device=device, jit=False)
 model.eval()
 
 k = 4
-img_ids = pd.read_csv("prompt_ids.csv")["id"].tolist()
+img_ids = pd.read_csv(files("rpcn.data").joinpath("prompt_ids.csv"))["id"].tolist()
 
 clip_diversities = []
 

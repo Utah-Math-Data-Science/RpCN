@@ -15,3 +15,6 @@ generated/*
 *.safetensors
 *.pt
 inverse/model/checkpoint/
+build/
+dist/
+*.egg-info/

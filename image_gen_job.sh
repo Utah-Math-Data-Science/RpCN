@@ -24,7 +24,7 @@ generate() {
           ;;
       esac
 
-      python RpCN_sample_new.py \
+      rpcn-sample \
         --img_id "$id" \
         --model "$model" \
         --resample_freq 20 \
@@ -33,18 +33,18 @@ generate() {
         "${config[@]}"
       ;;
     CREPE)
-      python CREPE_sample_new.py \
+      crepe-sample \
         --img_id "$id" \
         --model "$model"
       ;;
     DAS_0.1)
-      python DAS_sample_new.py \
+      das-sample \
         --img_id "$id" \
         --model "$model" \
         --alpha_kl 0.1
       ;;
     DAS_0.01)
-      python DAS_sample_new.py \
+      das-sample \
         --img_id "$id" \
         --model "$model" \
         --alpha_kl 0.01
@@ -56,12 +56,14 @@ generate() {
   esac
 }
 
+prompt_file=$(python -c 'from importlib.resources import files; print(files("rpcn.data").joinpath("prompt_ids.csv"))')
+
 # GNU Parallel expands the quoted job slot and replacement fields.
 # shellcheck disable=SC2016,SC1083
 env_parallel --delay 3 --eta \
   -j $((${#job_slot_to_gpu[@]} - 1)) \
   --colsep , --header : \
   CUDA_VISIBLE_DEVICES='${job_slot_to_gpu[{%}]}' generate {id} {model} {sampler} \
-  :::: generated/prompt_ids.csv \
+  :::: "$prompt_file" \
   ::: model v1.4 v1.5 v2.1 \
   ::: sampler RpCN CREPE DAS_0.1 DAS_0.01

@@ -1,5 +1,6 @@
 import os 
-import pandas as pd 
+import pandas as pd
+from importlib.resources import files
 import argparse 
 
 parser = argparse.ArgumentParser()
@@ -12,7 +13,7 @@ csv_dir = f"{args.model}/{args.sampler}/csv"
 files = os.listdir(csv_dir)
 
 
-newdf = pd.read_csv('prompt_ids.csv')
+newdf = pd.read_csv(files("rpcn.data").joinpath("prompt_ids.csv"))
 total_ids = newdf['id'].tolist()
 
 

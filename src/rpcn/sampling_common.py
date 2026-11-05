@@ -2,21 +2,16 @@ import argparse
 import csv
 import json
 import os
-import sys
-from pathlib import Path
+from importlib.resources import files
 
 import torch
 from diffusers import DDPMScheduler, StableDiffusionPipeline
 from PIL import Image
 
-from IR_reward import rm_load
+from .IR_reward import rm_load
 
-
-TTG_SRC = Path(__file__).resolve().parents[1] / "RpCN_updated" / "RpCN" / "src"
-sys.path.insert(0, str(TTG_SRC))
-
-from ttg import Gaussian, make_evaluate_torch, on_x0  # noqa: E402
-from ttg.backend import TorchBackend  # noqa: E402
+from ttg import Gaussian, make_evaluate_torch, on_x0
+from ttg.backend import TorchBackend
 
 
 BATCH_SIZE = 4
@@ -53,8 +48,9 @@ def tensors_to_pil(decoded_tensors, reorder=False):
     return [Image.fromarray(image) for image in images]
 
 
-def get_prompt_by_id(json_path, img_id):
-    with open(json_path) as f:
+def get_prompt_by_id(img_id, json_path=None):
+    prompt_file = json_path or files("rpcn.data").joinpath("prompts.json")
+    with prompt_file.open() as f:
         prompts = json.load(f)
     return next(
         (entry.get("prompt") for entry in prompts if entry.get("id") == img_id),
@@ -242,8 +238,8 @@ def save_rewards_to_csv(csv_path, rewards):
 
 
 def save_results(model, stem, decoded_images, rewards, label):
-    img_dir = f"generated/{model}_2/{label}/images"
-    csv_dir = f"generated/{model}_2/{label}/csv"
+    img_dir = f"generated/{model}/{label}/images"
+    csv_dir = f"generated/{model}/{label}/csv"
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(csv_dir, exist_ok=True)
 

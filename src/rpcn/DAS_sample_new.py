@@ -3,7 +3,7 @@ import time
 
 import torch
 
-from sampling_common import (
+from .sampling_common import (
     BATCH_SIZE,
     NUM_INFERENCE_STEPS,
     StableDiffusionContext,
@@ -80,7 +80,7 @@ def main():
     )
     args = parser.parse_args()
 
-    prompt = get_prompt_by_id("prompts/prompts.json", args.img_id)
+    prompt = get_prompt_by_id(args.img_id)
     if prompt is None:
         raise ValueError(f"Prompt ID not found: {args.img_id}")
     if args.growth <= 0:

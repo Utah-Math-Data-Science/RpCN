@@ -1,7 +1,7 @@
 import torch 
 from diffusers import StableDiffusionPipeline,DDIMScheduler, DDPMScheduler, StableDiffusionXLPipeline
 from PIL import Image
-from IR_reward import rm_load
+from rpcn.IR_reward import rm_load
 import numpy as np 
 import json 
 
@@ -263,13 +263,3 @@ class DDIM_helpers():
             )
 
         return prompt_embeds, negative_prompt_embeds
-
-
-
-
-
-    
-
-
-
-    

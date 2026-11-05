@@ -3,6 +3,7 @@
 import argparse
 import csv
 import sys
+from importlib.resources import files
 from pathlib import Path
 
 import clip
@@ -22,20 +23,19 @@ IMAGES_PER_PROMPT = 4
 
 
 def parse_args():
-    root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="Evaluate reward and CLIP diversity for all T2I experiments."
     )
     parser.add_argument(
         "--generated_dir",
         type=Path,
-        default=root / "generated",
+        default=Path.cwd() / "generated",
         help="Generated results directory",
     )
     parser.add_argument(
         "--prompt_file",
         type=Path,
-        default=root / "generated" / "prompt_ids.csv",
+        default=files("rpcn.data").joinpath("prompt_ids.csv"),
         help="CSV containing the evaluation prompt IDs",
     )
     parser.add_argument(
@@ -154,7 +154,7 @@ def main():
     for model in MODELS:
         rows = []
         for display_name, result_label, stem_suffix in SAMPLERS:
-            result_dir = args.generated_dir / f"{model}_2" / result_label
+            result_dir = args.generated_dir / model / result_label
             reward, diversity = evaluate_configuration(
                 result_dir,
                 prompt_ids,

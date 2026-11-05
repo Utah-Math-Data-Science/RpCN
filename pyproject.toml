@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=80,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpcn"
+version = "0.1.0"
+description = "Text-to-image test-time guidance with RpCN, CREPE, and DAS"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "accelerate==1.14.0",
+    "clip>=1.0",
+    "datasets==5.0.1",
+    "diffusers==0.35.2",
+    "fairscale==0.4.13",
+    "huggingface-hub==0.36.2",
+    "image-reward==1.5",
+    "numpy==2.5.4",
+    "Pillow==13.0.0",
+    "safetensors==0.8.0",
+    "timm==0.6.13",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "transformers==4.53.3",
+    "ttg[torch] @ git+https://github.com/Utah-Math-Data-Science/RpCN.git@21047ae0a71e06fc685c80ccea98711934d6d682",
+]
+
+[project.optional-dependencies]
+evaluation = [
+    "clip @ git+https://github.com/openai/CLIP.git@dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1",
+    "tabulate==0.10.0",
+]
+
+[project.scripts]
+rpcn-sample = "rpcn.RpCN_sample_new:main"
+crepe-sample = "rpcn.CREPE_sample_new:main"
+das-sample = "rpcn.DAS_sample_new:main"
+rpcn-evaluate = "rpcn.evaluate_results:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"rpcn.data" = ["*.csv", "*.json"]
