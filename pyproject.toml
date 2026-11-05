@@ -1,0 +1,31 @@
+[project]
+name = "rpcn"
+version = "0.1.0"
+description = "Inverse-problem experiments with TTG implementations of RpCN, DAS, and CREPE"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "matplotlib==3.11.2",
+    "numpy==2.5.4",
+    "packaging==26.3",
+    "pillow==13.0.0",
+    "pyyaml==6.0.3",
+    "scipy==1.18.1",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "tqdm==4.70.1",
+    "ttg[torch] @ git+https://github.com/Utah-Math-Data-Science/RpCN.git@new-pkg-impl",
+]
+
+[project.optional-dependencies]
+analysis = [
+    "pandas==3.0.6",
+    "piq==0.8.0",
+    "prettytable>=3.0",
+    "tabulate==0.10.0",
+    "torchmetrics>=1.0",
+    "wandb>=0.15",
+]
+
+[tool.uv]
+package = false
