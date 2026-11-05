@@ -2,9 +2,6 @@ __pycache__/
 *.pyc
 *.sqlite
 generated/*
-!generated/compute_diversity.py
-!generated/compute_reward.py
-!generated/prompt_ids.csv
 */generated/
 *.png
 *.jpg
@@ -13,7 +10,6 @@ generated/*
 *.pth
 *.ckpt
 *.safetensors
-*.pt
 inverse/model/checkpoint/
 build/
 dist/
