@@ -71,8 +71,8 @@ Residual preconditioned Crank-Nicolson
 
 .. code:: bash
 
-   python src/userfm/main.py log_constraint_values=true +experiment=SteerLorenz63 steering=RpCN steering.chain_count=8 steering.pcn_update_count=8 steering/intermediate_reward=FeynmanKacIntermediateRewardExpectedSample steering.tilt=8.29 model.conf=o53qnpz8
-   python src/userfm/main.py log_constraint_values=true +experiment=SteerFitzHughNagumo steering=RpCN steering.chain_count=8 steering.pcn_update_count=8 steering/intermediate_reward=FeynmanKacIntermediateRewardExpectedSample steering.tilt=10.27 model.conf=aezlb9vb
+   python src/userfm/main.py log_constraint_values=true +experiment=SteerLorenz63 steering=RpCN steering.chain_count=8 steering.pcn_update_count=4 steering/intermediate_reward=FeynmanKacIntermediateRewardExpectedSample steering.tilt=8.29 model.conf=o53qnpz8
+   python src/userfm/main.py log_constraint_values=true +experiment=SteerFitzHughNagumo steering=RpCN steering.chain_count=8 steering.pcn_update_count=4 steering/intermediate_reward=FeynmanKacIntermediateRewardExpectedSample steering.tilt=10.27 model.conf=aezlb9vb
 
 Feynman-Kac
 ------------
@@ -87,8 +87,8 @@ CREPE
 
 .. code:: bash
 
-   python src/userfm/main.py log_constraint_values=true +experiment=SteerLorenz63 steering=CREPE steering.level_count=6 steering.block_count=16 steering.penalization_power=0 steering.tilt=8.29 model.conf=o53qnpz8
-   python src/userfm/main.py log_constraint_values=true +experiment=SteerFitzHughNagumo steering=CREPE steering.level_count=2 steering.block_count=16 steering.penalization_power=0 steering.tilt=10.27 model.conf=aezlb9vb
+   python src/userfm/main.py log_constraint_values=true +experiment=SteerLorenz63 steering=CREPE steering.level_count=6 steering.block_count=20 steering.penalization_power=0 steering.tilt=8.29 model.conf=o53qnpz8
+   python src/userfm/main.py log_constraint_values=true +experiment=SteerFitzHughNagumo steering=CREPE steering.level_count=2 steering.block_count=20 steering.penalization_power=0 steering.tilt=10.27 model.conf=aezlb9vb
 
 Plotting the results
 ====================
