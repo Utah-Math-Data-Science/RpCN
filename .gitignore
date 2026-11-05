@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.egg-info/
 *.sqlite
 generated/
 */generated/
@@ -10,5 +11,4 @@ generated/
 *.pth
 *.ckpt
 *.safetensors
-*.pt
 inverse/model/checkpoint/
