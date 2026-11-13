@@ -28,7 +28,7 @@ Clone the repository and install using ``pip`` or ``uv``:
 Usage
 ====
 
-Test-time guidance for diffusion models: FK steering, DAS, CREPE and RpCN, written against the Array API standard (2025.12).
+Test-time guidance methods for diffusion models, including FK steering, DAS, CREPE and RpCN, written against the Array API standard (2025.12).
 It runs on JAX, PyTorch (through `array-api-compat`) and `array_api_strict`.
 
 Examples
